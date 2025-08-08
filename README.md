@@ -1,3 +1,1 @@
-# MattChat
-
-Chat with BSV, securely.
+# Convo
