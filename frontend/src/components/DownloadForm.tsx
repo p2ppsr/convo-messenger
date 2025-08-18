@@ -1,8 +1,7 @@
-import React, { FormEvent, useState, useEffect, useRef } from 'react'
+import React, { FormEvent, useEffect, useMemo, useState } from 'react'
 import {
   Button,
   LinearProgress,
-  Grid,
   TextField,
   Typography,
   FormControl,
@@ -13,167 +12,190 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
+  Alert,
+  Stack,
+  Box
 } from '@mui/material'
+import type { SelectChangeEvent } from '@mui/material'
 import { CloudDownload } from '@mui/icons-material'
-import { toast } from 'react-toastify'
-import { download } from 'nanoseek'
 import constants from '../utils/constants'
-import { SelectChangeEvent } from '@mui/material'
-import { Img } from 'uhrp-react'
 
-interface DownloadFormProps { }
+type DownloadFormProps = {}
 
 const DownloadForm: React.FC<DownloadFormProps> = () => {
-  const [overlayServiceURL, setOverlayServiceURL] = useState<string>('')
-  const [overlayServiceURLs, setOverlayServiceURLs] = useState<string[]>(constants.confederacyURLs.map(x => x.toString()))
-  const [downloadURL, setDownloadURL] = useState<string>('')
+  const overlayChoices: string[] = useMemo(() => {
+    const newer = (constants as any).OVERLAY_CHOICES as string[] | undefined
+    if (newer?.length) return newer
+    const legacy = (constants as any).confederacyURLs as string[] | undefined
+    if (legacy?.length) return legacy
+    return [constants.uhrpGateway ?? 'https://your-overlay.example.com']
+  }, [])
+
+  const defaultOverlay = useMemo(() => {
+    const newer = (constants as any).OVERLAY_HOST as string | undefined
+    if (newer) return newer
+    const legacy = (constants as any).confederacyURL as string | undefined
+    return legacy ?? overlayChoices[0]
+  }, [overlayChoices])
+
+  const [overlayServiceURL, setOverlayServiceURL] = useState<string>(defaultOverlay)
+  const [downloadHash, setDownloadHash] = useState<string>('')
   const [loading, setLoading] = useState<boolean>(false)
   const [inputsValid, setInputsValid] = useState<boolean>(false)
   const [openDialog, setOpenDialog] = useState<boolean>(false)
   const [newOption, setNewOption] = useState<string>('')
+  const [errorMsg, setErrorMsg] = useState<string>('')
 
   useEffect(() => {
-    setInputsValid(overlayServiceURL.trim() !== '' && downloadURL.trim() !== '')
-  }, [overlayServiceURL, downloadURL])
+    setInputsValid(overlayServiceURL.trim() !== '' && downloadHash.trim() !== '')
+  }, [overlayServiceURL, downloadHash])
 
-  useEffect(() => {
-    if (constants.confederacyURLs && constants.confederacyURLs.length > 0) {
-      setOverlayServiceURL(constants.confederacyURLs[0].toString())
-    }
-  }, [])
+  const handleSelectChange = (event: SelectChangeEvent<string>) => {
+    const selectedValue = event.target.value
+    if (selectedValue === 'add-new-option') setOpenDialog(true)
+    else setOverlayServiceURL(selectedValue)
+  }
+
+  const handleCloseDialog = () => setOpenDialog(false)
+  const handleAddOption = () => {
+    const v = newOption.trim()
+    if (!v) return
+    setOverlayServiceURL(v)
+    setNewOption('')
+    setOpenDialog(false)
+  }
+
+  const resolveURL = (hashOrUrl: string): string => {
+    if (/^https?:\/\//i.test(hashOrUrl)) return hashOrUrl
+    const base = overlayServiceURL.replace(/\/+$/, '')
+    return `${base}/${hashOrUrl.replace(/^\/+/, '')}`
+  }
 
   const handleDownload = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
+    setErrorMsg('')
     setLoading(true)
     try {
-      // Upload to make use of the nanoseek download function to download the file from an Overlay Service.
-      const { mimeType, data } = await download({
-        UHRPUrl: downloadURL.trim() || '',
-        confederacyHost: overlayServiceURL.trim(),
-      })
+      const url = resolveURL(downloadHash)
+      const resp = await fetch(url, { method: 'GET' })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`)
+      const blob = await resp.blob()
 
-      const blob = new Blob([data], { type: mimeType })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = downloadURL.trim() || 'download'
-
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-    } catch (error) {
-      toast.error('An error occurred during download')
+      const a = document.createElement('a')
+      const objectURL = URL.createObjectURL(blob)
+      a.href = objectURL
+      a.download = url.split('/').pop() || 'download'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(objectURL)
+    } catch (err) {
+      console.error('[DownloadForm] download error:', err)
+      setErrorMsg('Download failed. Please verify the UHRP hash/URL and overlay host.')
     } finally {
       setLoading(false)
     }
   }
 
-  const handleSelectChange = (event: SelectChangeEvent<string>) => {
-    const selectedValue = event.target.value
-    if (selectedValue === 'add-new-option') {
-      setOpenDialog(true)
-    } else {
-      setOverlayServiceURL(selectedValue)
-    }
-  }
-
-  const handleCloseDialog = () => {
-    setOpenDialog(false)
-  }
-
-  const handleAddOption = () => {
-    if (newOption.trim() !== '' && !constants.confederacyURLs.includes(newOption)) {
-      setOverlayServiceURLs(prevConfederacyURLs => [...prevConfederacyURLs, newOption])
-      setOverlayServiceURL(newOption)
-      setNewOption('')
-      setOpenDialog(false)
-    }
-  }
+  const previewURL = useMemo(
+    () => (downloadHash.trim() ? resolveURL(downloadHash.trim()) : ''),
+    [downloadHash, overlayServiceURL]
+  )
 
   return (
     <>
       <form onSubmit={handleDownload}>
-        <Grid container spacing={3}>
-          <Grid item xs={12}>
-            <Typography variant='h4'>Download Form</Typography>
-            <Typography color='textSecondary' paragraph>
-              Download files from NanoStore
+        <Stack spacing={3}>
+          <Box>
+            <Typography variant="h4">Download</Typography>
+            <Typography color="textSecondary">
+              Fetch any UHRP object from your overlay host.
             </Typography>
-          </Grid>
-          <Grid item xs={12}>
-            <FormControl fullWidth variant='outlined'>
-              <InputLabel>Overlay Service URL</InputLabel>
-              <Select
-                value={overlayServiceURL}
-                onChange={handleSelectChange}
-                label='Overlay Service URL'
-              >
-                {overlayServiceURLs.map((url, index) => (
-                  <MenuItem key={index} value={url.toString()}>
-                    {url.toString()}
-                  </MenuItem>
-                ))}
-                <MenuItem value='add-new-option'>+ Add New Option</MenuItem>
-              </Select>
-            </FormControl>
-          </Grid>
-          <Grid item xs={12}>
-            <TextField
-              fullWidth
-              variant='outlined'
-              label='UHRP URL'
-              value={downloadURL}
-              onChange={(e) => setDownloadURL(e.target.value)}
-            />
-            <Grid />
+            {errorMsg && (
+              <Box mt={2}>
+                <Alert severity="error">{errorMsg}</Alert>
+              </Box>
+            )}
+          </Box>
 
-            {/* Dialog for adding a new option */}
-            <Dialog open={openDialog} onClose={handleCloseDialog}>
-              <DialogTitle>Add a New Confederacy Resolver URL</DialogTitle>
-              <DialogContent>
-                <TextField
-                  autoFocus
-                  margin='dense'
-                  label='URL'
-                  type='text'
-                  fullWidth
-                  value={newOption}
-                  onChange={(e) => setNewOption(e.target.value)}
-                />
-              </DialogContent>
-              <DialogActions>
-                <Button onClick={handleCloseDialog}>Cancel</Button>
-                <Button onClick={handleAddOption}>Add</Button>
-              </DialogActions>
-            </Dialog>
-          </Grid>
-          <Grid item>
+          <FormControl fullWidth variant="outlined">
+            <InputLabel>Overlay Host</InputLabel>
+            <Select
+              value={overlayServiceURL}
+              onChange={handleSelectChange}
+              label="Overlay Host"
+            >
+              {overlayChoices.map((url, index) => (
+                <MenuItem key={index} value={url}>
+                  {url}
+                </MenuItem>
+              ))}
+              <MenuItem value="add-new-option">+ Add Custom Host</MenuItem>
+            </Select>
+          </FormControl>
+
+          <TextField
+            fullWidth
+            variant="outlined"
+            label="UHRP Hash or Full URL"
+            value={downloadHash}
+            onChange={(e) => setDownloadHash(e.target.value)}
+          />
+
+          {/* Dialog for adding a new host option */}
+          <Dialog open={openDialog} onClose={handleCloseDialog}>
+            <DialogTitle>Add a Custom Overlay Host</DialogTitle>
+            <DialogContent>
+              <TextField
+                autoFocus
+                margin="dense"
+                label="https://your-overlay.example.com"
+                type="text"
+                fullWidth
+                value={newOption}
+                onChange={(e) => setNewOption(e.target.value)}
+              />
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={handleCloseDialog}>Cancel</Button>
+              <Button onClick={handleAddOption}>Add</Button>
+            </DialogActions>
+          </Dialog>
+
+          <Box>
             <Button
-              variant='contained'
-              color='primary'
-              size='large'
-              type='submit'
+              variant="contained"
+              color="primary"
+              size="large"
+              type="submit"
               disabled={loading || !inputsValid}
               startIcon={<CloudDownload />}
             >
               Download
             </Button>
-            {loading && (
-              <Grid item xs={12}>
-                <LinearProgress />
-              </Grid>
-            )}
-          </Grid>
-        </Grid>
+          </Box>
+
+          {loading && <LinearProgress />}
+
+          {/* Simple preview for images */}
+          {previewURL && (
+            <Box>
+              <Typography variant="subtitle2" gutterBottom>
+                Preview (if image):
+              </Typography>
+              <img
+                src={previewURL}
+                alt="Preview"
+                style={{ maxWidth: '100%', borderRadius: 8 }}
+                onError={() => {
+                }}
+              />
+            </Box>
+          )}
+        </Stack>
       </form>
-      <Img
-        src={downloadURL}
-        loading={<div>Loading...</div>}
-        confederacyHost={overlayServiceURL}
-      />
     </>
   )
 }
-
 
 export default DownloadForm

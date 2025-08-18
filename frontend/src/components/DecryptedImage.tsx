@@ -1,85 +1,78 @@
-import React, { useState } from 'react'
-import useAsyncEffect from 'use-async-effect'
-import { download } from 'nanoseek'
-import { decrypt } from '@babbage/sdk-ts'
+import React, { useEffect, useState } from 'react'
+import { SymmetricKey } from '@bsv/sdk'
+import constants from '../utils/constants'
 
-interface DecryptedImageProps {
-  otherUserId: string,
+type DecryptedImageProps = {
   fileOrHash: File | string
-  imageKey: string
+  threadKey: Uint8Array
+  overlayBaseURL?: string
+  alt?: string
+  maxWidth?: string | number
 }
 
-const DecryptedImage: React.FC<DecryptedImageProps> = (props) => {
-
+const DecryptedImage: React.FC<DecryptedImageProps> = ({
+  fileOrHash,
+  threadKey,
+  overlayBaseURL,
+  alt = 'attachment',
+  maxWidth = '100%'
+}) => {
   const [imgUrl, setImgUrl] = useState<string | undefined>(undefined)
 
-  useAsyncEffect(async () => {
+  useEffect(() => {
+    let revoke: string | null = null
+    let aborted = false
 
-    // check that the hash isn't blank
-    if (typeof(props.fileOrHash) === 'string') {
-
-      console.log(props.fileOrHash)
-
-      if (props.fileOrHash !== 'NO_IMG') {
-
-        try {
-
-          // use nanoseek to download the image
-          const { mimeType, data } = await download({
-            UHRPUrl: props.fileOrHash,
-            confederacyHost: 'https://confederacy.babbage.systems'
-          })
-
-          // create a Blob of the data
-          const encryptedBlob = new Blob([data], { type: mimeType })
-
-          // change the Blob into a Uint8Array
-          const encryptedBlobArrayBuffer: ArrayBuffer = await encryptedBlob.arrayBuffer()
-          const encryptedBlobUint8Array: Uint8Array = new Uint8Array(encryptedBlobArrayBuffer)
-
-          console.log('decrypted image imageKey', props.imageKey)
-
-          // decrypt the Blob
-          const decryptedArray = await decrypt({
-            ciphertext: encryptedBlobUint8Array,
-            protocolID: [1, 'MattChatEncryption'],
-            keyID: props.imageKey,
-            counterparty: props.otherUserId,
-            returnType: 'Uint8Array'
-          })
-
-          // new Blob of the decrypted data
-          const decryptedBlob = new Blob([decryptedArray], { type: mimeType})
-
-          // create object URL of the decrypted image
-          const objectUrl = window.URL.createObjectURL(decryptedBlob)
-
-          // set the the objectURL for the img element to use
-          setImgUrl(objectUrl)
-
-        } catch (e) {
-          console.error(e)
-        }
-      }
-    } else if (props.fileOrHash instanceof File) {
+    ;(async () => {
       try {
-        // create object URL of the passed image
-        const objectUrl = window.URL.createObjectURL(props.fileOrHash)
+        // If the user just selected a file locally, show it directly.
+        if (fileOrHash instanceof File) {
+          const url = URL.createObjectURL(fileOrHash)
+          revoke = url
+          if (!aborted) setImgUrl(url)
+          return
+        }
 
-        // set the objectURL for the img element
-        setImgUrl(objectUrl)
+        // Otherwise, it's a UHRP hash (or a full URL). Fetch the encrypted bytes.
+        const hashOrUrl = fileOrHash.trim()
+        if (!hashOrUrl || hashOrUrl === 'NO_IMG') return
+
+        const base = overlayBaseURL ?? constants.uhrpGateway
+        const url = /^https?:\/\//i.test(hashOrUrl) ? hashOrUrl : `${base.replace(/\/+$/,'')}/${hashOrUrl}`
+
+        const resp = await fetch(url, { method: 'GET' })
+        if (!resp.ok) {
+          console.error('[DecryptedImage] fetch failed', resp.status, resp.statusText)
+          return
+        }
+
+        const encryptedBuf = await resp.arrayBuffer()
+        const encrypted = new Uint8Array(encryptedBuf)
+
+        // Decrypt using the per-thread key.
+        const sym = new SymmetricKey(Array.from(threadKey))
+        const plainArr = sym.decrypt(Array.from(encrypted)) as number[]
+        const plain = new Uint8Array(plainArr)
+
+        const mimeType = resp.headers.get('content-type') || 'application/octet-stream'
+        const blob = new Blob([plain], { type: mimeType })
+        const objectUrl = URL.createObjectURL(blob)
+        revoke = objectUrl
+
+        if (!aborted) setImgUrl(objectUrl)
       } catch (e) {
-        console.error(e)
+        console.error('[DecryptedImage] error', e)
       }
+    })()
+
+    return () => {
+      aborted = true
+      if (revoke) URL.revokeObjectURL(revoke)
     }
+  }, [fileOrHash, threadKey, overlayBaseURL])
 
-  }, [])
-
-  return (
-    <>
-      {imgUrl && <img style={{maxWidth: "100%"}} src={imgUrl} alt='photo sent with message'/>}
-    </>
-  )
+  if (!imgUrl) return null
+  return <img style={{ maxWidth }} src={imgUrl} alt={alt} />
 }
 
 export default DecryptedImage

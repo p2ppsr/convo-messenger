@@ -1,18 +1,30 @@
 import React from 'react'
-import { Typography } from '@mui/material'
+import { Typography, Link, Box } from '@mui/material'
 
 const Footer: React.FC = () => {
   return (
-    <>
-      <br />
-      <br />
-      <Typography align='center' paragraph>
-        Check out the <a href='https://projectbabbage.com/docs/nanostore/concepts/uhrp'>Universal Hash Resolution Protocol</a>!
+    <Box component="footer" sx={{ mt: 6, mb: 2, textAlign: 'center' }}>
+      <Typography variant="body2" paragraph>
+        Check out the{' '}
+        <Link
+          href="https://projectbabbage.com/docs/nanostore/concepts/uhrp"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Universal Hash Resolution Protocol
+        </Link>
+        !
       </Typography>
-      <Typography align='center'>
-        <a href='https://projectbabbage.com'>www.ProjectBabbage.com</a>
+      <Typography variant="body2">
+        <Link
+          href="https://projectbabbage.com"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          www.ProjectBabbage.com
+        </Link>
       </Typography>
-    </>
+    </Box>
   )
 }
 

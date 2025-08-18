@@ -1,6 +1,15 @@
 {
   "schema": "bsv-app",
   "schemaVersion": "1.0",
+  "topicManagers": {
+    "tm_ls_convo": "./backend/src/topic-managers/ConvoTopicManager.ts"
+  },
+  "lookupServices": {
+    "ls_convo": {
+      "serviceFactory": "./backend/src/lookup-services/ConvoLookupServiceFactory.ts",
+      "hydrateWith": "mongo"
+    }
+  },
   "frontend": {
     "language": "react",
     "sourceDirectory": "./frontend"
@@ -11,19 +20,21 @@
       "network": "mainnet",
       "provider": "LARS",
       "run": [
+        "backend",
         "frontend"
       ]
     },
     {
-      "name": "babbage",
+      "name": "Convo App (CARS)",
       "provider": "CARS",
-      "CARSCloudURL": "https://cars.babbage.systems",
-      "projectID": "912ac2269aaaf01353ec77337c34a590",
       "network": "mainnet",
+      "CARSCloudURL": "https://cars.babbage.systems",
+      "projectID": "PROJECT-ID",
+      "frontendHostingMethod": "HTTPS",
       "deploy": [
-        "frontend"
-      ],
-      "frontendHostingMethod": "HTTPS"
+        "frontend",
+        "backend"
+      ]
     }
   ]
 }

@@ -1,250 +1,100 @@
-import React, { ChangeEvent, FormEvent, useContext, useEffect, useState } from 'react'
-import useAsyncEffect from 'use-async-effect'
-import { Avatar, Button, List, ListItem, ListItemAvatar, ListItemText, Stack, styled, TextField } from '@mui/material'
-import { AttachmentRounded, PropaneSharp, SendRounded } from '@mui/icons-material'
-import pushdrop from 'pushdrop'
-import { createAction, decrypt, getTransactionOutputs } from '@babbage/sdk-ts'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import sendMessage from '../utils/sendMessage'
-import { newMessagesContext } from '../App'
-import DecryptedImage from './DecryptedImage'
+import type { OutboundMessageBody } from '../utils/sendMessage'
+import type { ChatMessage } from '../utils/checkMessages'
 
-interface ChatProps {
-  otherUserName: string
-  otherUserId: string
-  myUserId: string
+type Props = {
+  threadId: string
+  myIdentityKeyHex: string
+  threadKey: Uint8Array
+  messages: ChatMessage[]
+  onSent: (m: ChatMessage) => void
 }
 
-export interface ChatMessage {
-  text: string,
-  authorId: string,
-  image?: File | string,
-  imageKey?: string
-}
+export default function Chat({
+  threadId,
+  myIdentityKeyHex,
+  threadKey,
+  messages,
+  onSent
+}: Props) {
+  const [text, setText] = useState('')
+  const [sending, setSending] = useState(false)
+  const listRef = useRef<HTMLDivElement | null>(null)
 
-const VisuallyHiddenInput = styled('input')({
-  clip: 'rect(0 0 0 0)',
-  clipPath: 'inset(50%)',
-  height: 1,
-  overflow: 'hidden',
-  position: 'absolute',
-  bottom: 0,
-  left: 0,
-  whiteSpace: 'nowrap',
-  width: 1,
-})
-
-const Chat: React.FC<ChatProps> = (props) => {
-
-  const context = useContext(newMessagesContext)
-  if (!context) {
-    throw new Error('newMessagesContext must be used within a Provider')
-  }
-  
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [newMessages, setNewMessages] = context
-  const [newMsg, setNewMsg] = useState<string>('')
-  const [newImage, setNewImage] = useState<File | undefined>(undefined)
+  const canSend = useMemo(() => text.trim().length > 0 && !sending, [text, sending])
 
   useEffect(() => {
-    if (newMessages.has(props.otherUserId)) {
-      let tempMessages: Map<string, ChatMessage[]> = newMessages
+    // Auto-scroll to bottom when messages change
+    const el = listRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [messages])
 
-      if (newMessages.get(props.otherUserId)) {
-        setMessages([...messages, ...newMessages.get(props.otherUserId)!])
-      }
+  const submit = async () => {
+    const trimmed = text.trim()
+    if (!trimmed || sending) return
 
-      tempMessages.set(props.otherUserId, [])
+    const body: OutboundMessageBody = { text: trimmed }
 
-      setNewMessages(tempMessages)
-    }
-  }, [newMessages])
+    const optimistic: ChatMessage = { text: trimmed, authorId: myIdentityKeyHex }
+    onSent(optimistic)
+    setText('')
+    setSending(true)
 
-  // load old chats on creation
-  useAsyncEffect(async () => {
-    console.log(props.otherUserId)
-    // load chat outputs from the basket
-    const oldMessageOutputs = await getTransactionOutputs({
-      basket: `mcc_${props.otherUserId}`,
-      limit: 500
-    })
-
-    // decode the loaded chat outputs
-    const decodedOldMessageOutputs = await Promise.all(
-      oldMessageOutputs.map(async (oldMessageOutput) => {
-        try {
-          return await pushdrop.decode({
-            script: oldMessageOutput.outputScript,
-            fieldFormat: 'utf8'
-          })
-        } catch (e) {
-          console.error(e)
-        }
+    try {
+      await sendMessage({
+        threadId,
+        senderIdentityKeyHex: myIdentityKeyHex,
+        threadKey,
+        body
       })
-    )
-
-    // decrypt the field
-    const decryptedDecodedOldFieldZeroes = await Promise.all(
-      decodedOldMessageOutputs.map(async (decodedOldMessageOutput) => {
-        try {
-          return await decrypt({
-            ciphertext: decodedOldMessageOutput.fields[0],
-            protocolID: [1, 'MattChatEncryption'],
-            // handle legacy messages where the keyID was always 1 and not included in the output fields
-            keyID: decodedOldMessageOutput.fields.length === 2 ? '1' : decodedOldMessageOutput.fields[2],
-            counterparty: props.otherUserId,
-            returnType: 'string'
-          })
-        } catch (e) {
-          console.error('Unable to decrypt message: ', decodedOldMessageOutput)
-        }
-      })
-    )
-
-    // parse the field
-    const oldMessages = decryptedDecodedOldFieldZeroes.map((decryptedDecodedOldFieldZero) => {
-      
-      let parsed
-
-      try {
-        parsed = JSON.parse(decryptedDecodedOldFieldZero as string)
-      }
-      catch (e) {
-        console.error(e)
-      }
-
-      return parsed
-    })
-
-    // there are some older messages that aren't formatted the same way, filter those out.
-    // TODO: this might break more than just filtering undefined if I further change the ChatMessage interface
-    const oldFormattedMessages: ChatMessage[] = []
-    oldMessages.forEach((oldMessage) => {
-      if (oldMessage !== undefined) {
-        oldFormattedMessages.push(oldMessage as ChatMessage)
-      }
-    })
-
-    console.log('oldMessageOutputs',oldMessageOutputs)
-    console.log('decodedOldMessageOutputs',decodedOldMessageOutputs)
-    console.log('oldMessages',oldMessages)
-    console.log('oldFormattedMessages',oldFormattedMessages)
-
-    // for now, we need to reverse
-    oldFormattedMessages.reverse()
-
-    setMessages(oldFormattedMessages)
-  }, [])
-
-  const handleImageChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const selectedFiles = e.target.files
-
-    if (selectedFiles && selectedFiles.length > 0) {
-      const currentFile = selectedFiles[0]
-      if (currentFile instanceof File) {
-        setNewImage(currentFile)
-      } else {
-        console.error('Invalid file object', currentFile)
-      }
-    } else {
-      setNewImage(undefined)
+    } catch (e) {
+      console.error('[Chat] send failed', e)
+      // TODO: Show a toast or mark last optimistic message as failed for retry
+    } finally {
+      setSending(false)
     }
-  }
-
-  const handleUploadAndSubmit = async () => {
-    // send the message and file
-    sendMessage(newMsg, props.otherUserId, newImage)
-
-    // clear the message and file 
-    setNewMsg('')
-    setNewImage(undefined)
-
-    // TODO WORK ON DISPLAYING image
-    setMessages([...messages, { text: newMsg, authorId: props.myUserId, image: newImage}])
   }
 
   return (
-    <>
-      <Stack spacing={1}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div
+        ref={listRef}
+        style={{ flex: 1, overflow: 'auto', paddingBottom: 8 }}
+      >
+        {messages.map((m, i) => (
+          <div key={i} style={{ marginBottom: 10 }}>
+            <strong>{m.authorId === myIdentityKeyHex ? 'Me' : m.authorId}</strong>
+            <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
+          </div>
+        ))}
+      </div>
 
-        <List sx={{ width: '100%', height: '100%' }} key={props.otherUserId}>
-
-          {messages.map((message, index) => 
-            <>
-              <ListItem
-                key={index}>
-                {/* <ListItemAvatar>
-                  <Img src={props.avatarURL} width={'30px'} confederacyHost={'https://confederacy.babbage.systems'} />
-                </ListItemAvatar> */}
-                <ListItemText primary={
-                  message.authorId
-                  ? (message.authorId === props.myUserId
-                    ? 'Me'
-                    : props.otherUserName)
-                  : 'Unknown Author'
-                  
-                }
-                secondary={
-                  message.text
-                }
-                secondaryTypographyProps={
-                  // necessary to preserve line breaks
-                  {style: { whiteSpace: 'pre-wrap'}}
-                }
-                ></ListItemText>
-              </ListItem>
-              { 
-                message.hasOwnProperty('image')
-                && message.image
-                && <DecryptedImage otherUserId={props.otherUserId} fileOrHash={message.image} imageKey={message.imageKey ? message.imageKey : '1'}/>
-              }
-            </>
-          )}
-
-        </List>
-
-        <form id='messageForm' onSubmit={(e) => {
-          e.preventDefault()
-          handleUploadAndSubmit()
-        }}>
-          <Stack direction='row' spacing={1}>
-            <TextField
-              onKeyDown={(e) => {
-                // ensure that shift + enter does not submit, but allows new line
-                // only enter alone will allow a submission
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  handleUploadAndSubmit()
-                }
-              }}
-              multiline
-              sx={{width: '100%'}}
-              value={newMsg}
-              onChange={(e) => setNewMsg(e.target.value)}
-            />
-
-            <Button variant='contained' color='primary' type='submit'>
-              <SendRounded />
-            </Button>
-
-            <Button
-              variant='outlined'
-              color='primary'
-              component='label'
-              role={undefined}
-              style={{maxWidth: '72px'}}
-            >
-              { newImage ? <DecryptedImage otherUserId={props.otherUserId} fileOrHash={newImage} imageKey={'NO_KEY'}/> : <AttachmentRounded /> }
-              <VisuallyHiddenInput
-                type='file'
-                onChange={(e) => handleImageChange(e)}
-              />
-            </Button>
-          </Stack>
-        </form>
-         
-      </Stack>
-    </>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={2}
+          style={{ flex: 1, resize: 'vertical' }}
+          placeholder="Type a message…"
+          disabled={sending}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              if (canSend) submit()
+            }
+          }}
+        />
+        <button
+          onClick={submit}
+          disabled={!canSend}
+          aria-busy={sending}
+          aria-label="Send message"
+        >
+          {sending ? 'Sending…' : 'Send'}
+        </button>
+      </div>
+    </div>
   )
 }
-
-export default Chat

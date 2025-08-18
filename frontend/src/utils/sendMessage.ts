@@ -1,144 +1,116 @@
-import pushdrop from 'pushdrop'
-import { createAction, encrypt } from '@babbage/sdk-ts'
-import tokenator from './tokenatorSingleton'
-import getMyId from './getMyId'
-import { ChatMessage } from '../components/Chat'
-import { Random } from '@bsv/sdk'
-import { Utils } from '@bsv/sdk'
-import { publishFile } from 'nanostore-publisher'
+import {
+  PushDrop,
+  WalletClient,
+  Utils,
+  SymmetricKey,
+  Transaction,
+  TopicBroadcaster,
+  Hash
+} from '@bsv/sdk'
+import constants from './constants'
 
-interface TokenatorMessageData {
-  messageBox: string
-  body: any
+export type OutboundMessageBody = {
+  text: string
+  image?: string
 }
 
-export default async function sendMessage(msg: string, recipientId: string, img?: File) {
+export type OutboundMessageParams = {
+  threadId: string
+  senderIdentityKeyHex: string
+  threadKey: Uint8Array
+  body: OutboundMessageBody
+  messageId?: string
+  sentAt?: number
+}
 
-  const myId = await getMyId()
+export default async function sendMessage(params: OutboundMessageParams): Promise<{
+  txid: string
+  vout: number
+  messageId: string
+  sentAt: number
+}> {
+  const {
+    threadId,
+    senderIdentityKeyHex,
+    threadKey,
+    body,
+    messageId = makeMessageId(),
+    sentAt = Date.now()
+  } = params
 
-  let imgHash: string = 'NO_IMG'
-
-  // generate random keyIDs (image key will be generated only if one is attached)
-  const randomizedTextKey: string = Utils.toBase64(Random(64))
-  let randomizedImageKey: string = 'NO_KEY'
-
-  // handle an image if present
-  if (img) {
-    try {
-      // generate a random key for the image
-      randomizedImageKey = Utils.toBase64(Random(64))
-
-      // make Uint8ArrayBuffer of the file
-      const fileArrayBuffer: ArrayBuffer = await img.arrayBuffer()
-      const fileUint8ArrayBuffer: Uint8Array = new Uint8Array(fileArrayBuffer)
-
-      // encrypt the Uint8ArrayBuffer of the file
-      const encryptedFileArrayBuffer = await encrypt({
-        plaintext: fileUint8ArrayBuffer,
-        protocolID: [1, 'MattChatEncryption'],
-        keyID: randomizedImageKey,
-        counterparty: recipientId,
-        returnType: 'Uint8Array'
-      })
-
-      // turn the encrypted version of the file into a Blob
-      const encryptedFile: File = new File([encryptedFileArrayBuffer], 'temp')
-
-      // publish the file
-      const uploadResult = await publishFile({
-        config: {
-          nanostoreURL: 'https://nanostore.babbage.systems'
-        },
-        file: encryptedFile,
-        retentionPeriod: 180,
-      })
-
-      // set the hash
-      imgHash = uploadResult.hash
-
-    } catch (e) {
-      console.error(e)
-    }
+  if (threadKey.length !== 32) {
+    throw new Error(`threadKey must be 32 bytes (got ${threadKey.length})`)
   }
 
-  // create the message
-  const chatMessage: ChatMessage = {
-    text: msg,
-    authorId: myId,
-    image: imgHash
-  }
+  const wallet = new WalletClient('auto', constants.walletHost)
+  const pushdrop = new PushDrop(wallet)
+  const broadcaster = new TopicBroadcaster(
+    [constants.overlayTM],
+    { networkPreset: constants.networkPreset }
+  )
 
-  console.log('imgUrl', imgHash)
+  // 1) Encrypt the plaintext JSON with the thread symmetric key.
+  const plaintext = Utils.toArray(JSON.stringify(body), 'utf8') as number[]
+  const sym = new SymmetricKey(Array.from(threadKey))
+  const sealedAny = sym.encrypt(plaintext)
+  const sealed = Array.isArray(sealedAny)
+    ? sealedAny
+    : (Utils.toArray(sealedAny, 'hex') as number[])
 
-  // stringify data
-  const stringifiedChatMessage: string = JSON.stringify(chatMessage)
+  const iv   = sealed.slice(0, 32)
+  const tail = sealed.slice(32)
+  const tag  = tail.slice(-16)
+  const ct   = tail.slice(0, -16)
 
-  // encrypt data
-  const encryptedChatMessage = await encrypt({
-    plaintext: stringifiedChatMessage,
-    protocolID: [1, 'MattChatEncryption'],
-    keyID: randomizedTextKey,
-    counterparty: recipientId,
-    returnType: 'string'
-  })
+  // 2) Build the PushDrop locking script fields (order must match decoder)
+  const fields: number[][] = [
+    Utils.toArray(threadId, 'utf8') as number[],
+    Utils.toArray(messageId, 'utf8') as number[],
+    Utils.toArray(senderIdentityKeyHex, 'utf8') as number[],
+    Utils.toArray(String(sentAt), 'utf8') as number[],
+    Utils.toArray(Utils.toBase64(iv), 'utf8') as number[],
+    Utils.toArray(Utils.toBase64(tag), 'utf8') as number[],
+    Utils.toArray(Utils.toBase64(ct), 'utf8') as number[]
+  ]
 
-  // sanity check type and value of fields
-  console.log('field[0]', typeof(encryptedChatMessage), encryptedChatMessage)
-  console.log('field[1]', typeof(myId), myId)
-  console.log('field[2]', typeof(randomizedTextKey), randomizedTextKey)
-  console.log('field[3]', typeof(imgHash), imgHash)
-  console.log('field[4]', typeof(randomizedImageKey), randomizedImageKey)
+  const lockingScript = await pushdrop.lock(
+    fields,
+    [2, 'ConvoMessenger'],
+    '1',
+    'anyone',
+    true
+  )
 
-  // create the output script
-  const outputScript = await pushdrop.create({
-    fields: [
-      encryptedChatMessage, // [0]: encrypted message
-      myId,                 // [1]: author id
-      randomizedTextKey,    // [2]: key used in encrypt text message
-      imgHash,              // [3]: image url
-      randomizedImageKey    // [4]: key used to encrypt image
+  // 3) Build the TX output and create/sign with the wallet
+  const { tx } = await wallet.createAction({
+    outputs: [
+      {
+        lockingScript: lockingScript.toHex(),
+        satoshis: 1,
+        outputDescription: 'Convo Message',
+        basket: constants.basket
+      }
     ],
-    protocolID: 'mattchatAlpha',
-    keyID: '1'
-  })
-
-  // submit the transaction to the blockchain
-  const token = await createAction({
-    outputs: [{
-      satoshis: 1,
-      script: outputScript,
-      basket: `mcc_${recipientId}`,
-      customInstructions: ''
-    }],
-    description: 'Sending a MattChat message.'
-  })
-
-  console.log(token)
-
-  // create the tokenator information
-  const tokenatorMessageData: TokenatorMessageData = {
-    messageBox: `mci_${recipientId}`,
-    body: {
-      transaction: {
-        ...token,
-        outputs: [{
-          vout: 0,
-          satoshis: 1,
-          basket: `mcc_${recipientId}`,
-          customInstructions: '',
-          script: outputScript
-        }]
-      },
-      amount: 1
+    description: 'Convo: send message',
+    options: {
+      acceptDelayedBroadcast: false,
+      randomizeOutputs: false
     }
-  }
-
-  console.log('tokenatorMessageData', tokenatorMessageData)
-
-  // send the message
-  await tokenator.sendMessage({
-    recipient: recipientId,
-    messageBox: `mci_${recipientId}`,
-    body: tokenatorMessageData
   })
+
+  if (!tx) throw new Error('Transaction creation failed')
+
+  // 4) Broadcast to overlay topic
+  const transaction = Transaction.fromAtomicBEEF(tx)
+  const txid = transaction.id('hex')
+  const vout = 0
+
+  await broadcaster.broadcast(transaction)
+
+  return { txid, vout, messageId, sentAt }
+}
+
+function makeMessageId(): string {
+  const seed = `${Date.now()}_${Math.random()}`
+  return Utils.toHex(Hash.sha256(Utils.toArray(seed, 'utf8') as number[]))
 }

@@ -1,157 +1,82 @@
-import React, { FormEvent, useState, useEffect, useRef, useContext } from 'react'
-import { Button, LinearProgress, Grid, TextField, Typography, FormControl,
-  InputLabel, Select, MenuItem, Dialog, DialogTitle, DialogContent, DialogActions,
-  DialogContentText, Autocomplete, Box,
+import { useState } from 'react'
+import {
+  Dialog, DialogTitle, DialogContent, DialogActions,
+  Button, Chip, Box, Typography
 } from '@mui/material'
-import { CloudDownload } from '@mui/icons-material'
-import { download } from 'nanoseek'
-import constants from '../utils/constants'
-import { SelectChangeEvent } from '@mui/material'
-import useAsyncEffect from 'use-async-effect'
-import { discoverByAttributes } from '@babbage/sdk-ts'
-import { Identity, parseIdentity, TrustLookupResult } from 'identinator'
-import { Img } from 'uhrp-react'
+import { IdentitySearchField } from '@bsv/identity-react'
+import type { DisplayableIdentity } from '@bsv/sdk'
+
 import { addChat } from '../utils/loadSettings'
-import { Controller, useForm } from 'react-hook-form'
-import { chatIdListContext } from '../App'
 
-interface UserOption {
-  info: Identity
-  key: number
-} 
-
-interface FormFields {
-  selectedUsers: Array<UserOption>
+type Props = {
+  open: boolean
+  close: () => void
 }
 
-export default function NewConversationDialog({open, close}: {open:boolean, close:any}) {
+export default function NewConversationDialog({ open, close }: Props) {
+  const [participants, setParticipants] = useState<DisplayableIdentity[]>([])
 
-  const internalChatIdListContext = useContext(chatIdListContext)
-  if (!internalChatIdListContext) {
-    throw new Error('chatIdListContext must be used within a Provider')
+  const addParticipant = (id: DisplayableIdentity) => {
+    // de-dupe by identityKey
+    setParticipants(prev => prev.find(p => p.identityKey === id.identityKey)
+      ? prev
+      : [...prev, id])
   }
 
-  const [searchTerm, setSearchTerm] = useState<string>('')
-  const [searchResults, setSearchResults] = useState<UserOption[]>([])
-  const [newChatIdentity, setNewChatIdentity] = useState<UserOption | null>(null)
-  const [inputValue, setInputValue] = useState<string>('')
-  const [chatIdList, setChatIdList] = internalChatIdListContext
-  
-  // const [users, setUsers] = useState<UserOption[]>([])
-
-  const initFormFieldValues = {
-    selectedUsers: []
+  const removeParticipant = (identityKey: string) => {
+    setParticipants(prev => prev.filter(p => p.identityKey !== identityKey))
   }
 
-  const methods = useForm<FormFields>({
-    defaultValues: initFormFieldValues
-  })
-
-  const onSubmit = async (data: FormFields) => {
-    // setLoading(true)
+  const handleCreate = async () => {
     try {
-
-      data.selectedUsers.forEach((user) => {
-        addChat(user.info.identityKey)
-        setChatIdList([...chatIdList, user.info.identityKey])
-      })
-      
-    } catch (error) {
-      console.error('An error occurred while creating the chat: ', error)
-    } finally {
-      // setLoading(false)
+      for (const p of participants) {
+        await addChat(p.identityKey)
+      }
       close()
+      setParticipants([])
+    } catch (e) {
+      console.error('[NewConversationDialog] create failed', e)
     }
   }
 
-  useAsyncEffect(async () => {
-    const results = await discoverByAttributes({
-      attributes: {
-        any: searchTerm
-      },
-      description: 'Searching for chat participants'
-    })
-
-    const lookupResults = results as TrustLookupResult[]
-
-    setSearchResults(lookupResults.map((result, index) => ({
-      info: parseIdentity(result),
-      key: index
-    } as UserOption)))
-
-  }, [searchTerm]) 
-
   return (
-    <>
-      <Dialog
-        open={open}
-        onClose={close}
-        PaperProps={{
-          component: 'form',
-          onSubmit: methods.handleSubmit(onSubmit)
-        }}
-      >
+    <Dialog open={open} onClose={close} PaperProps={{ sx: { minWidth: 500, maxWidth: '90vw' } }}>
+      <DialogTitle>New Conversation</DialogTitle>
+      <DialogContent dividers>
+        <Typography variant="body2" sx={{ mb: 1.5 }}>
+          Search for people by name, handle, or email. Select 1 for a private chat, or add multiple for a group chat.
+        </Typography>
 
-        <DialogTitle>New Conversation</DialogTitle>
+        {/* Identity search */}
+        <IdentitySearchField
+          onIdentitySelected={addParticipant}
+          appName="ConvoMessenger"
+        />
 
-        <DialogContent>
-
-          <DialogContentText>Search below for users to add by any attribute.</DialogContentText>
-
-          <DialogContentText>Chats between you and one other person are encrypted. Group chats are not encrypted.</DialogContentText>
-
-          <DialogContentText>Group chats are not encrypted.</DialogContentText>
-
-          <Controller
-            name={'selectedUsers'}
-            control={methods.control}
-            render={({ field: { onChange, value } }) => (
-              <Autocomplete
-                multiple
-                id='users-selection'
-                options={searchResults as UserOption[]}
-                getOptionLabel={(searchResult: UserOption) => searchResult.info.name}
-                renderInput={(params) => (
-                  <TextField
-                    {...params}
-                    variant='standard'
-                    label='Select Users'
-                    placeholder='Enter a name to search'
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                  />
-                )}
-                renderOption={(props, option) => {
-                  const { key, ...optionProps } = props
-                  return (
-                    <Box
-                      {...optionProps}
-                      key={option.key}
-                      component='li'
-                      >
-                        {/* TODO not sure how best to set image size here */}
-                        <Img src={option.info.avatarURL} width={'30px'} confederacyHost={'https://confederacy.babbage.systems'} />
-                        <Typography sx={{marginLeft: '10px'}}>{option.info.name}</Typography>
-                      </Box>
-                  )
-                }}
-                onChange={(_, data) => {
-                  onChange(data)
-                  return data
-                }}
-                defaultValue={initFormFieldValues.selectedUsers}
+        {participants.length > 0 && (
+          <Box sx={{ mt: 2, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+            {participants.map(p => (
+              <Chip
+                key={p.identityKey}
+                label={p.name ?? p.identityKey}
+                onDelete={() => removeParticipant(p.identityKey)}
+                variant="outlined"
               />
-            )}
-          />
+            ))}
+          </Box>
+        )}
+      </DialogContent>
 
-        </DialogContent>
-
-        <DialogActions>
-          <Button onClick={close}>Cancel</Button>
-          <Button type='submit'>Create</Button>
-        </DialogActions>
-
-      </Dialog>
-    </>
+      <DialogActions>
+        <Button onClick={close}>Cancel</Button>
+        <Button
+          variant="contained"
+          onClick={handleCreate}
+          disabled={participants.length === 0}
+        >
+          Create
+        </Button>
+      </DialogActions>
+    </Dialog>
   )
 }

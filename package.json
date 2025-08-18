@@ -1,8 +1,8 @@
 {
-  "name": "@bsv/project",
+  "name": "convo-messenger",
   "private": true,
   "version": "1.0.0",
-  "description": "Standard BSV project structure",
+  "description": "Secure end-to-end encrypted 1:1 and group messaging app built on BSV overlays",
   "scripts": {
     "lars": "lars",
     "cars": "cars",
@@ -14,8 +14,12 @@
   "keywords": [],
   "author": "",
   "license": "SEE LICENSE IN LICENSE.txt",
+  "engines": {
+    "node": ">=18.18 <21"
+  },
+  "packageManager": "pnpm@8.0.0",
   "devDependencies": {
-    "@bsv/cars-cli": "^1.0.4",
-    "@bsv/lars": "^1.0.10"
+    "@bsv/cars-cli": "^1.2.9",
+    "@bsv/lars": "^1.5.4"
   }
 }
