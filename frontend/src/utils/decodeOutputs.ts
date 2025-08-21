@@ -1,56 +1,121 @@
 import { Transaction, PushDrop, Utils } from '@bsv/sdk'
 
-export type CipherBlob = {
+/**
+ * I support two ciphertext formats at the script level:
+ *
+ * 1) Legacy AES-256-GCM (7 fields)
+ * 2) CurvePoint envelope + ciphertext (6 fields)
+ *
+ * Downstream code can check `cipher.alg` to decide how to decrypt.
+ */
+
+/* ---------- Cipher payloads (discriminated union) ---------- */
+
+// Legacy per-thread symmetric encryption
+export type LegacyCipherBlob = {
   alg: 'AES-256-GCM'
-  iv: string
-  tag: string
-  payload: string
-  aad?: string
+  iv: string      // base64
+  tag: string     // base64
+  payload: string // base64 (ciphertext)
+  aad?: string    // base64 (optional)
 }
 
+// CurvePoint: header (varint length-prefixed inside bytes) + encrypted message
+export type CurvepointBlob = {
+  alg: 'CURVEPOINT-1'
+  headerB64: string // base64 of header bytes
+  cipherB64: string // base64 of encrypted message bytes
+}
+
+// One or the other
+export type MessageCipher = LegacyCipherBlob | CurvepointBlob
+
+/* ------------------- ServerMessage shape ------------------- */
 export type ServerMessage = {
   _type: 'message'
   threadId: string
   messageId: string
   sender: string
   sentAt: number
-  cipher: CipherBlob
+  cipher: MessageCipher
 }
 
+/* ------------------------ Helpers -------------------------- */
+function sUtf8(b: number[] | Uint8Array): string {
+  return Utils.toUTF8(b as number[])
+}
+
+function isB64(s: string): boolean {
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(s) && s.length % 4 === 0
+}
+
+/**
+ * I decode a single PushDrop message output from a BEEF transaction.
+ * I do not decrypt; I only expose the raw ciphertext fields in a typed way.
+ */
 export async function decodeOutput(
   beef: number[],
   outputIndex: number
 ): Promise<ServerMessage> {
-  // 1) Decode tx/output from BEEF
+  // 1) Pull out the output
   const tx = Transaction.fromBEEF(beef)
   const out = tx.outputs[outputIndex]
   if (!out) throw new Error(`No output at vout ${outputIndex}`)
 
-  // 2) Decode PushDrop script -> fields[]
+  // 2) Get fields from PushDrop
   const decoded = PushDrop.decode(out.lockingScript)
   const f = decoded.fields
-
-  // Basic sanity
-  if (!f || f.length < 7) {
+  if (!Array.isArray(f) || f.length < 6) {
     throw new Error(`Unexpected field count: ${f?.length ?? 0}`)
   }
 
-  // 3) Map fields (all strings)
-  const threadId = Utils.toUTF8(f[0])
-  const messageId = Utils.toUTF8(f[1])
-  const sender = Utils.toUTF8(f[2])
+  // 3) Common fields
+  const threadId = sUtf8(f[0])
+  const messageId = sUtf8(f[1])
+  const sender = sUtf8(f[2])
 
-  const sentAtStr = Utils.toUTF8(f[3])
-  const sentAt = Number.isFinite(+sentAtStr) ? Number(sentAtStr) : Date.now()
+  const sentAtStr = sUtf8(f[3])
+  const sentAtNum = Number(sentAtStr)
+  const sentAt = Number.isFinite(sentAtNum) ? sentAtNum : Date.now()
 
-  const iv = Utils.toUTF8(f[4])
-  const tag = Utils.toUTF8(f[5])
-  const payload = Utils.toUTF8(f[6])
-  const aad = f.length >= 8 ? Utils.toUTF8(f[7]) : undefined
+  // 4) Decide which cipher family we have
+  let cipher: MessageCipher
 
-  const cipher: CipherBlob = { alg: 'AES-256-GCM', iv, tag, payload, ...(aad ? { aad } : {}) }
+  if (f.length === 6) {
+    // CurvePoint shape: [ threadId, messageId, sender, sentAt, headerB64, cipherB64 ]
+    const headerB64 = sUtf8(f[4])
+    const cipherB64 = sUtf8(f[5])
 
-  const msg: ServerMessage = {
+    if (!isB64(headerB64) || !isB64(cipherB64)) {
+      throw new Error('CurvePoint fields must be base64')
+    }
+
+    cipher = {
+      alg: 'CURVEPOINT-1',
+      headerB64,
+      cipherB64
+    }
+  } else {
+    // Legacy shape (>=7): [ threadId, messageId, sender, sentAt, ivB64, tagB64, ctB64, (optional aad) ]
+    const iv = sUtf8(f[4])
+    const tag = sUtf8(f[5])
+    const payload = sUtf8(f[6])
+    const aad = f.length >= 8 ? sUtf8(f[7]) : undefined
+
+    if (!isB64(iv) || !isB64(tag) || !isB64(payload)) {
+      throw new Error('Legacy AES fields must be base64')
+    }
+
+    cipher = {
+      alg: 'AES-256-GCM',
+      iv,
+      tag,
+      payload,
+      ...(aad ? { aad } : {})
+    }
+  }
+
+  return {
     _type: 'message',
     threadId,
     messageId,
@@ -58,10 +123,11 @@ export async function decodeOutput(
     sentAt,
     cipher
   }
-
-  return msg
 }
 
+/**
+ * Convenience: I decode a list of outputs. Invalid ones are skipped with a warn.
+ */
 export async function decodeOutputs(
   outputs: Array<{ beef: number[]; outputIndex: number }>
 ): Promise<ServerMessage[]> {

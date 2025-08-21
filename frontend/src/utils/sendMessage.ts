@@ -1,28 +1,54 @@
+// src/utils/sendMessage.ts
 import {
   PushDrop,
   WalletClient,
   Utils,
-  SymmetricKey,
   Transaction,
   TopicBroadcaster,
   Hash
 } from '@bsv/sdk'
 import constants from './constants'
+import { CurvePoint } from 'curvepoint'
+import { getThreadParticipants } from './threadStore' // must return identity keys for this thread
 
+/**
+ * Shape of the cleartext message payload that we encrypt per message.
+ * You can add more fields later; this is just the minimal text + optional image ref.
+ */
 export type OutboundMessageBody = {
   text: string
   image?: string
 }
 
+/**
+ * Params used to send a message.
+ *
+ * - `threadId` uniquely identifies the conversation (we use it in the PushDrop fields).
+ * - `senderIdentityKeyHex` is our wallet identity pubkey (compressed hex) that the UI already fetched.
+ * - `threadKey` is deprecated; CurvePoint owns per-message symmetric keys now. Kept for BC only.
+ * - `recipients` optionally overrides who gets access. If omitted, we read them from threadStore.
+ * - `body` is the plaintext we will JSON-serialize and encrypt with CurvePoint.
+ * - `messageId` & `sentAt` can be provided by caller for deterministic testing; otherwise auto-filled.
+ */
 export type OutboundMessageParams = {
   threadId: string
   senderIdentityKeyHex: string
-  threadKey: Uint8Array
+  /** ⛔️ DEPRECATED: no longer used with CurvePoint; kept for backward compatibility */
+  threadKey?: Uint8Array
+  /** Optional explicit recipients; if omitted, pulled from threadStore */
+  recipients?: string[]
   body: OutboundMessageBody
   messageId?: string
   sentAt?: number
 }
 
+/**
+ * Encrypts the message with CurvePoint, builds a PushDrop output carrying the
+ * CurvePoint header + ciphertext, signs the tx with the wallet, and broadcasts
+ * it via the Topic Broadcaster so the overlay indexes it for lookup.
+ *
+ * Returns the basic broadcast info plus the messageId/sentAt that got used.
+ */
 export default async function sendMessage(params: OutboundMessageParams): Promise<{
   txid: string
   vout: number
@@ -32,56 +58,98 @@ export default async function sendMessage(params: OutboundMessageParams): Promis
   const {
     threadId,
     senderIdentityKeyHex,
-    threadKey,
+    recipients: recipientsParam,
     body,
     messageId = makeMessageId(),
     sentAt = Date.now()
   } = params
 
-  if (threadKey.length !== 32) {
-    throw new Error(`threadKey must be 32 bytes (got ${threadKey.length})`)
+  /**
+   * Resolve the list of recipients to seal this message to.
+   * - If caller passed an explicit list, use that.
+   * - Otherwise, pull it from our local threadStore (what we saved at thread creation/sync).
+   * Normalize to lowercase compressed hex and de-dupe.
+   */
+  const recipients = (recipientsParam ?? getThreadParticipants(threadId))
+    .map(k => k?.toLowerCase())
+    .filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v!) === i) as string[]
+
+  if (recipients.length === 0) {
+    throw new Error(
+      `No recipients found for thread ${threadId}. Ensure you store participants on thread creation/sync.`
+    )
   }
 
+  // Defensive: make sure the sender is included, so we can decrypt our own message later.
+  if (!recipients.includes(senderIdentityKeyHex.toLowerCase())) {
+    recipients.push(senderIdentityKeyHex.toLowerCase())
+  }
+
+  /* ===================== 1) Encrypt with CurvePoint =====================
+
+     CurvePoint does:
+       - Generate a fresh symmetric key per message
+       - Encrypt our JSON body with that key
+       - Seal (encrypt) that symmetric key individually to each recipient
+       - Return:
+           * header: a compact structure containing (version, N recipients,
+                     recipient pubkey, sender pubkey, boxed key, …) + a length prefix
+           * encryptedMessage: the payload encrypted under that symmetric key
+
+     On receive, the wallet identity checks the header for an entry addressed to it,
+     recovers the symmetric key, and decrypts the message.
+
+     We namespace this with a stable protocol tuple and keyID so the wallet routes
+     crypto correctly. Keep these constants consistent across the app.
+  */
   const wallet = new WalletClient('auto', constants.walletHost)
-  const pushdrop = new PushDrop(wallet)
-  const broadcaster = new TopicBroadcaster(
-    [constants.overlayTM],
-    { networkPreset: constants.networkPreset }
+  const curve = new CurvePoint(wallet)
+  const plaintext = Utils.toArray(JSON.stringify(body), 'utf8') as number[]
+  const CURVE_KEY_ID = '1'
+
+  const { header, encryptedMessage } = await curve.encrypt(
+    plaintext,
+    [1, 'ConvoCurve'],
+    CURVE_KEY_ID,
+    recipients
   )
 
-  // 1) Encrypt the plaintext JSON with the thread symmetric key.
-  const plaintext = Utils.toArray(JSON.stringify(body), 'utf8') as number[]
-  const sym = new SymmetricKey(Array.from(threadKey))
-  const sealedAny = sym.encrypt(plaintext)
-  const sealed = Array.isArray(sealedAny)
-    ? sealedAny
-    : (Utils.toArray(sealedAny, 'hex') as number[])
+  // Store header and ciphertext as base64 strings in the PushDrop fields
+  const headerB64 = Utils.toBase64(header)
+  const cipherB64 = Utils.toBase64(encryptedMessage)
 
-  const iv   = sealed.slice(0, 32)
-  const tail = sealed.slice(32)
-  const tag  = tail.slice(-16)
-  const ct   = tail.slice(0, -16)
+  /* ===================== 2) Build PushDrop fields =====================
 
-  // 2) Build the PushDrop locking script fields (order must match decoder)
+     For CurvePoint messages we admit the following 6 fields (see Topic Manager):
+       [ threadId, messageId, senderHex, sentAt, headerB64, cipherB64 ]
+
+     The overlay TopicManager recognizes this shape and admits the output to our topic.
+  */
   const fields: number[][] = [
-    Utils.toArray(threadId, 'utf8') as number[],
-    Utils.toArray(messageId, 'utf8') as number[],
-    Utils.toArray(senderIdentityKeyHex, 'utf8') as number[],
-    Utils.toArray(String(sentAt), 'utf8') as number[],
-    Utils.toArray(Utils.toBase64(iv), 'utf8') as number[],
-    Utils.toArray(Utils.toBase64(tag), 'utf8') as number[],
-    Utils.toArray(Utils.toBase64(ct), 'utf8') as number[]
+    Utils.toArray(threadId, 'utf8'),
+    Utils.toArray(messageId, 'utf8'),
+    Utils.toArray(senderIdentityKeyHex, 'utf8'),
+    Utils.toArray(String(sentAt), 'utf8'),
+    Utils.toArray(headerB64, 'utf8'),
+    Utils.toArray(cipherB64, 'utf8')
   ]
 
+  // Lock the PushDrop with the same app protocol family we use elsewhere
+  const pushdrop = new PushDrop(wallet)
   const lockingScript = await pushdrop.lock(
     fields,
-    [2, 'ConvoMessenger'],
+    [1, 'ConvoMessenger'], // app/topic tag for wallet discovery
     '1',
     'anyone',
     true
   )
 
-  // 3) Build the TX output and create/sign with the wallet
+  /* ===================== 3) Create & broadcast action =====================
+
+     We make a single-output action (1 sat) carrying our PushDrop script, then
+     broadcast it via TopicBroadcaster so the overlay’s TM sees and indexes it.
+  */
   const { tx } = await wallet.createAction({
     outputs: [
       {
@@ -100,16 +168,24 @@ export default async function sendMessage(params: OutboundMessageParams): Promis
 
   if (!tx) throw new Error('Transaction creation failed')
 
-  // 4) Broadcast to overlay topic
   const transaction = Transaction.fromAtomicBEEF(tx)
   const txid = transaction.id('hex')
   const vout = 0
 
+  const broadcaster = new TopicBroadcaster([constants.overlayTM], {
+    networkPreset: constants.networkPreset
+  })
   await broadcaster.broadcast(transaction)
 
   return { txid, vout, messageId, sentAt }
 }
 
+/**
+ * makeMessageId()
+ * ----------------
+ * Pseudo-random message identifier (hex) for dedup/reference.
+ * Not a cryptographic nonce for CurvePoint; purely an app-level id we show/store.
+ */
 function makeMessageId(): string {
   const seed = `${Date.now()}_${Math.random()}`
   return Utils.toHex(Hash.sha256(Utils.toArray(seed, 'utf8') as number[]))

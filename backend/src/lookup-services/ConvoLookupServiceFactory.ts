@@ -1,159 +1,326 @@
+// backend/src/lookup-services/ConvoLookupServiceFactory.ts
 import {
-  LookupService, LookupQuestion, LookupFormula,
-  AdmissionMode, SpendNotificationMode, OutputAdmittedByTopic, OutputSpent
+  LookupService,
+  LookupQuestion,
+  LookupFormula,
+  AdmissionMode,
+  SpendNotificationMode,
+  OutputAdmittedByTopic,
+  OutputSpent
 } from '@bsv/overlay'
 import { PushDrop, Utils } from '@bsv/sdk'
 import type { Db } from 'mongodb'
+
+// ✅ correct location for storage
 import { ConvoStorage } from './ConvoStorage'
+
 import type {
-  FindThreadsQuery, FindMessagesQuery, FindMembersQuery, FindProfileQuery, ThreadMember
+  FindThreadsQuery,
+  FindMessagesQuery,
+  FindMembersQuery,
+  FindProfileQuery,
+  ThreadMember,
+  StoredMessageRecord,
+  Thread
 } from '../types.js'
 
+/** Service + protocol constants */
 const SERVICE_NAME = 'ls_convo'
-const TOPIC_NAME = 'tm_ls_convo'
+const TOPIC_NAME   = 'tm_ls_convo'
+const PROTOCOL_TAG = 'convo-v1'
+
+// Small helpers for consistent envelopes/logging
+const asJson = (value: unknown): LookupFormula => ({ type: 'json', value } as any)
+const arrLen = (v: unknown) => (Array.isArray(v) ? v.length : 0)
 
 export class ConvoLookupService implements LookupService {
   readonly admissionMode: AdmissionMode = 'locking-script'
   readonly spendNotificationMode: SpendNotificationMode = 'none'
+
   constructor (public storage: ConvoStorage) {}
 
+  /** Overlay notifies us when an output matching our topic is admitted */
   async outputAdmittedByTopic (payload: OutputAdmittedByTopic): Promise<void> {
     if (payload.mode !== 'locking-script') throw new Error('Invalid mode')
-    if (payload.topic !== TOPIC_NAME) return
-    const { lockingScript, txid, outputIndex } = payload
+
+    const { topic, lockingScript, txid, outputIndex } = payload
+    if (topic !== TOPIC_NAME) return
 
     try {
       const decoded = PushDrop.decode(lockingScript)
-      const fields = decoded.fields.map(a => new Uint8Array(a))
-      const f = (i: number) => Utils.toUTF8(Array.from(fields[i] ?? []))
+      const fields  = decoded.fields
+      const getUtf8 = (i: number) => Utils.toUTF8(fields[i])
 
-      // Message: 7 fields
-      if (fields.length === 7) {
-        const threadId = f(0)
-        const messageId = f(1)
-        const senderKey = f(2)
-        const sentAt = Number(f(3)) || Date.now()
+      // Signer pubkey (identity) from PushDrop chunk[0]
+      const creatorIdentityHex =
+        lockingScript.chunks?.[0]?.data ? Utils.toHex(lockingScript.chunks[0].data!) : 'unknown'
 
-        await this.storage.insertMessage({
-          _type: 'message',
-          threadId, messageId, sender: senderKey, sentAt,
-          txid, outputIndex
-        } as any)
+      // CONTROL records start with ["ls_convo","convo-v1", kind, threadId, ...]
+      if (Array.isArray(fields) && fields.length >= 4) {
+        const f0 = getUtf8(0)
+        const f1 = getUtf8(1)
+        if (f0 === SERVICE_NAME && f1 === PROTOCOL_TAG) {
+          const kind     = getUtf8(2)
+          const threadId = getUtf8(3)
+          const ts       = Date.now()
 
-        await this.storage.upsertThread({
-          _type: 'thread',
-          threadId,
-          createdAt: sentAt,
-          createdBy: senderKey,
-          lastMessageAt: sentAt,
-          memberCount: 0,
-          envelopeVersion: 1
-        } as any)
+          if (kind === 'create_thread') {
+            // fields[4] = title?; fields[5] = JSON payload; fields[6] = optional timestamp
+            const title = fields[4] ? getUtf8(4) : undefined
 
-        await this.storage.upsertMemberships([{
-          _type: 'membership',
-          threadId,
-          memberId: senderKey,
-          role: 'member',
-          joinedAt: sentAt,
-          status: 'active',
-          groupKeyBox: '',
-          groupKeyFrom: senderKey
-        }])
+            // Accept BOTH new envelope+recipients and legacy boxes payloads.
+            let keyEnvelopeB64: string | undefined
+            let recipients: string[] = []
+            let boxes: Record<string, string> = {}
 
-        return
-      }
+            try {
+              if (fields[5]) {
+                const j = JSON.parse(getUtf8(5))
+                if (j && typeof j === 'object') {
+                  if (typeof (j as any).keyEnvelopeB64 === 'string') keyEnvelopeB64 = (j as any).keyEnvelopeB64
+                  if (Array.isArray((j as any).recipients)) {
+                    recipients = (j as any).recipients
+                      .filter((x: unknown) => typeof x === 'string')
+                      .map((x: string) => x.toLowerCase())
+                  }
+                  if ((j as any).boxes && typeof (j as any).boxes === 'object') {
+                    boxes = (j as any).boxes as Record<string, string>
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn('[ls_convo] create_thread payload JSON parse failed:', e)
+            }
 
-      const topic = f(0), proto = f(1), kind = f(2)
-      if (topic === 'ls_convo' && proto === 'convo-v1' && kind === 'create_thread') {
-        const threadId = f(3)
-        const title    = f(4)
-        const boxesRaw = f(5)
-        const creatorIdentityHex = fields[6] ? Utils.toHex(Array.from(fields[6])) : ''
-        const tsStr   = fields[7] ? f(7) : String(Date.now())
-        const ts      = Number(tsStr) || Date.now()
+            const memberCount =
+              (recipients && recipients.length) ||
+              (boxes && Object.keys(boxes).length) ||
+              1
 
-        let boxes: Record<string, string> = {}
-        try { boxes = JSON.parse(boxesRaw)?.boxes || {} } catch {}
+            // Upsert thread summary
+            const tPartial: Partial<Thread> & { threadId: string } = {
+              threadId,
+              title,
+              createdAt: ts,
+              createdBy: creatorIdentityHex,
+              lastMessageAt: ts,
+              memberCount,
+              envelopeVersion: keyEnvelopeB64 ? 2 : 1
+            } as any
+            await this.storage.upsertThread(tPartial)
 
-        await this.storage.upsertThread({
-          _type: 'thread',
-          threadId,
-          title: title || undefined,
-          createdAt: ts,
-          createdBy: creatorIdentityHex || 'unknown',
-          lastMessageAt: ts,
-          memberCount: Object.keys(boxes).length,
-          envelopeVersion: 1
-        } as any)
+            // Persist memberships in whichever format we have
+            if (keyEnvelopeB64 && recipients.length) {
+              type MemberRow = ThreadMember & { groupKeyEnvelopeB64?: string }
+              const memberships: MemberRow[] = recipients.map(memberId => ({
+                _type: 'membership',
+                threadId,
+                memberId,
+                role: 'member',
+                joinedAt: ts,
+                status: 'active',
+                groupKeyEnvelopeB64: keyEnvelopeB64,
+                // keep legacy fields empty in v2
+                groupKeyBox: '',
+                groupKeyFrom: creatorIdentityHex
+              }))
+              await this.storage.upsertMemberships(memberships as unknown as ThreadMember[])
+              console.log('[ls_convo] CONTROL create_thread (envelope)', {
+                threadId, recipients: recipients.length
+              })
+            } else if (boxes && Object.keys(boxes).length) {
+              const memberships: ThreadMember[] = Object.entries(boxes).map(([memberId, boxB64]) => ({
+                _type: 'membership',
+                threadId,
+                memberId: memberId.toLowerCase(),
+                role: 'member',
+                joinedAt: ts,
+                status: 'active',
+                groupKeyBox: boxB64,
+                groupKeyFrom: creatorIdentityHex
+              }))
+              await this.storage.upsertMemberships(memberships)
+              console.log('[ls_convo] CONTROL create_thread (legacy boxes)', {
+                threadId, members: Object.keys(boxes).length
+              })
+            } else {
+              console.warn('[ls_convo] CONTROL create_thread with no recipients/boxes', { threadId })
+            }
 
-        const memberships: ThreadMember[] = Object
-          .entries(boxes as Record<string, string>)
-          .map(([memberId, boxB64]): ThreadMember => ({
-            _type: 'membership',
-            threadId,
-            memberId: memberId.toLowerCase(),
-            role: 'member',
-            joinedAt: ts,
-            status: 'active',
-            groupKeyBox: boxB64,
-            groupKeyFrom: creatorIdentityHex ?? 'unknown'
-          }))
+            // 🔐 record the admission UTXO for this thread
+            try {
+              await this.storage.recordThreadAdmission(threadId, txid, outputIndex)
+            } catch (e) {
+              console.warn('[ls_convo] recordThreadAdmission failed', { threadId, txid, outputIndex, err: e })
+            }
 
-        if (memberships.length) {
-          await this.storage.upsertMemberships(memberships)
+            return
+          }
+
+          // Other control kinds can be handled later
+          console.log('[ls_convo] CONTROL (ignored kind)', { kind, threadId })
+          return
         }
       }
+
+      // MESSAGE records (6 fields):
+      // [ threadId, messageId, senderKeyHex, sentAtMs, headerB64, cipherB64 ]
+      if (!Array.isArray(fields) || fields.length !== 6) return
+
+      const threadId = Utils.toUTF8(fields[0])
+      const messageId = Utils.toUTF8(fields[1])
+      const senderIdentityKeyHex = Utils.toUTF8(fields[2])
+      const sentAtStr = Utils.toUTF8(fields[3])
+      const headerB64 = Utils.toUTF8(fields[4])
+      const cipherB64 = Utils.toUTF8(fields[5])
+
+      const sentAt = Number(sentAtStr) || Date.now()
+      if (!threadId || !messageId) return
+
+      const rec: StoredMessageRecord = {
+        txid,
+        outputIndex,
+        threadId,
+        messageId,
+        sender: senderIdentityKeyHex,
+        sentAt,
+        headerB64,
+        cipherB64,
+        createdAt: new Date()
+      }
+      await this.storage.insertAdmittedMessage(rec)
+      await this.storage.upsertThread({ threadId, lastMessageAt: sentAt } as any)
+
+      // Ensure a membership row for the sender (light presence)
+      const membership: ThreadMember = {
+        _type: 'membership',
+        threadId,
+        memberId: senderIdentityKeyHex.toLowerCase(),
+        role: 'member',
+        joinedAt: sentAt,
+        status: 'active',
+        groupKeyBox: '',
+        groupKeyFrom: ''
+      }
+      await this.storage.upsertMemberships([membership])
+
+      console.log('[ls_convo] MESSAGE admitted', {
+        threadId,
+        messageId,
+        utxo: `${txid}:${outputIndex}`
+      })
     } catch (err) {
-      console.error('[ConvoLookupService] decode/store failed:', err)
+      console.error('[ls_convo] Failed to decode/store admitted output:', err)
     }
   }
 
-  async outputSpent (_payload: OutputSpent): Promise<void> {
-    // Optional Cleanup
+  async outputSpent (payload: OutputSpent): Promise<void> {
+    if (payload.mode !== 'none') throw new Error('Invalid mode')
+    if (payload.topic !== TOPIC_NAME) return
+    // Optional: cleanup on spend if you track exact UTXOs
   }
-  async outputEvicted (_txid: string, _vout: number): Promise<void> {}
 
+  async outputEvicted (_txid: string, _outputIndex: number): Promise<void> {
+    // Optional: eviction policy
+  }
+
+  /** Lookup handler */
   async lookup (question: LookupQuestion): Promise<LookupFormula> {
+    // Compact trace for every lookup
+    const qType = (question as any)?.query?.type ?? '(none)'
+    console.log('[ls_convo] lookup →', { service: question.service, qType })
+
     if (!question.query) throw new Error('A valid query must be provided!')
-    if (question.service !== SERVICE_NAME) throw new Error(`Unsupported service ${question.service}`)
-
-    const q = question.query as FindMessagesQuery | FindThreadsQuery | FindMembersQuery | FindProfileQuery
-
-    if (isFindMessages(q)) {
-      // Return output-list so clients can fetch ciphertext UTXOs
-      const { threadId, limit = 50, before } = q
-      const { items } = await this.storage.findMessages(threadId, limit, before)
-      return items
-        .filter((m: any) => m.txid && typeof m.outputIndex === 'number')
-        .map((m: any) => ({ txid: m.txid, outputIndex: m.outputIndex }))
-
-    } else if (isFindThreads(q)) {
-      // Return JSON thread summaries for discovery
-      const { memberId, limit = 50, after } = q
-      const { items, nextAfter } = await this.storage.findThreadsByMember(memberId, limit, after)
-      return { type: 'json', value: { items, nextAfter } } as any
-
-    } else if (isFindMembers(q)) {
-      const members = await this.storage.findMembers(q.threadId)
-      return { type: 'json', value: members } as any
-
-    } else if (isFindProfile(q)) {
-      const profile = await this.storage.getProfile(q.identityKey)
-      return { type: 'json', value: profile ? [profile] : [] } as any
+    if (question.service !== SERVICE_NAME) {
+      throw new Error(`Lookup service not supported: ${question.service}`)
     }
 
-    throw new Error('Unknown query')
+    const q = question.query as
+      | (FindMessagesQuery & { type?: 'findMessages' })
+      | (FindThreadsQuery  & { type?: 'findThreads'  })
+      | (FindMembersQuery  & { type?: 'findMembers'  })
+      | (FindProfileQuery  & { type?: 'findProfile'  })
+
+    let result: any
+
+    // findMessages -> array of UTXO refs (engine returns type: 'output-list')
+    if (isFindMessages(q)) {
+      const { threadId, limit = 50, before } = q
+      const { items } = await this.storage.findAdmittedMessages(threadId, limit, before)
+      const out = items.map(m => ({ txid: m.txid, outputIndex: m.outputIndex }))
+      console.log('[ls_convo] findMessages → output-list size', out.length)
+      result = out
+      // return as array (not wrapped) so Engine emits { type:'output-list', ... }
+      return result
+    }
+
+    // findThreads -> JSON envelope (NOT iterable)
+    if (isFindThreads(q)) {
+      const { memberId, limit = 50, after } = q
+      const payload = await this.storage.findThreadsByMember(memberId, limit, after)
+      console.log('[ls_convo] findThreads → json', {
+        items: arrLen((payload as any)?.items),
+        nextAfter: (payload as any)?.nextAfter ?? null
+      })
+      result = asJson(payload)
+      return result
+    }
+
+    // findMembers -> JSON envelope
+    if (isFindMembers(q)) {
+      const { threadId } = q
+      const members = await this.storage.findMembers(threadId)
+      console.log('[ls_convo] findMembers → json length', members.length)
+      result = asJson(members)
+      return result
+    }
+
+    // findProfile -> JSON envelope (array of length 0|1)
+    if (isFindProfile(q)) {
+      const { identityKey } = q
+      const profile = await this.storage.getProfile(identityKey)
+      console.log('[ls_convo] findProfile → json found', !!profile)
+      result = asJson(profile ? [profile] : [])
+      return result
+    }
+
+    throw new Error('Unsupported or unknown query.')
   }
 
-  async getDocumentation () { return 'ls_convo: findMessages/findThreads/findMembers/findProfile' }
-  async getMetaData () { return { name: SERVICE_NAME, shortDescription: 'Convo Messaging Lookup Service' } }
+  async getDocumentation (): Promise<string> {
+    return `ls_convo: findMessages (output-list), findThreads/findMembers/findProfile (json)`
+  }
+
+  async getMetaData (): Promise<{
+    name: string
+    shortDescription: string
+    iconURL?: string
+    version?: string
+    informationURL?: string
+  }> {
+    return { name: SERVICE_NAME, shortDescription: 'Convo Messaging Lookup Service' }
+  }
 }
 
-function isObj (v: unknown): v is Record<string, unknown> { return typeof v === 'object' && v !== null }
-function isFindMessages (q: any): q is FindMessagesQuery { return isObj(q) && q.type === 'findMessages' && typeof q.threadId === 'string' }
-function isFindThreads  (q: any): q is FindThreadsQuery  { return isObj(q) && q.type === 'findThreads'  && typeof q.memberId === 'string' }
-function isFindMembers  (q: any): q is FindMembersQuery  { return isObj(q) && q.type === 'findMembers'  && typeof q.threadId === 'string' }
-function isFindProfile  (q: any): q is FindProfileQuery  { return isObj(q) && q.type === 'findProfile'  && typeof q.identityKey === 'string' }
+/* ---------------- Type Guards ---------------- */
 
-export default (db: Db): ConvoLookupService => new ConvoLookupService(new ConvoStorage(db))
+function isObject (v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null
+}
+function isFindMessages (q: any): q is FindMessagesQuery {
+  return isObject(q) && (q.type === 'findMessages' || q.type == null) && typeof q.threadId === 'string'
+}
+function isFindThreads (q: any): q is FindThreadsQuery {
+  return isObject(q) && (q.type === 'findThreads' || q.type == null) && typeof q.memberId === 'string'
+}
+function isFindMembers (q: any): q is FindMembersQuery {
+  return isObject(q) && (q.type === 'findMembers' || q.type == null) && typeof q.threadId === 'string'
+}
+function isFindProfile (q: any): q is FindProfileQuery {
+  return isObject(q) && (q.type === 'findProfile' || q.type == null) && typeof q.identityKey === 'string'
+}
+
+/* -------- Factory export -------- */
+export default (db: Db): ConvoLookupService => {
+  return new ConvoLookupService(new ConvoStorage(db))
+}

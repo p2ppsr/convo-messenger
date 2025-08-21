@@ -143,12 +143,16 @@ export interface StoredMessageRecord {
   messageId: string
   sender: string
   sentAt: number
-  // Optional
+  // Legacy (optional)
   ivB64?: string
   tagB64?: string
   ctB64?: string
+  // CurvePoint (current)
+  headerB64?: string
+  cipherB64?: string
   createdAt: Date
 }
+
 
 export interface StoredThreadSummary {
   threadId: string

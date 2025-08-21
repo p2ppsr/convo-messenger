@@ -1,11 +1,11 @@
+// utils/getMyId.ts
 import { WalletClient } from '@bsv/sdk'
-
-const isLocal = typeof window !== 'undefined' && window.location.hostname === 'localhost'
+import constants from './constants'
 
 export async function getIdentityKeyHex(): Promise<string> {
   // 1) Try wallet first (desktop/mobile)
   try {
-    const wallet = new WalletClient('auto', isLocal ? 'localhost' : undefined)
+    const wallet = new WalletClient('auto', constants.walletHost)
     const { publicKey } = await wallet.getPublicKey({ identityKey: true })
     if (/^(02|03)[0-9a-fA-F]{64}$/.test(publicKey)) return publicKey
   } catch {

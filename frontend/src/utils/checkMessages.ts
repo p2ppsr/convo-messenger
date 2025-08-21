@@ -1,5 +1,25 @@
-import { LookupResolver, Utils, SymmetricKey, Hash, PrivateKey, PublicKey } from '@bsv/sdk'
-import { decodeOutputs, type ServerMessage } from './decodeOutputs'
+/**
+ * checkMessages.ts
+ *
+ * I query the overlay for recent message outputs for a set of threadIds,
+ * decode each PushDrop output, and decrypt the message payload with CurvePoint.
+ *
+ * Key points:
+ * - This version uses CurvePoint (header + ciphertext) — no per-thread AES key
+ *   is required to read messages (the wallet’s identity key unwraps the per-message
+ *   symmetric key from the header).
+ * - I still accept a `lastSeen` map so the UI only appends newer messages.
+ * - The overlay is queried via LookupResolver with the 'findMessages' query.
+ */
+
+import {
+  LookupResolver,
+  Transaction,
+  PushDrop,
+  WalletClient,
+  Utils
+} from '@bsv/sdk'
+import { CurvePoint } from 'curvepoint'
 import constants from './constants'
 
 export interface ChatMessage {
@@ -8,140 +28,123 @@ export interface ChatMessage {
   image?: string
 }
 
-/** ---------- Tiny utils ---------- */
-function b64ToU8(b64: string): Uint8Array {
-  return Uint8Array.from(Utils.toArray(b64, 'base64') as number[])
-}
-function u8ToUtf8(u8: Uint8Array): string {
-  return Utils.toUTF8(Array.from(u8))
-}
-function utf8ToBytes(s: string): number[] {
-  return Utils.toArray(s, 'utf8') as number[]
-}
-function b64ToBytes(b64: string): number[] {
-  return Utils.toArray(b64, 'base64') as number[]
-}
-function concatIvCipherTag(iv: Uint8Array, payload: Uint8Array, tag: Uint8Array): number[] {
-  const out = new Uint8Array(iv.length + payload.length + tag.length)
-  out.set(iv, 0); out.set(payload, iv.length); out.set(tag, iv.length + payload.length)
-  return Array.from(out)
-}
-
-export function boxGroupKeyForMember(
-  recipientPubHex: string,
-  myEphemeralPrivHex: string,
-  rawGroupKey: Uint8Array
-): string {
-  const ephemPriv = new PrivateKey(Utils.toArray(myEphemeralPrivHex, 'hex') as number[])
-  const recipPub  = PublicKey.fromString(recipientPubHex)
-
-  const shared  = recipPub.deriveSharedSecret(ephemPriv)
-  const wrapKey = Hash.sha256(shared.encode(true))
-  const sym     = new SymmetricKey(wrapKey)
-
-  const sealedAny = sym.encrypt(Array.from(rawGroupKey))
-  const sealed    = Array.isArray(sealedAny) ? sealedAny : (Utils.toArray(sealedAny, 'hex') as number[])
-
-  const iv   = sealed.slice(0, 32)
-  const tail = sealed.slice(32)
-  const tag  = tail.slice(-16)
-  const ct   = tail.slice(0, -16)
-
-  const box = {
-    epk: ephemPriv.toPublicKey().toDER('hex') as string,
-    iv:  Utils.toBase64(iv),
-    tag: Utils.toBase64(tag),
-    payload: Utils.toBase64(ct)
-  }
-  return Utils.toBase64(utf8ToBytes(JSON.stringify(box)))
-}
-
-export function unboxGroupKeyForMe(myPrivHex: string, boxB64: string): Uint8Array {
-  const boxJson = Utils.toUTF8(b64ToBytes(boxB64))
-  const { epk, iv, tag, payload } = JSON.parse(boxJson) as {
-    epk: string; iv: string; tag: string; payload: string
-  }
-
-  const myPriv = new PrivateKey(Utils.toArray(myPrivHex, 'hex') as number[])
-  const epkPub = PublicKey.fromString(epk)
-
-  const shared  = epkPub.deriveSharedSecret(myPriv)
-  const wrapKey = Hash.sha256(shared.encode(true))
-  const sym     = new SymmetricKey(wrapKey)
-
-  const packed: number[] = [ ...b64ToBytes(iv), ...b64ToBytes(payload), ...b64ToBytes(tag) ]
-  const raw = sym.decrypt(packed) as number[]
-  return Uint8Array.from(raw)
-}
-
-async function decryptWithSymKey(
-  keyBytes: Uint8Array,
-  cipher: { iv: string; tag: string; payload: string; aad?: string }
-): Promise<Uint8Array> {
-  const iv = b64ToU8(cipher.iv)
-  const tag = b64ToU8(cipher.tag)
-  const ct  = b64ToU8(cipher.payload)
-  const packed = concatIvCipherTag(iv, ct, tag)
-  const key = new SymmetricKey(Array.from(keyBytes))
-  const pt = key.decrypt(packed) as number[]
-  return Uint8Array.from(pt)
-}
-
+/**
+ * Pull & decrypt new messages for the given threadIds using CurvePoint.
+ * No per-thread symmetric key is needed anymore (header carries a wrapped key).
+ *
+ * @param threadIds   List of thread IDs I want to poll.
+ * @param lastSeen    Map of threadId -> last 'sentAt' timestamp I've already shown.
+ * @param limitPerThread  Optional page size per thread (default 100).
+ *
+ * @returns Map(threadId -> ChatMessage[]) of messages newer than `lastSeen[threadId]`.
+ */
 export default async function checkMessages(
   threadIds: string[],
   lastSeen: Record<string, number>,
-  groupKeys: Record<string, Uint8Array>,
   limitPerThread = 100
 ): Promise<Map<string, ChatMessage[]>> {
+  // Lookup into the overlay, using our configured network (local/testnet/mainnet)
   const resolver = new LookupResolver({ networkPreset: constants.networkPreset })
+
+  // I need a wallet instance so CurvePoint can use my identity key to unwrap the header key.
+  const wallet = new WalletClient('auto', constants.walletHost)
+  const curve = new CurvePoint(wallet)
+
+  // Keeping the keyID consistent across app (this is the label we used when encrypting).
+  const CURVE_KEY_ID = '1'
+
   const out = new Map<string, ChatMessage[]>()
 
-  await Promise.all(threadIds.map(async (threadId) => {
-    const key = groupKeys[threadId]
-    if (!key) return
-
-    let response: any
-    try {
-      response = await resolver.query({
-        service: constants.overlayTopic, // 'ls_convo'
-        query: { type: 'findMessages', threadId, limit: limitPerThread }
-      })
-    } catch (e) {
-      console.error('[checkMessages] lookup error', { threadId, e })
-      return
-    }
-
-    if (!response || response.type !== 'output-list' || !Array.isArray(response.outputs)) {
-      console.error('[checkMessages] unexpected response', { threadId, response })
-      return
-    }
-
-    let decoded: ServerMessage[]
-    try {
-      const raw = response.outputs.map((o: any) => ({ beef: o.beef, outputIndex: o.outputIndex }))
-      decoded = await decodeOutputs(raw)
-    } catch (e) {
-      console.error('[checkMessages] decode failed', { threadId, e })
-      return
-    }
-
-    const since = lastSeen[threadId] ?? 0
-    const fresh = decoded.filter(m => m.sentAt > since)
-    if (fresh.length === 0) return
-
-    const list: ChatMessage[] = []
-    for (const m of fresh) {
+  // I poll each thread in parallel. If one fails, others continue.
+  await Promise.all(
+    threadIds.map(async (threadId) => {
+      let response: any
       try {
-        const pt = await decryptWithSymKey(key, m.cipher)
-        const body = JSON.parse(u8ToUtf8(pt)) as { text: string; image?: string }
-        list.push({ text: body.text, authorId: m.sender, image: body.image })
+        response = await resolver.query({
+          service: constants.overlayTopic,            // e.g. 'ls_convo'
+          query: { type: 'findMessages', threadId, limit: limitPerThread }
+        })
       } catch (e) {
-        console.error('[checkMessages] decrypt/parse failed', { threadId, messageId: m.messageId, e })
+        console.error('[checkMessages] lookup error', { threadId, e })
+        return
       }
-    }
 
-    if (list.length) out.set(threadId, list)
-  }))
+      // The LookupService for messages returns an "output-list" shape:
+      //   { type: 'output-list', outputs: [{ beef, outputIndex }, ...] }
+      if (response?.type !== 'output-list' || !Array.isArray(response.outputs)) {
+        // Not fatal; just no outputs to process for this thread.
+        return
+      }
+
+      // Only surface messages newer than the last time the UI saw something for this thread.
+      const since = lastSeen[threadId] ?? 0
+      const collected: ChatMessage[] = []
+
+      for (const o of response.outputs) {
+        try {
+          // 1) Decode the transaction/output so I can parse the PushDrop fields.
+          const tx = Transaction.fromBEEF(o.beef)
+          const script = tx.outputs[o.outputIndex]?.lockingScript
+          if (!script) continue
+
+          // 2) Decode PushDrop fields. For CurvePoint messages we emit 6 fields:
+          //    [0]=threadId
+          //    [1]=messageId     (not used here, but kept for reference)
+          //    [2]=senderHex
+          //    [3]=sentAt (ms)
+          //    [4]=headerB64     (CurvePoint header with wrapped symmetric keys)
+          //    [5]=cipherB64     (ciphertext of the JSON body)
+          const { fields } = PushDrop.decode(script)
+          if (!Array.isArray(fields) || fields.length !== 6) continue
+
+          const fThreadId = Utils.toUTF8(fields[0])
+          // const messageId = Utils.toUTF8(fields[1]) // available if/when I want it for dedupe
+          const senderHex = Utils.toUTF8(fields[2])
+          const sentAtStr = Utils.toUTF8(fields[3])
+          const headerB64 = Utils.toUTF8(fields[4])
+          const cipherB64 = Utils.toUTF8(fields[5])
+
+          // Basic sanity + only process rows belonging to the thread I'm polling
+          if (fThreadId !== threadId) continue
+
+          const sentAt = Number(sentAtStr) || 0
+          if (sentAt <= since) continue
+
+          // 3) Reconstruct the CurvePoint ciphertext: header || message
+          //    (The decrypt() expects a single byte array with the header prefix.)
+          const header = Utils.toArray(headerB64, 'base64') as number[]
+          const encMsg = Utils.toArray(cipherB64, 'base64') as number[]
+          const ciphertext = header.concat(encMsg)
+
+          // 4) Decrypt with my wallet identity (CurvePoint does: unwrap symmetric key from header, then decrypt body)
+          //    Protocol ID must match the one used by the sender in sendMessage().
+          const plaintext = await curve.decrypt(ciphertext, [1, 'ConvoCurve'], CURVE_KEY_ID)
+
+          // 5) The body is JSON: { text: string; image?: string }
+          const textJson = Utils.toUTF8(plaintext)
+          let body: { text: string; image?: string }
+          try {
+            body = JSON.parse(textJson)
+          } catch {
+            // If a sender ever pushed plain text (not a JSON object), I coerce.
+            body = { text: String(textJson) }
+          }
+
+          // Add to the batch for this thread
+          collected.push({
+            text: body.text,
+            image: body.image,
+            authorId: senderHex
+          })
+        } catch (e) {
+          // Skip this single output on error and keep going; I don't want one bad row to stop the thread.
+          console.error('[checkMessages] decode/decrypt failed', { threadId, error: e })
+        }
+      }
+
+      if (collected.length) out.set(threadId, collected)
+    })
+  )
 
   return out
 }
