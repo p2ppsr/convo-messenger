@@ -177,7 +177,7 @@ export default function App() {
       await sendMessage({
         threadId: activeThread.id,
         senderIdentityKeyHex: myIdentityKeyHex,
-        threadKey: activeKey, // not used for CurvePoint messages; kept for attachments
+        threadKey: activeKey ?? undefined, // not used for CurvePoint messages; kept for attachments
         body,
         // 🔑 Critical: include recipients so sendMessage has them immediately.
         // (syncThreadsFromOverlay will also store these, but passing here avoids timing issues.)
