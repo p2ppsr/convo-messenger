@@ -13,6 +13,8 @@ type Paginated<T> = {
   nextAfter?: number
 }
 
+const P = '[ConvoStorage]'
+
 export class ConvoStorage {
   private messages: Collection<StoredMessageRecord>
   private threads: Collection<Thread>
@@ -25,15 +27,25 @@ export class ConvoStorage {
     this.members  = db.collection<ThreadMember>(`${collectionPrefix}_memberships`)
     this.profiles = db.collection<Profile>(`${collectionPrefix}_profiles`)
 
+    console.log(`${P} init`, {
+      db: db.databaseName,
+      collections: {
+        messages: this.messages.collectionName,
+        threads: this.threads.collectionName,
+        members: this.members.collectionName,
+        profiles: this.profiles.collectionName,
+      }
+    })
+
     void this.ensureIndexes().catch(err =>
-      console.warn('[ConvoStorage] ensureIndexes failed:', err)
+      console.warn(`${P} ensureIndexes failed:`, err)
     )
   }
 
   /* ------------------------------- Indexes ------------------------------- */
 
   private async ensureIndexes(): Promise<void> {
-    await Promise.allSettled([
+    const res = await Promise.allSettled([
       // Messages: paging & uniqueness by admitted UTXO
       this.messages.createIndex({ threadId: 1, sentAt: -1 }),
       this.messages.createIndex({ txid: 1, outputIndex: 1 }, { unique: true }),
@@ -49,6 +61,7 @@ export class ConvoStorage {
       // Profiles: one per identity
       this.profiles.createIndex({ identityKey: 1 }, { unique: true }),
     ])
+    console.log(`${P} indexes ensured`, res.map(r => r.status))
   }
 
   /* --------------------------- Helper: normalize -------------------------- */
@@ -69,11 +82,27 @@ export class ConvoStorage {
       threadId: this.lowerHex(rec.threadId)!,
       sender: this.lowerHex(rec.sender)!,
     }
-    await this.messages.updateOne(
-      { txid: doc.txid, outputIndex: doc.outputIndex },
-      { $set: doc },
-      { upsert: true }
-    )
+    try {
+      const r = await this.messages.updateOne(
+        { txid: doc.txid, outputIndex: doc.outputIndex },
+        { $set: doc },
+        { upsert: true }
+      )
+      console.log(`${P} insertAdmittedMessage`, {
+        utxo: `${doc.txid}:${doc.outputIndex}`,
+        threadId: doc.threadId,
+        sentAt: doc.sentAt,
+        matched: r.matchedCount,
+        upsertedId: (r as any).upsertedId ?? null,
+        acknowledged: r.acknowledged
+      })
+    } catch (e) {
+      console.error(`${P} insertAdmittedMessage FAILED`, {
+        utxo: `${rec.txid}:${rec.outputIndex}`,
+        err: e
+      })
+      throw e
+    }
   }
 
   /**
@@ -91,7 +120,7 @@ export class ConvoStorage {
     }
 
     const cursor = this.messages.find<StoredMessageRecord>(q, {
-      projection: { /* … */ } as const,
+      projection: {} as const,
       sort: { sentAt: -1, _id: -1 },
       limit,
     })
@@ -99,6 +128,13 @@ export class ConvoStorage {
     const items = await cursor.toArray()
     const nextBefore =
       items.length === limit ? items[items.length - 1].sentAt : undefined
+
+    console.log(`${P} findAdmittedMessages`, {
+      threadId: this.lowerHex(threadId),
+      limit, before,
+      count: items.length,
+      nextBefore: nextBefore ?? null
+    })
 
     return { items, nextBefore }
   }
@@ -120,7 +156,7 @@ export class ConvoStorage {
 
     const { createdAt, createdBy: _cb, threadId: _tid, ...rest } = partial
 
-    await this.threads.updateOne(
+    const r = await this.threads.updateOne(
       { threadId },
       {
         ...(Object.keys($setOnInsert).length ? { $setOnInsert } : {}),
@@ -128,6 +164,14 @@ export class ConvoStorage {
       },
       { upsert: true }
     )
+
+    console.log(`${P} upsertThread`, {
+      threadId,
+      setOnInsert: Object.keys($setOnInsert),
+      matched: r.matchedCount,
+      upsertedId: (r as any).upsertedId ?? null,
+      acknowledged: r.acknowledged
+    })
   }
 
   /**
@@ -141,6 +185,8 @@ export class ConvoStorage {
   ): Promise<Paginated<Thread>> {
     const member = this.lowerHex(memberId)!
     const threadIds = await this.members.distinct('threadId', { memberId: member, status: 'active' })
+    console.log(`${P} findThreadsByMember: member has`, { member, threads: threadIds.length })
+
     if (!threadIds.length) return { items: [] }
 
     const q: Filter<Thread> = {
@@ -149,12 +195,17 @@ export class ConvoStorage {
     }
 
     const items = await this.threads
-    .find(q, { sort: { lastMessageAt: -1, _id: -1 }, limit })
-    .project<Thread>({ _id: 0 })
-    .toArray()
+      .find(q, { sort: { lastMessageAt: -1, _id: -1 }, limit })
+      .project<Thread>({ _id: 0 })
+      .toArray()
 
     const nextAfter =
       items.length === limit ? items[items.length - 1].lastMessageAt : undefined
+
+    console.log(`${P} findThreadsByMember result`, {
+      count: items.length,
+      nextAfter: nextAfter ?? null
+    })
 
     return { items, nextAfter }
   }
@@ -162,7 +213,10 @@ export class ConvoStorage {
   /* ------------------------------ Memberships ----------------------------- */
 
   async upsertMemberships(ms: ThreadMember[]): Promise<void> {
-    if (!ms?.length) return
+    if (!ms?.length) {
+      console.log(`${P} upsertMemberships (no items)`)
+      return
+    }
 
     const ops = ms.map((m) => {
       const normalized: ThreadMember = {
@@ -189,11 +243,17 @@ export class ConvoStorage {
       }
     })
 
-    await this.members.bulkWrite(ops, { ordered: false })
+    const r = await this.members.bulkWrite(ops, { ordered: false })
+    console.log(`${P} upsertMemberships`, {
+      requested: ms.length,
+      upserted: r.upsertedCount,
+      modified: r.modifiedCount,
+      matched: r.matchedCount
+    })
   }
 
   async findMembers(threadId: string): Promise<ThreadMember[]> {
-    return this.members
+    const items = await this.members
       .find({ threadId: this.lowerHex(threadId)! })
       .project<ThreadMember>({
         _id: 0,
@@ -206,13 +266,16 @@ export class ConvoStorage {
         lastReadAt: 1,
       } as const)
       .toArray()
+
+    console.log(`${P} findMembers`, { threadId: this.lowerHex(threadId), count: items.length })
+    return items
   }
 
   /* -------------------------------- Profiles ------------------------------ */
 
   async setProfile(p: Profile): Promise<void> {
     const identityKey = this.lowerHex(p.identityKey)!
-    await this.profiles.updateOne(
+    const r = await this.profiles.updateOne(
       { identityKey },
       {
         $set: {
@@ -223,12 +286,19 @@ export class ConvoStorage {
       },
       { upsert: true }
     )
+    console.log(`${P} setProfile`, {
+      identityKey,
+      matched: r.matchedCount,
+      upsertedId: (r as any).upsertedId ?? null
+    })
   }
 
   async getProfile(identityKey: string): Promise<Profile | null> {
-    return this.profiles.findOne(
+    const res = await this.profiles.findOne(
       { identityKey: this.lowerHex(identityKey)! },
       { projection: { _id: 0 } }
     )
+    console.log(`${P} getProfile`, { identityKey: this.lowerHex(identityKey), found: !!res })
+    return res
   }
 }

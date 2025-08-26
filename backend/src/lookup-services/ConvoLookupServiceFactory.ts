@@ -24,9 +24,15 @@ const SERVICE_NAME  = 'ls_convo'
 const TOPIC_NAME    = 'tm_ls_convo'
 const PROTOCOL_TAG  = 'convo-v1'
 
+const LOG = '[ls_convo]'
+
 // Helpers
 const json = (value: unknown): LookupFormula => ({ type: 'json', value } as any)
 const safeLen = (v: unknown) => (Array.isArray(v) ? v.length : 0)
+const isB64 = (s: string) => {
+  if (typeof s !== 'string' || s.length < 8) return false
+  try { Utils.toArray(s, 'base64'); return true } catch { return false }
+}
 
 /** --------------------------- Lookup Service --------------------------- */
 export class ConvoLookupService implements LookupService {
@@ -44,7 +50,14 @@ export class ConvoLookupService implements LookupService {
     try {
       const decoded = PushDrop.decode(lockingScript)
       const { fields } = decoded
-      const getUtf8 = (i: number) => Utils.toUTF8(fields[i])
+      const getUtf8 = (i: number) => Utils.toUTF8(fields[i] ?? [])
+
+      console.log(`${LOG} admitted output:`, {
+        txid,
+        outputIndex,
+        topic,
+        fieldCount: Array.isArray(fields) ? fields.length : -1,
+      })
 
       // signer identity pubkey (compressed hex) from chunk[0]
       const signerHex =
@@ -52,13 +65,14 @@ export class ConvoLookupService implements LookupService {
 
       /** ---------- CONTROL records:
        * ["ls_convo","convo-v1", kind, threadId, jsonPayload?]
+       * We allow extra trailing fields from PushDrop.
        */
       if (Array.isArray(fields) && fields.length >= 4) {
         const f0 = getUtf8(0)
         const f1 = getUtf8(1)
         if (f0 === SERVICE_NAME && f1 === PROTOCOL_TAG) {
           const kind     = getUtf8(2)
-          const threadId = getUtf8(3)
+          const threadId = (getUtf8(3) || '').toLowerCase()
           const ts       = Date.now()
 
           if (kind === 'create_thread') {
@@ -75,7 +89,7 @@ export class ConvoLookupService implements LookupService {
                 }
               }
             } catch (e) {
-              console.warn('[ls_convo] create_thread payload parse failed:', e)
+              console.warn(`${LOG} create_thread payload parse failed:`, e)
             }
 
             // normalize & build full member set (include creator)
@@ -87,7 +101,7 @@ export class ConvoLookupService implements LookupService {
 
             // upsert thread summary
             await this.storage.upsertThread({
-              threadId: threadId.toLowerCase(),
+              threadId,
               title,
               createdAt: ts,
               createdBy: creator,
@@ -107,37 +121,54 @@ export class ConvoLookupService implements LookupService {
               }))
             )
 
-            console.log('[ls_convo] CONTROL create_thread:', { threadId, memberCount, isDirect })
+            console.log(`${LOG} CONTROL create_thread:`, { threadId, memberCount, isDirect })
             return
           }
 
           // future control kinds
-          console.log('[ls_convo] CONTROL (ignored kind):', { kind, threadId })
+          console.log(`${LOG} CONTROL (ignored kind):`, { kind, threadId })
           return
         }
       }
 
-      /** ---------- MESSAGE records (6 fields):
+      /** ---------- MESSAGE records:
        * [ threadId, messageId, senderKeyHex, sentAtMs, headerB64, cipherB64 ]
+       * Accept >= 6 fields; ignore any additional trailing fields.
        */
-      if (!Array.isArray(fields) || fields.length !== 6) return
+      if (!Array.isArray(fields) || fields.length < 6) {
+        console.log(`${LOG} not a MESSAGE: insufficient fields`, { fieldCount: Array.isArray(fields) ? fields.length : -1 })
+        return
+      }
 
-      const threadId = Utils.toUTF8(fields[0])
-      const messageId = Utils.toUTF8(fields[1])
-      const senderKeyHex = Utils.toUTF8(fields[2])
-      const sentAtStr = Utils.toUTF8(fields[3])
-      const headerB64 = Utils.toUTF8(fields[4])
-      const cipherB64 = Utils.toUTF8(fields[5])
+      const use = fields.slice(0, 6) // take first 6 only
+      const f = (i: number) => Utils.toUTF8(use[i] ?? [])
 
-      const sentAt = Number(sentAtStr) || Date.now()
-      if (!threadId || !messageId) return
+      const threadId     = (f(0) || '').toLowerCase()
+      const messageId    = f(1) || ''
+      const senderKeyHex = (f(2) || '').toLowerCase()
+      const sentAtStr    = f(3) || ''
+      const headerB64    = f(4) || ''
+      const cipherB64    = f(5) || ''
+
+      const sentAt = Number(sentAtStr)
+      const problems: string[] = []
+      if (!threadId) problems.push('threadId empty')
+      if (!messageId) problems.push('messageId empty')
+      if (!(Number.isFinite(sentAt) && sentAt > 0)) problems.push(`sentAt bad: ${sentAtStr}`)
+      if (!isB64(headerB64)) problems.push('headerB64 invalid')
+      if (!isB64(cipherB64)) problems.push('cipherB64 invalid')
+
+      if (problems.length) {
+        console.warn(`${LOG} MESSAGE parse rejected:`, { txid, outputIndex, problems })
+        return
+      }
 
       const rec: StoredMessageRecord = {
         txid,
         outputIndex,
-        threadId: threadId.toLowerCase(),
+        threadId,
         messageId,
-        sender: senderKeyHex.toLowerCase(),
+        sender: senderKeyHex,
         sentAt,
         headerB64,
         cipherB64,
@@ -146,20 +177,20 @@ export class ConvoLookupService implements LookupService {
       await this.storage.insertAdmittedMessage(rec)
 
       // bump thread activity
-      await this.storage.upsertThread({ threadId: threadId.toLowerCase(), lastMessageAt: sentAt })
+      await this.storage.upsertThread({ threadId, lastMessageAt: sentAt })
 
       // ensure sender has a membership row
       await this.storage.upsertMemberships([{
         threadId,
-        memberId: senderKeyHex.toLowerCase(),
+        memberId: senderKeyHex,
         joinedAt: sentAt,
         status: 'active',
         role: 'member',
       }])
 
-      console.log('[ls_convo] MESSAGE admitted:', { threadId, messageId, utxo: `${txid}:${outputIndex}` })
+      console.log(`${LOG} MESSAGE stored:`, { threadId, messageId, utxo: `${txid}:${outputIndex}` })
     } catch (err) {
-      console.error('[ls_convo] Failed to decode/store admitted output:', err)
+      console.error(`${LOG} Failed to decode/store admitted output:`, err)
     }
   }
 
@@ -175,7 +206,7 @@ export class ConvoLookupService implements LookupService {
 
   /** ------------------------------ Lookup ------------------------------ */
   async lookup(question: LookupQuestion): Promise<LookupFormula> {
-    console.log('[ls_convo] lookup ->', {
+    console.log(`${LOG} lookup ->`, {
       service: question.service,
       qType: (question as any)?.query?.type ?? '(none)',
     })
@@ -194,17 +225,21 @@ export class ConvoLookupService implements LookupService {
     // findMessages -> array of { txid, outputIndex }  (ENGINE EXPECTS ITERABLE)
     if (isFindMessages(q)) {
       const { threadId, limit = 50, before } = q
-      const { items } = await this.storage.findAdmittedMessages(threadId, limit, before)
+      // normalize to lower-case in case callers pass mixed-case ids
+      const normThreadId = (threadId || '').toLowerCase()
+      console.log(`${LOG} findMessages query:`, { threadId: normThreadId, limit, before })
+      const { items } = await this.storage.findAdmittedMessages(normThreadId, limit, before)
+      console.log(`${LOG} findMessages DB count:`, items.length)
       const utxos = items.map(m => ({ txid: m.txid, outputIndex: m.outputIndex }))
-      console.log('[ls_convo] findMessages -> output-list size:', utxos.length)
+      console.log(`${LOG} findMessages -> output-list size:`, utxos.length)
       return utxos
     }
 
     // findThreads -> JSON envelope
     if (isFindThreads(q)) {
       const { memberId, limit = 50, after } = q
-      const payload = await this.storage.findThreadsByMember(memberId, limit, after)
-      console.log('[ls_convo] findThreads -> json:', {
+      const payload = await this.storage.findThreadsByMember(memberId.toLowerCase(), limit, after)
+      console.log(`${LOG} findThreads -> json:`, {
         items: safeLen((payload as any)?.items),
         nextAfter: (payload as any)?.nextAfter ?? null,
       })
@@ -214,16 +249,16 @@ export class ConvoLookupService implements LookupService {
     // findMembers -> JSON envelope (array)
     if (isFindMembers(q)) {
       const { threadId } = q
-      const members = await this.storage.findMembers(threadId)
-      console.log('[ls_convo] findMembers -> json length:', members.length)
+      const members = await this.storage.findMembers(threadId.toLowerCase())
+      console.log(`${LOG} findMembers -> json length:`, members.length)
       return json(members)
     }
 
     // findProfile -> JSON envelope (array of 0|1)
     if (isFindProfile(q)) {
       const { identityKey } = q
-      const profile = await this.storage.getProfile(identityKey)
-      console.log('[ls_convo] findProfile -> json found:', !!profile)
+      const profile = await this.storage.getProfile(identityKey.toLowerCase())
+      console.log(`${LOG} findProfile -> json found:`, !!profile)
       return json(profile ? [profile] : [])
     }
 

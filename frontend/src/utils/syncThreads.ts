@@ -4,22 +4,22 @@ import {
   Transaction,
   PushDrop,
   Utils,
-  WalletClient
+  WalletClient,
 } from '@bsv/sdk'
 import { CurvePoint } from 'curvepoint'
 import constants from './constants'
 import { listThreads, upsertThread, setThreadKey } from './threadStore'
 import { myIdentityKeyHex, unboxKeyFrom } from './wallet'
 
-/**
- * Optional: allow overriding lookup hosts (like LARS/CARS endpoints)
- * via constants.lookupHosts: string[]
- */
+/** ----------------------------- Resolver ------------------------------ */
+// Optional host override via constants.lookupHosts (array of URLs)
 const resolver = new LookupResolver({
   networkPreset: constants.networkPreset,
   // @ts-ignore optional override
-  hosts: (constants as any)?.lookupHosts
+  hosts: (constants as any)?.lookupHosts,
 })
+
+const LOOKUP_SERVICE = 'ls_convo'
 
 /* --------------------- Types & guards for Lookup --------------------- */
 type ThreadsJson = {
@@ -31,7 +31,7 @@ type OutputListAnswer = {
   type: 'output-list'
   outputs: Array<{ beef: number[]; outputIndex: number }>
 }
-type LookupAnswer = JsonAnswer<unknown> | OutputListAnswer | { type: string }
+type LookupAnswer = JsonAnswer<any> | OutputListAnswer | { type: string }
 
 function isJson<T>(a: unknown): a is JsonAnswer<T> {
   return typeof a === 'object' && a != null && (a as any).type === 'json'
@@ -46,27 +46,27 @@ function toB64(u8: Uint8Array): string {
 }
 
 /** Never throw on lookup; log and return null so UI keeps working. */
-async function safeQuery(q: {
-  service: string
-  query: Record<string, unknown>
-}): Promise<LookupAnswer | null> {
+async function safeQuery(q: { service: string; query: Record<string, unknown> }): Promise<LookupAnswer | null> {
   try {
-    const res = (await resolver.query(q)) as any
-    return res
+    return (await resolver.query(q)) as any
   } catch (err: any) {
     console.warn('[syncThreads] lookup failed', {
       service: q.service,
       query: q.query,
-      message: err?.message ?? String(err)
+      message: err?.message ?? String(err),
     })
-    // surfaces engine payload if present
     const resp = (err as any)?.response
     if (resp) {
-      console.warn('[syncThreads] lookup failed (response)', {
-        status: resp.status,
-        statusText: resp.statusText,
-        data: resp.data
-      })
+      try {
+        const data = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data)
+        console.warn('[syncThreads] lookup failed (response)', {
+          status: resp.status,
+          statusText: resp.statusText,
+          data,
+        })
+      } catch {
+        /* ignore */
+      }
     }
     return null
   }
@@ -74,19 +74,20 @@ async function safeQuery(q: {
 
 /* --------------------------- Main sync flow --------------------------- */
 export async function syncThreadsFromOverlay(): Promise<void> {
-  // My identity (lowercased for comparisons)
+  // Ensure we have our identity before calling the service.
   let me = ''
   try {
-    me = (await myIdentityKeyHex()).toLowerCase()
-  } catch {
-    console.warn('[syncThreads] could not load my identity; skipping sync.')
+    me = (await myIdentityKeyHex())?.toLowerCase()
+  } catch { /* ignore */ }
+  if (!me) {
+    console.warn('[syncThreads] no identity yet; skipping thread sync')
     return
   }
 
-  // 1) Which threads am I in? (Prefer JSON shape from lookup service)
+  // 1) Which threads am I in?
   const threadsRes = await safeQuery({
-    service: constants.overlayTopic, // must be 'ls_convo'
-    query: { type: 'findThreads', memberId: me, limit: 100 }
+    service: LOOKUP_SERVICE,
+    query: { type: 'findThreads', memberId: me, limit: 100 },
   })
   if (!threadsRes) return
 
@@ -97,9 +98,9 @@ export async function syncThreadsFromOverlay(): Promise<void> {
     const items = Array.isArray(threadsRes.value?.items)
       ? (threadsRes.value.items as ThreadsJson['items'])!
       : []
-    console.log('[syncThreads] findThreads: received json', {
+    console.log('[syncThreads] findThreads: json', {
       items: items.length,
-      nextAfter: (threadsRes.value as any)?.nextAfter ?? null
+      nextAfter: (threadsRes.value as any)?.nextAfter ?? null,
     })
     for (const t of items) {
       if (t?.threadId) {
@@ -108,9 +109,9 @@ export async function syncThreadsFromOverlay(): Promise<void> {
       }
     }
   } else if (isOutputList(threadsRes)) {
-    // Fallback only: decode threadId from outputs (not expected for findThreads)
-    console.log('[syncThreads] findThreads: got output-list (fallback path)', {
-      outputs: threadsRes.outputs.length
+    // Fallback (not typical for findThreads)
+    console.log('[syncThreads] findThreads: output-list fallback', {
+      outputs: threadsRes.outputs.length,
     })
     for (const out of threadsRes.outputs) {
       try {
@@ -119,9 +120,7 @@ export async function syncThreadsFromOverlay(): Promise<void> {
         const { fields } = PushDrop.decode(script)
         const tid = Utils.toUTF8(fields[0])
         if (tid) threadIds.add(tid)
-      } catch {
-        /* ignore malformed */
-      }
+      } catch { /* ignore */ }
     }
   } else {
     console.warn('[syncThreads] findThreads: unexpected answer shape', threadsRes)
@@ -139,45 +138,45 @@ export async function syncThreadsFromOverlay(): Promise<void> {
     console.warn('[syncThreads] could not init CurvePoint wallet client', e)
   }
 
-  // 2) For each new thread, fetch memberships; decrypt group key; persist with participants
+  // 2) For each new thread, fetch memberships; decrypt group key; persist
   for (const threadId of threadIds) {
     if (have.has(threadId)) continue
 
     const membersRes = await safeQuery({
-      service: constants.overlayTopic,
-      query: { type: 'findMembers', threadId }
+      service: LOOKUP_SERVICE,
+      query: { type: 'findMembers', threadId },
     })
     if (!membersRes || !isJson<any[]>(membersRes) || !Array.isArray(membersRes.value)) {
       console.warn('[syncThreads] findMembers: unexpected shape or null', membersRes)
       continue
     }
 
-    console.log('[syncThreads] findMembers: received json', {
+    console.log('[syncThreads] findMembers: json', {
       threadId,
-      members: membersRes.value.length
+      members: membersRes.value.length,
     })
 
-    // Gather all participants (lowercased, unique)
+    // Participants (lowercased unique)
     const participants: string[] = Array.from(
       new Set(
         membersRes.value
           .map((m: any) => (typeof m?.memberId === 'string' ? m.memberId.toLowerCase() : ''))
-          .filter(Boolean)
-      )
+          .filter(Boolean),
+      ),
     )
 
-    // Find my membership row
+    // My membership row
     const mine = membersRes.value.find(
-      (m: any) => typeof m?.memberId === 'string' && m.memberId.toLowerCase() === me
+      (m: any) => typeof m?.memberId === 'string' && m.memberId.toLowerCase() === me,
     )
     if (!mine) {
-      console.warn('[syncThreads] no membership for me in thread', { threadId, me })
+      console.warn('[syncThreads] no membership for me', { threadId, me })
       continue
     }
 
+    // Recover thread key (prefer CurvePoint envelope)
     let rawKey: Uint8Array | null = null
 
-    // Preferred: CurvePoint envelope (new format)
     if (typeof mine.groupKeyEnvelopeB64 === 'string' && mine.groupKeyEnvelopeB64) {
       if (!curve) {
         console.warn('[syncThreads] cannot decrypt envelope: CurvePoint not initialized')
@@ -192,7 +191,7 @@ export async function syncThreadsFromOverlay(): Promise<void> {
       }
     }
 
-    // Legacy fallback: per-member ECDH box
+    // Legacy fallback
     if (!rawKey && typeof mine.groupKeyBox === 'string' && typeof mine.groupKeyFrom === 'string') {
       try {
         rawKey = await unboxKeyFrom(mine.groupKeyBox, mine.groupKeyFrom)
@@ -206,19 +205,19 @@ export async function syncThreadsFromOverlay(): Promise<void> {
       continue
     }
 
-    // Store locally so UI can render + send immediately (recipients are crucial!)
+    // Persist locally for UI
     upsertThread({
       id: threadId,
       name: titles.get(threadId),
       keyB64: toB64(rawKey),
-      participants
+      participants,
     })
     setThreadKey(threadId, rawKey)
 
     console.log('[syncThreads] thread stored', {
       threadId,
       participants: participants.length,
-      hasTitle: titles.has(threadId)
+      hasTitle: titles.has(threadId),
     })
   }
 }

@@ -9,9 +9,8 @@
 // - performs a one-time sync to discover remote threads I’m a member of
 //
 // Notes on keys:
-// * Messages no longer require a per-thread symmetric key because we use CurvePoint
-//   to encrypt each message to all recipients. However, we still keep a per-thread
-//   32-byte key locally for (a) legacy decrypt paths and (b) encrypted attachments.
+// * Messages use CurvePoint (per-message sealed to recipients). We still keep a
+//   per-thread 32-byte key locally (legacy decrypt + encrypted attachments).
 
 import { useEffect, useState } from 'react'
 import checkMessages, { type ChatMessage } from './utils/checkMessages'
@@ -40,7 +39,7 @@ export default function App() {
   // My identity (02/03… hex). We fetch it once from wallet or env fallback.
   const [myIdentityKeyHex, setMyIdentityKeyHex] = useState<string>('')
 
-  // Local list of threads (persisted in localStorage via threadStore).
+  // Local list of threads (persisted via threadStore).
   const [threads, setThreads] = useState<ThreadRecord[]>(listThreads())
 
   // Which thread is open in the right pane.
@@ -50,7 +49,6 @@ export default function App() {
   const [buffers, setBuffers] = useState<Record<string, ChatMessage[]>>({})
 
   // Per-thread watermark so we only pull new messages after a given time.
-  // checkMessages already filters based on this.
   const [lastSeen, setLastSeen] = useState<Record<string, number>>({})
 
   /* ---------------- Boot my identity ---------------- */
@@ -71,7 +69,6 @@ export default function App() {
   /* ---------------- Keep an active thread selected ---------------- */
 
   useEffect(() => {
-    // If we loaded threads and nothing is selected, pick the first one.
     if (threads.length && !activeThreadId) setActiveThreadId(threads[0].id)
   }, [threads, activeThreadId])
 
@@ -80,7 +77,6 @@ export default function App() {
   useEffect(() => {
     let alive = true
 
-    // Every tick: ask overlay for latest messages (per thread), decrypt via CurvePoint, update buffers.
     const tick = async () => {
       try {
         const ids = threads.map(t => t.id)
@@ -119,7 +115,6 @@ export default function App() {
 
   /* ---------------- One-time overlay sync for threads ----------------
      - Finds remote threads where I'm a member
-     - Fetches + decrypts the group key envelope (CurvePoint) or legacy box
      - Adds to local threadStore so UI can show them.
   -------------------------------------------------------------------- */
 
@@ -140,16 +135,14 @@ export default function App() {
   /* ---------------- Derived data for the right pane ---------------- */
 
   const activeThread = threads.find(t => t.id === activeThreadId)
-  // We still retrieve the per-thread key (kept for legacy + attachments).
   const activeKey = activeThread ? getThreadKey(activeThread.id) : undefined
   const activeMessages = buffers[activeThreadId] ?? []
 
   /* ---------------- Send handler (optimistic) ----------------
      - push optimistic message to buffer
      - sendMessage handles CurvePoint encrypt + post
-     - on failure, we could mark the optimistic row as failed (TODO)
      - IMPORTANT: pass recipients from threadStore so sendMessage can seal
-                  with CurvePoint immediately (fixes "No recipients found" errors).
+                  with CurvePoint immediately (fixes "No recipients found").
   ------------------------------------------------------------ */
 
   const onSend = async (msg: ChatMessage) => {
@@ -157,7 +150,6 @@ export default function App() {
       console.error('[Convo] No active thread or my identity unknown')
       return
     }
-    // attachments may still rely on the 32-byte per-thread key
     if (!activeKey) {
       console.warn('[Convo] No per-thread key found (attachments/legacy decrypt may fail)')
     }
@@ -177,10 +169,8 @@ export default function App() {
       await sendMessage({
         threadId: activeThread.id,
         senderIdentityKeyHex: myIdentityKeyHex,
-        threadKey: activeKey ?? undefined, // not used for CurvePoint messages; kept for attachments
+        threadKey: activeKey ?? undefined, // kept for attachments
         body,
-        // 🔑 Critical: include recipients so sendMessage has them immediately.
-        // (syncThreadsFromOverlay will also store these, but passing here avoids timing issues.)
         recipients: activeThread.participants ?? []
       })
     } catch (e) {
@@ -199,11 +189,10 @@ export default function App() {
         <NewChatPanel
           myIdentityKeyHex={myIdentityKeyHex}
           onCreated={(rec) => {
-            // Keep a local index so the UI updates instantly.
-            upsertThread(rec)
+            upsertThread(rec)              // persist locally
             const next = listThreads()
             setThreads(next)
-            setActiveThreadId(rec.id)
+            setActiveThreadId(rec.id)      // jump into the new thread
           }}
         />
 
@@ -227,7 +216,7 @@ export default function App() {
           <Chat
             threadId={activeThread.id}
             myIdentityKeyHex={myIdentityKeyHex}
-            threadKey={activeKey ?? new Uint8Array()} // safe default; not used for CurvePoint
+            threadKey={activeKey ?? new Uint8Array()}
             messages={activeMessages}
             onSent={onSend}
           />
@@ -245,11 +234,11 @@ export default function App() {
 
 /* =======================================================================
    New Chat Panel
-   - Lets me create either a 1:1 (deterministic id) or a titled thread (random id)
+   - Creates either a 1:1 (deterministic id) or a titled thread (random id)
    - We still generate and store a per-thread 32-byte key locally:
      * legacy decrypt
      * encrypted attachments
-   - createThreadAndInvite seals the key in a CurvePoint envelope to all recipients.
+   - createThreadAndInvite seals the key in a CurvePoint envelope to recipients.
    - IMPORTANT: persist `participants` so sendMessage has recipients.
    ======================================================================= */
 
@@ -264,7 +253,7 @@ function NewChatPanel({
   const [recipient, setRecipient] = useState<DisplayableIdentity | null>(null)
   const [busy, setBusy] = useState(false)
 
-  // Deterministic 1:1 thread id (both sides compute the same value; prevents ordering leaks)
+  // Deterministic 1:1 thread id (same on both sides; order-independent)
   const computeOneToOneThreadId = async (a: string, b: string): Promise<string> => {
     const [x, y] = [a.toLowerCase(), b.toLowerCase()].sort()
     const seed = `convo|${x}|${y}`
@@ -287,13 +276,12 @@ function NewChatPanel({
       const me = myIdentityKeyHex.toLowerCase()
       const threadId = await computeOneToOneThreadId(me, them)
 
-      // Even though CurvePoint encrypts messages per-send, we still keep a per-thread key
-      // for attachments + legacy decrypt paths.
+      // Per-thread key for attachments/legacy decrypt
       const key = randomKey32()
 
       await createThreadAndInvite({
         threadId,
-        title: recipient.name || recipient.identityKey, // store a friendly name if available
+        title: recipient.name || recipient.identityKey,
         groupKey: key,
         members: [
           { identityKeyHex: myIdentityKeyHex },
@@ -306,8 +294,7 @@ function NewChatPanel({
         id: threadId,
         name: recipient.name || recipient.identityKey,
         keyB64: btoa(String.fromCharCode(...key)),
-        // 🔑 Critical: store participants so sendMessage can seal to them.
-        participants: [me, them]
+        participants: [me, them] // Store recipients for CurvePoint sealing
       })
       setThreadKey(threadId, key)
       setRecipient(null)
@@ -339,7 +326,7 @@ function NewChatPanel({
         id: threadId,
         name: title.trim(),
         keyB64: btoa(String.fromCharCode(...key)),
-        participants: [me] // you can add more later when inviting others
+        participants: [me]
       })
       setThreadKey(threadId, key)
       setTitle('')

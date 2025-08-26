@@ -155,6 +155,16 @@ export default async function sendMessage(params: OutboundMessageParams): Promis
     Utils.toArray(cipherB64, 'utf8')
   ]
 
+  console.log('[sendMessage] about to lock PushDrop', {
+  len: fields.length,
+  threadId,
+  messageId,
+  sender: senderIdentityKeyHex, // should be ascii hex, not raw bytes
+  sentAt,
+  headerLen: headerB64.length,
+  cipherLen: cipherB64.length,
+})
+
   const pushdrop = new PushDrop(wallet)
   const lockingScript = await pushdrop.lock(
     fields,
@@ -197,7 +207,14 @@ export default async function sendMessage(params: OutboundMessageParams): Promis
   const broadcaster = new TopicBroadcaster([constants.overlayTM], {
     networkPreset: constants.networkPreset
   })
-  await broadcaster.broadcast(transaction)
+  console.log('[sendMessage] broadcasting to', constants.overlayTM);
+try {
+  await broadcaster.broadcast(transaction);
+  console.log('[sendMessage] broadcast OK');
+} catch (e) {
+  console.error('[sendMessage] broadcast FAILED', e);
+}
+
 
   console.debug('[sendMessage] broadcast complete', { txid, vout, messageId, sentAt })
   return { txid, vout, messageId, sentAt }
