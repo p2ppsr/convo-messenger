@@ -1,156 +1,140 @@
-/**
- * Chat.tsx
- *
- * Simple chat window for a single thread.
- * - Renders a scrollable message list
- * - Lets me type and send a new message
- * - Performs an optimistic update so my message appears instantly
- * - Hands actual delivery off to sendMessage(), which encrypts & posts on-chain
- *
- * Notes:
- * - threadKey is the per-thread symmetric key; sendMessage() uses it to encrypt.
- * - myIdentityKeyHex is my identity pubkey (compressed secp256k1 hex).
- * - messages are already decrypted upstream (checkMessages).
- */
+// frontend/src/components/Chat.tsx
 
-import { useEffect, useMemo, useRef, useState } from 'react'
-import sendMessage from '../utils/sendMessage'
-import type { OutboundMessageBody } from '../utils/sendMessage'
-import type { ChatMessage } from '../utils/checkMessages'
+import React, { useEffect, useRef, useState } from 'react'
+import { loadMessages } from '../utils/loadMessages'
+import { sendMessage } from '../utils/sendMessage'
+import type { MessagePayloadWithMetadata } from '../types/types'
+import type { WalletClient, WalletProtocol } from '@bsv/sdk'
 
-type Props = {
-  /** Which thread I’m chatting in */
+interface ChatProps {
   threadId: string
-  /** My identity public key (used for optimistic author label + sendMessage) */
-  myIdentityKeyHex: string
-  /** 32-byte symmetric key for this thread (used by sendMessage to encrypt) */
-  threadKey: Uint8Array
-  /** Decrypted messages for this thread (rendered read-only here) */
-  messages: ChatMessage[]
-  /**
-   * Callback so the parent can append my message optimistically to the buffer
-   * (the parent owns the message list state).
-   */
-  onSent: (m: ChatMessage) => void
+  client: WalletClient
+  protocolID: WalletProtocol
+  keyID: string
+  senderPublicKey: string // identity public key in hex
+  recipientPublicKeys: string[] // identity public keys of other participants
 }
 
-export default function Chat({
+export const Chat: React.FC<ChatProps> = ({
   threadId,
-  myIdentityKeyHex,
-  threadKey,
-  messages,
-  onSent
-}: Props) {
-  /** Controlled textarea value for my outgoing message */
-  const [text, setText] = useState('')
-  /** While a send is in flight I disable the input/button */
-  const [sending, setSending] = useState(false)
-  /** I keep a ref to the scroll container so I can auto-scroll on new messages */
-  const listRef = useRef<HTMLDivElement | null>(null)
+  client,
+  protocolID,
+  keyID,
+  senderPublicKey,
+  recipientPublicKeys
+}) => {
+  const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
+  const [newMessage, setNewMessage] = useState('')
+  const [loading, setLoading] = useState(true)
+  const chatEndRef = useRef<HTMLDivElement>(null)
 
-  /**
-   * Only allow send if there’s non-whitespace content AND nothing is currently sending.
-   * I memoize this so the handler closures aren’t re-created for every keystroke.
-   */
-  const canSend = useMemo(
-    () => text.trim().length > 0 && !sending,
-    [text, sending]
-  )
+  const scrollToBottom = () => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
 
-  /**
-   * Whenever messages change, I jump the scroll position to the bottom so the
-   * newest content is visible without manual scrolling.
-   */
   useEffect(() => {
-    const el = listRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [messages])
+    const fetchMessages = async () => {
+      setLoading(true)
+      try {
+        const loaded = await loadMessages({
+          client,
+          protocolID,
+          keyID,
+          topic: threadId
+        })
+        setMessages(loaded)
+      } catch (err) {
+        console.error('[Chat] Failed to load messages:', err)
+      } finally {
+        setLoading(false)
+        scrollToBottom()
+      }
+    }
 
-  /**
-   * Submit handler:
-   * 1) Validate input
-   * 2) Build the message body payload
-   * 3) Do an optimistic append via onSent() so the UI feels instant
-   * 4) Call sendMessage() to actually encrypt + post the message
-   * 5) If it fails, I log for now (could mark the optimistic bubble as failed for retry)
-   */
-  const submit = async () => {
-    const trimmed = text.trim()
-    if (!trimmed || sending) return
+    fetchMessages()
+  }, [threadId, client, protocolID, keyID])
 
-    // What actually travels over the wire (after encryption inside sendMessage)
-    const body: OutboundMessageBody = { text: trimmed }
-
-    // Optimistic message shape used by the UI buffer
-    const optimistic: ChatMessage = { text: trimmed, authorId: myIdentityKeyHex }
-
-    // Push to the parent’s buffer immediately so the message shows up right away
-    onSent(optimistic)
-
-    // Clear the composer + flip the loading state
-    setText('')
-    setSending(true)
+  const handleSend = async () => {
+    if (!newMessage.trim()) return
 
     try {
       await sendMessage({
+        client,
+        protocolID,
+        keyID,
         threadId,
-        senderIdentityKeyHex: myIdentityKeyHex,
-        threadKey, // used by sendMessage() to encrypt with AES-GCM
-        body
+        senderPublicKey,
+        recipients: recipientPublicKeys,
+        content: newMessage.trim()
       })
-      // If this succeeds, nothing else to do—the poller will pick up the real one too.
-      // (Optionally reconcile optimistic vs confirmed here if you want delivery status.)
-    } catch (e) {
-      console.error('[Chat] send failed', e)
-      // TODO: surface a toast or mark the optimistic bubble as “failed” with a retry button.
-    } finally {
-      setSending(false)
+
+      const loaded = await loadMessages({
+        client,
+        protocolID,
+        keyID,
+        topic: threadId
+      })
+
+      setMessages(loaded)
+      setNewMessage('')
+      scrollToBottom()
+    } catch (err) {
+      console.error('[Chat] Failed to send message:', err)
+    }
+  }
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
     }
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Scrollable message list */}
-      <div
-        ref={listRef}
-        style={{ flex: 1, overflow: 'auto', paddingBottom: 8 }}
-      >
-        {messages.map((m, i) => (
-          <div key={i} style={{ marginBottom: 10 }}>
-            {/* Show “Me” for my messages; otherwise show the sender’s identity key */}
-            <strong>{m.authorId === myIdentityKeyHex ? 'Me' : m.authorId}</strong>
-            <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
-          </div>
-        ))}
+    <div className="flex flex-col h-full p-4">
+      <div className="flex-1 overflow-y-auto space-y-2">
+        {loading ? (
+          <div className="text-center text-gray-400">Loading messages...</div>
+        ) : messages.length === 0 ? (
+          <div className="text-center text-gray-400">No messages yet</div>
+        ) : (
+          messages.map((msg) => (
+            <div
+              key={`${msg.txid}-${msg.vout}`}
+              className={`p-2 rounded-lg max-w-[75%] ${
+                msg.sender === senderPublicKey
+                  ? 'bg-blue-500 text-white self-end ml-auto'
+                  : 'bg-gray-200 text-black self-start mr-auto'
+              }`}
+            >
+              <div className="text-sm whitespace-pre-wrap">{msg.content}</div>
+              <div className="text-xs text-right opacity-60 mt-1">
+                {new Date(msg.createdAt).toLocaleTimeString()}
+              </div>
+            </div>
+          ))
+        )}
+        <div ref={chatEndRef} />
       </div>
 
-      {/* Composer */}
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div className="mt-4 flex gap-2">
         <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={2}
-          style={{ flex: 1, resize: 'vertical' }}
-          placeholder="Type a message…"
-          disabled={sending}
-          onKeyDown={(e) => {
-            // Enter sends, Shift+Enter inserts a newline
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              if (canSend) submit()
-            }
-          }}
+          className="flex-1 p-2 border rounded resize-none min-h-[40px] max-h-[120px]"
+          placeholder="Type a message..."
+          value={newMessage}
+          onChange={(e) => setNewMessage(e.target.value)}
+          onKeyDown={handleKeyPress}
         />
         <button
-          onClick={submit}
-          disabled={!canSend}
-          aria-busy={sending}
-          aria-label="Send message"
+          className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
+          onClick={handleSend}
+          disabled={!newMessage.trim()}
         >
-          {sending ? 'Sending…' : 'Send'}
+          Send
         </button>
       </div>
     </div>
   )
 }
+
+export default Chat

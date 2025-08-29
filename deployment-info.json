@@ -2,7 +2,7 @@
   "schema": "bsv-app",
   "schemaVersion": "1.0",
   "topicManagers": {
-    "tm_ls_convo": "./backend/src/topic-managers/ConvoTopicManager.ts"
+    "tm_convo": "./backend/src/topic-managers/ConvoTopicManager.ts"
   },
   "lookupServices": {
     "ls_convo": {
