@@ -21,7 +21,10 @@ export async function loadMessages({
   keyID,
   topic
 }: LoadMessagesOptions): Promise<MessagePayloadWithMetadata[]> {
-  console.log(`[Convo] Loading messages for topic: ${topic}`)
+  console.log('\n[LoadMessages] --------------------------------------')
+  console.log(`[LoadMessages] Starting message load for topic: ${topic}`)
+  console.log('[LoadMessages] Protocol ID:', protocolID)
+  console.log('[LoadMessages] Key ID:', keyID)
 
   const resolver = new LookupResolver({
     networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
@@ -32,33 +35,38 @@ export async function loadMessages({
     response = await resolver.query({
       service: 'ls_convo',
       query: {
-        type: 'findByTopic',
-        topic
+        type: 'findByThreadId',
+        value: {
+          threadId: topic
+        }
       }
     })
 
-    console.log('[Convo] Lookup response:', response)
+    console.log('[LoadMessages] Overlay query succeeded.')
+    console.log('[LoadMessages] Raw overlay response:', response)
   } catch (err) {
-    console.error('[Convo] Failed to query overlay:', err)
+    console.error('[LoadMessages] Overlay query failed:', err)
     return []
   }
 
   if (response.type !== 'output-list' || !Array.isArray(response.outputs)) {
-    console.warn('[Convo] Unexpected overlay response type:', response.type)
+    console.warn('[LoadMessages] Unexpected overlay response type:', response.type)
     return []
   }
 
-  // Parse each output
-  const lookupResults = response.outputs.map((o: OverlayOutput) => {
+  console.log(`[LoadMessages] Retrieved ${response.outputs.length} outputs from overlay.`)
+
+  const lookupResults = response.outputs.map((o: OverlayOutput, i: number) => {
     let timestamp = Date.now()
     try {
       if (o.context) {
         const decoded = Utils.toUTF8(o.context)
         const parsed = parseInt(decoded, 10)
         if (!isNaN(parsed)) timestamp = parsed
+        console.log(`[LoadMessages] Output[${i}] parsed timestamp: ${parsed}`)
       }
     } catch (e) {
-      console.warn('[Convo] Failed to parse context timestamp, using fallback.')
+      console.warn(`[LoadMessages] Output[${i}] failed to parse timestamp. Using fallback.`)
     }
 
     return {
@@ -68,7 +76,7 @@ export async function loadMessages({
     }
   })
 
-  console.log(`[Convo] Decoding and decrypting ${lookupResults.length} outputs`)
+  console.log(`[LoadMessages] Decoding and decrypting ${lookupResults.length} outputs...`)
 
   const messages = await checkMessages({
     client,
@@ -77,9 +85,7 @@ export async function loadMessages({
     lookupResults
   })
 
-  // Sort messages by createdAt (ascending)
   const sorted = messages.sort((a, b) => a.createdAt - b.createdAt)
-
-  console.log(`[Convo] Returning ${sorted.length} sorted messages`)
+  console.log(`[LoadMessages] Returning ${sorted.length} sorted messages.`)
   return sorted
 }

@@ -15,36 +15,41 @@ import type { MessagePayload } from '../types/types'
 
 export interface SendMessageOptions {
   client: WalletClient
-  senderPublicKey: string            // identity public key (hex)
+  senderPublicKey: string
   threadId: string
-  content: string                    // simplified from MessagePayload
-  recipients: string[]              // recipient identity pubkeys
-  protocolID?: WalletProtocol       // e.g. [2, 'tmsg']
-  keyID?: string                    // e.g. '1'
-  topic?: string                    // default: 'convo_messages'
-  basket?: string                   // default: 'tmsg'
+  content: string
+  recipients: string[]
+  protocolID?: WalletProtocol
+  keyID?: string
+  topic?: string
+  basket?: string
 }
 
-/**
- * Encrypts, signs, and sends a message to the overlay.
- */
 export async function sendMessage({
   client,
   senderPublicKey,
   threadId,
   content,
   recipients,
-  protocolID = [2, 'tmsg'],
+  protocolID = [2, 'tmconvo'],
   keyID = '1',
-  topic = 'convo_messages',
-  basket = 'tmsg'
+  topic = 'convo',
+  basket = 'convo'
 }: SendMessageOptions): Promise<string> {
   const pushdrop = new PushDrop(client)
   const broadcaster = new TopicBroadcaster([`tm_${topic}`], {
     networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
   })
 
-  console.log(`[Convo] Preparing message for thread "${threadId}" from sender "${senderPublicKey}"`)
+  console.log(`\n[Convo] ----------------------------------------`)
+  console.log(`[Convo] Preparing message for thread "${threadId}"`)
+  console.log(`[Convo] Sender public key: ${senderPublicKey}`)
+  console.log(`[Convo] Raw content: ${content}`)
+  console.log(`[Convo] ProtocolID: ${JSON.stringify(protocolID)}, keyID: ${keyID}`)
+  console.log(`[Convo] Topic: ${topic}, Basket: ${basket}`)
+
+  const uniqueRecipients = Array.from(new Set([...recipients, senderPublicKey]))
+  console.log(`[Convo] Recipients (${uniqueRecipients.length}):`, uniqueRecipients)
 
   const payload: MessagePayload = {
     type: 'message',
@@ -52,17 +57,23 @@ export async function sendMessage({
     mediaURL: undefined
   }
 
-  // Encrypt message
   let header: number[], encryptedPayload: number[]
   try {
-    ({ header, encryptedPayload } = await encryptMessage(
+    console.log('[Convo] Calling encryptMessage...')
+    ;({ header, encryptedPayload } = await encryptMessage(
       client,
       payload,
-      recipients,
+      uniqueRecipients,
       protocolID,
       keyID
     ))
+
     console.log('[Convo] Encryption succeeded.')
+    console.log('[Convo] Header preview (first 8 bytes):', header.slice(0, 8))
+    console.log('[Convo] Encrypted payload length:', encryptedPayload.length)
+    console.log('[Convo] Encrypted header length:', header.length)
+    console.log('[Convo] Encrypted header (hex preview):', Utils.toHex(header.slice(0, 16)), '...')
+    console.log('[Convo] Encrypted payload (hex preview):', Utils.toHex(encryptedPayload.slice(0, 16)), '...')
   } catch (err) {
     console.error('[Convo] Encryption failed:', err)
     throw new Error('Failed to encrypt message.')
@@ -71,27 +82,45 @@ export async function sendMessage({
   const timestamp = Date.now()
   const uniqueID = Utils.toHex(Hash.sha256(Utils.toArray(Math.random().toString(), 'utf8')))
 
-  console.log(`[Convo] Timestamp: ${timestamp}, Unique ID: ${uniqueID}`)
+  console.log(`[Convo] Timestamp: ${timestamp}`)
+  console.log(`[Convo] Unique ID: ${uniqueID}`)
 
-  // Build locking script
-  const lockingScript = await pushdrop.lock(
-    [
-      Utils.toArray(topic, 'utf8'),
-      Utils.toArray(String(protocolID[0]), 'utf8'),
-      Utils.toArray(senderPublicKey, 'utf8'),
-      Utils.toArray(threadId, 'utf8'),
-      header,
-      encryptedPayload,
-      Utils.toArray(String(timestamp), 'utf8'),
-      Utils.toArray(uniqueID, 'utf8')
-    ],
-    [2, basket],
-    keyID,
-    'anyone',
-    true
-  )
+  const fields = [
+    Utils.toArray(topic, 'utf8'),                       // 0
+    Utils.toArray('tmconvo', 'utf8'),                   // 1
+    Utils.toArray(senderPublicKey, 'utf8'),             // 2
+    Utils.toArray(threadId, 'utf8'),                    // 3
+    header,                                             // 4
+    encryptedPayload,                                   // 5
+    Utils.toArray(String(timestamp), 'utf8'),           // 6
+    Utils.toArray(uniqueID, 'utf8')                     // 7
+  ]
 
-  // Create action
+  console.log(`[Convo] PushDrop Field Breakdown:`)
+  fields.forEach((field, index) => {
+    let preview = Array.isArray(field)
+      ? field.slice(0, 12).map(b => b.toString(16).padStart(2, '0')).join(' ')
+      : 'non-array field'
+    let stringValue = ''
+
+    try {
+      if (index <= 3 || index >= 6) {
+        stringValue = Utils.toUTF8(field as number[])
+      } else if (index === 4) {
+        stringValue = '[header bytes]'
+      } else if (index === 5) {
+        stringValue = '[encrypted payload]'
+      }
+    } catch (e) {
+      stringValue = '[decode error]'
+    }
+
+    console.log(`  [${index}] ${stringValue} (${field.length} bytes): ${preview}`)
+  })
+
+  const lockingScript = await pushdrop.lock(fields, [2, basket], keyID, 'anyone', true)
+  console.log('[Convo] Locking script constructed.')
+
   const { tx } = await client.createAction({
     outputs: [
       {
@@ -114,10 +143,8 @@ export async function sendMessage({
 
   const transaction = Transaction.fromAtomicBEEF(tx)
   const txid = transaction.id('hex')
-
   console.log(`[Convo] Created transaction. txid: ${txid}`)
 
-  // Broadcast to overlay
   try {
     await broadcaster.broadcast(transaction)
     console.log(`[Convo] Broadcast to overlay succeeded. txid: ${txid}`)

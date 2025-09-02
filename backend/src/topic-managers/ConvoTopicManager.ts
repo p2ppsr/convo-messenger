@@ -20,8 +20,8 @@ export default class ConvoTopicManager implements TopicManager {
           const decoded = PushDrop.decode(output.lockingScript)
           const fields = decoded.fields
 
-          if (fields.length !== 4) {
-            console.log(`[ConvoTopicManager] Output #${index} – Unexpected field count: ${fields.length}`)
+          if (fields.length < 8) {
+            console.log(`[ConvoTopicManager] Output #${index} – Too few fields: ${fields.length}`)
             continue
           }
 
@@ -68,7 +68,7 @@ export default class ConvoTopicManager implements TopicManager {
     return {
       name: 'tm_convo',
       shortDescription: 'Convo Messenger Topic Manager',
-      version: '1.0.0'
+      version: '1.1.0'
     }
   }
 }

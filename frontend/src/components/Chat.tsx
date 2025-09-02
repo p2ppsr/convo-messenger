@@ -1,13 +1,13 @@
 // frontend/src/components/Chat.tsx
 
 import React, { useEffect, useRef, useState } from 'react'
+import { useParams } from 'react-router-dom'
 import { loadMessages } from '../utils/loadMessages'
 import { sendMessage } from '../utils/sendMessage'
 import type { MessagePayloadWithMetadata } from '../types/types'
 import type { WalletClient, WalletProtocol } from '@bsv/sdk'
 
 interface ChatProps {
-  threadId: string
   client: WalletClient
   protocolID: WalletProtocol
   keyID: string
@@ -16,13 +16,13 @@ interface ChatProps {
 }
 
 export const Chat: React.FC<ChatProps> = ({
-  threadId,
   client,
   protocolID,
   keyID,
   senderPublicKey,
   recipientPublicKeys
 }) => {
+  const { threadId } = useParams<{ threadId: string }>()
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
   const [newMessage, setNewMessage] = useState('')
   const [loading, setLoading] = useState(true)
@@ -34,6 +34,7 @@ export const Chat: React.FC<ChatProps> = ({
 
   useEffect(() => {
     const fetchMessages = async () => {
+      if (!threadId) return
       setLoading(true)
       try {
         const loaded = await loadMessages({
@@ -55,7 +56,7 @@ export const Chat: React.FC<ChatProps> = ({
   }, [threadId, client, protocolID, keyID])
 
   const handleSend = async () => {
-    if (!newMessage.trim()) return
+    if (!newMessage.trim() || !threadId) return
 
     try {
       await sendMessage({

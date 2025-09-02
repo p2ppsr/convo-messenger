@@ -1,4 +1,4 @@
-import { WalletInterface, WalletProtocol } from '@bsv/sdk'
+import { WalletInterface, WalletProtocol, Utils } from '@bsv/sdk'
 import { CurvePoint } from 'curvepoint'
 import { MessagePayload } from '../types/types'
 
@@ -19,9 +19,19 @@ export async function encryptMessage(
   protocolID: WalletProtocol,
   keyID: string
 ): Promise<{ encryptedPayload: number[]; header: number[] }> {
+  console.log('\n[MessageEncryptor] --------------------------------------')
+  console.log('[MessageEncryptor] Starting encryption...')
+  console.log('[MessageEncryptor] Recipients:', recipients)
+  console.log('[MessageEncryptor] Protocol ID:', protocolID)
+  console.log('[MessageEncryptor] Key ID:', keyID)
+  console.log('[MessageEncryptor] Payload object:', payload)
+
   // 1. Convert message to bytes
   const plaintext = JSON.stringify(payload)
   const dataBytes = Array.from(new TextEncoder().encode(plaintext))
+  console.log('[MessageEncryptor] Plaintext (string):', plaintext)
+  console.log('[MessageEncryptor] Plaintext (bytes length):', dataBytes.length)
+  console.log('[MessageEncryptor] Plaintext (hex preview):', Utils.toHex(dataBytes.slice(0, 16)), '...')
 
   // 2. Construct CurvePoint instance with wallet
   const curvePoint = new CurvePoint(wallet)
@@ -33,6 +43,12 @@ export async function encryptMessage(
     keyID,
     recipients
   )
+
+  console.log('[MessageEncryptor] Encryption successful.')
+  console.log('[MessageEncryptor] Header length:', header.length)
+  console.log('[MessageEncryptor] Encrypted message length:', encryptedMessage.length)
+  console.log('[MessageEncryptor] Header (hex preview):', Utils.toHex(header.slice(0, 16)), '...')
+  console.log('[MessageEncryptor] Encrypted message (hex preview):', Utils.toHex(encryptedMessage.slice(0, 16)), '...')
 
   return {
     encryptedPayload: encryptedMessage,

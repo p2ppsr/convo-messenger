@@ -26,6 +26,8 @@ export class ConvoLookupService implements LookupService {
     if (payload.mode !== 'locking-script') throw new Error('Invalid mode')
     const { topic, lockingScript, txid, outputIndex } = payload
 
+    console.log(`[ConvoLookupService] outputAdmittedByTopic called for topic: "${topic}", txid: ${txid}, outputIndex: ${outputIndex}`)
+
     if (topic !== 'tm_convo') {
       console.warn(`[ConvoLookupService] Ignoring unknown topic: "${topic}"`)
       return
@@ -33,13 +35,40 @@ export class ConvoLookupService implements LookupService {
 
     try {
       const decoded = PushDrop.decode(lockingScript)
-      const [senderBuf, threadIdBuf, headerBuf, payloadBuf] = decoded.fields
+      const fields = decoded.fields
+
+      console.log(`[ConvoLookupService] Decoded ${fields.length} fields from lockingScript`)
+
+      if (fields.length < 7) {
+        console.warn('[ConvoLookupService] Not enough fields to store a message')
+        return
+      }
+
+      const [
+        topicBuf,
+        protocolBuf,
+        senderBuf,
+        threadIdBuf,
+        headerBuf,
+        payloadBuf,
+        timestampBuf,
+        uniqueIdBuf
+      ] = fields
+
+      const topicVal = Utils.toUTF8(topicBuf)
+      const protocolVal = Utils.toUTF8(protocolBuf)
+
+      if (topicVal !== 'convo' || protocolVal !== 'convo') {
+        console.warn(`[ConvoLookupService] Invalid topic/protocol values in script: ${topicVal}, ${protocolVal}`)
+        return
+      }
 
       const sender = Utils.toHex(senderBuf)
       const threadId = Utils.toUTF8(threadIdBuf)
       const header = Array.from(headerBuf)
       const encryptedPayload = Array.from(payloadBuf)
-      const createdAt = Date.now()
+      const createdAt = timestampBuf ? parseInt(Utils.toUTF8(timestampBuf)) : Date.now()
+      const uniqueId = uniqueIdBuf ? Utils.toUTF8(uniqueIdBuf) : undefined
 
       const record: EncryptedMessage = {
         txid,
@@ -48,14 +77,11 @@ export class ConvoLookupService implements LookupService {
         sender,
         encryptedPayload,
         header,
-        createdAt
+        createdAt,
+        ...(uniqueId ? { uniqueId } : {})
       }
 
-      console.log('[ConvoLookupService] Storing message:', {
-        threadId,
-        sender,
-        txid
-      })
+      console.log('[ConvoLookupService] Storing message record:', record)
 
       await this.storage.storeMessage(record)
     } catch (err) {
@@ -77,7 +103,7 @@ export class ConvoLookupService implements LookupService {
   }
 
   async outputEvicted(txid: string, outputIndex: number): Promise<void> {
-    console.log(`[ConvoLookupService] Evicting message: ${txid}`)
+    console.log(`[ConvoLookupService] Evicting message: ${txid}, outputIndex: ${outputIndex}`)
     await this.storage.deleteMessage(txid)
   }
 
@@ -91,34 +117,41 @@ export class ConvoLookupService implements LookupService {
 
     const query = question.query as any
 
-    if (typeof query === 'object' && query.type === 'findByThreadId') {
+    console.log(`[ConvoLookupService] Performing lookup with query type: "${query.type}"`, query)
+
+    if (query.type === 'findByThreadId') {
       const messages = await this.storage.getMessagesByThread(query.value.threadId)
+      console.log(`[ConvoLookupService] Found ${messages.length} message(s) for threadId: ${query.value.threadId}`)
       return this.formatAsLookupAnswers(messages)
     }
 
-    if (typeof query === 'object' && query.type === 'getMessage') {
+    if (query.type === 'getMessage') {
       const message = await this.storage.getMessageByTxid(query.value.txid)
+      console.log(`[ConvoLookupService] Found message for txid: ${query.value.txid}`, message)
       return message ? this.formatAsLookupAnswers([message]) : []
     }
 
-    if (typeof query === 'object' && query.type === 'findAll') {
+    if (query.type === 'findAll') {
       const messages = await this.storage.findAllMessages()
+      console.log(`[ConvoLookupService] Returning all ${messages.length} stored messages`)
       return this.formatAsLookupAnswers(messages)
     }
 
+    console.warn('[ConvoLookupService] Unsupported query type:', query)
     throw new Error('Unknown or unsupported query type.')
   }
 
   private formatAsLookupAnswers(messages: EncryptedMessage[]): LookupFormula {
-  return messages.map(msg => ({
-    txid: msg.txid,
-    outputIndex: msg.outputIndex,
-    context: [
-      ...[], // add other context values here if needed
-      ...Utils.toArray(msg.createdAt.toString(), 'utf8') // Send timestamp as UTF-8
-    ]
-  }))
-}
+    console.log(`[ConvoLookupService] Formatting ${messages.length} message(s) into LookupFormula`)
+    return messages.map(msg => ({
+      txid: msg.txid,
+      outputIndex: msg.outputIndex,
+      context: [
+        ...[], // placeholder for more metadata
+        ...Utils.toArray(msg.createdAt.toString(), 'utf8')
+      ]
+    }))
+  }
 
   async getDocumentation(): Promise<string> {
     return docs

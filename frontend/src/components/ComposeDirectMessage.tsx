@@ -80,47 +80,77 @@ const ComposeDirectMessage: React.FC<ComposeDirectMessageProps> = ({
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
-      <DialogTitle>New 1-on-1 Message</DialogTitle>
-      <DialogContent>
+        <DialogTitle sx={{ backgroundColor: '#222', color: 'white' }}>
+        New 1-on-1 Message
+        </DialogTitle>
+
+        <DialogContent sx={{ backgroundColor: '#333', color: 'white' }}>
         <Box sx={{ my: 2 }}>
-          <IdentitySearchField
+            <IdentitySearchField
             appName="Convo Messenger"
             onIdentitySelected={setSelectedIdentity}
-          />
+            />
         </Box>
 
         {selectedIdentity && (
-          <Box sx={{ mt: 2, p: 1, backgroundColor: '#f5f5f5', borderRadius: 1 }}>
-            <Typography variant="subtitle1">{selectedIdentity.name}</Typography>
-            <Typography variant="body2" color="text.secondary">
-              {selectedIdentity.identityKey}
+            <Box
+            sx={{
+                mt: 2,
+                p: 2,
+                borderRadius: 2,
+                backgroundColor: '#444',
+                color: 'white'
+            }}
+            >
+            <Typography variant="subtitle1" sx={{ color: 'white' }}>
+                {selectedIdentity.name}
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'gray', wordBreak: 'break-all' }}>
+                {selectedIdentity.identityKey}
             </Typography>
 
             <TextField
-              label="Message"
-              fullWidth
-              multiline
-              rows={3}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              sx={{ mt: 2 }}
+                label="Message"
+                fullWidth
+                multiline
+                rows={3}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                sx={{
+                mt: 2,
+                '& label': { color: 'white' },
+                '& .MuiOutlinedInput-root': {
+                    color: 'white',
+                    '& fieldset': {
+                    borderColor: 'gray',
+                    },
+                    '&:hover fieldset': {
+                    borderColor: 'white',
+                    },
+                    '&.Mui-focused fieldset': {
+                    borderColor: 'white',
+                    },
+                }
+                }}
             />
-          </Box>
+            </Box>
         )}
-      </DialogContent>
+        </DialogContent>
 
-      <DialogActions>
-        <Button onClick={onClose} disabled={sending}>Cancel</Button>
-        <Button
-          variant="contained"
-          onClick={handleSend}
-          disabled={!selectedIdentity?.identityKey || !message || sending}
-        >
-          Send
+        <DialogActions sx={{ backgroundColor: '#222' }}>
+        <Button onClick={onClose} disabled={sending}>
+            Cancel
         </Button>
-      </DialogActions>
+        <Button
+            variant="contained"
+            onClick={handleSend}
+            disabled={!selectedIdentity?.identityKey || !message || sending}
+        >
+            Send
+        </Button>
+        </DialogActions>
     </Dialog>
-  )
+    )
 }
 
 export default ComposeDirectMessage

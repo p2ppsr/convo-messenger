@@ -22,6 +22,7 @@ export interface EncryptedMessage {
   header: number[]            // CurvePoint header (with recipients + keys)
   createdAt: number           // Unix timestamp (ms)
   mediaURL?: string           // Optional pointer to uploaded media
+  uniqueId?: string           // Optional unique identifier for the message
 }
 
 export interface ParticipantChangeLog {
