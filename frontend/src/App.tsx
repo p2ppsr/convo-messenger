@@ -31,13 +31,7 @@ const App = () => {
       await client.waitForAuthentication()
       console.log('[Convo] MetaNet client detected and authenticated.')
 
-      await client.getPublicKey({ identityKey: true })
-
-      const pubkey = await client.getPublicKey({
-        protocolID: [2, 'convo'],
-        keyID: '1',
-        counterparty: 'self'
-      })
+      const pubkey = await client.getPublicKey({ identityKey: true })
 
       console.log('[Convo] Derived identity key:', pubkey)
       setWalletClient(client)

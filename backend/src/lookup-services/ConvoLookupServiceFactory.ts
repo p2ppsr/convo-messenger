@@ -58,7 +58,7 @@ export class ConvoLookupService implements LookupService {
       const topicVal = Utils.toUTF8(topicBuf)
       const protocolVal = Utils.toUTF8(protocolBuf)
 
-      if (topicVal !== 'convo' || protocolVal !== 'convo') {
+      if (topicVal !== 'convo' || protocolVal !== 'tmconvo') {
         console.warn(`[ConvoLookupService] Invalid topic/protocol values in script: ${topicVal}, ${protocolVal}`)
         return
       }
