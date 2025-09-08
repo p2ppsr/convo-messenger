@@ -19,7 +19,7 @@ interface ComposeThreadProps {
   senderPublicKey: string
   protocolID: WalletProtocol
   keyID: string
-  onThreadCreated: (threadId: string) => void
+  onThreadCreated: (threadId: string, recipientPublicKeys: string[]) => void
   onClose: () => void
   open?: boolean
 }
@@ -65,7 +65,7 @@ const ComposeThread: React.FC<ComposeThreadProps> = ({
         keyID
       })
 
-      onThreadCreated(threadId)
+      onThreadCreated(threadId, recipientPublicKeys)
       onClose()
     } catch (err) {
       console.error('[ComposeThread] Failed to create thread:', err)

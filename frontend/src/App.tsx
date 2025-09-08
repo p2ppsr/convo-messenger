@@ -32,8 +32,8 @@ const App = () => {
       console.log('[Convo] MetaNet client detected and authenticated.')
 
       const pubkey = await client.getPublicKey({ identityKey: true })
-
       console.log('[Convo] Derived identity key:', pubkey)
+
       setWalletClient(client)
       setIdentityKey(pubkey.publicKey)
     }
@@ -62,17 +62,16 @@ const App = () => {
             />
           }
         />
-      <Route
+        <Route
           path="/thread/:threadId"
-          element={(
+          element={
             <Chat
               client={walletClient}
               senderPublicKey={identityKey}
               protocolID={protocolID}
               keyID={keyID}
-              recipientPublicKeys={[]}
             />
-          )}
+          }
         />
       </Routes>
     </Router>

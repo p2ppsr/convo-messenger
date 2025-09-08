@@ -1,31 +1,49 @@
-// frontend/src/utils/resolveDisplayNames.ts
-
+// src/utils/resolveDisplayNames.ts
 import { IdentityClient } from '@bsv/sdk'
-import { DisplayableIdentity } from '@bsv/identity-react'
-import type { DirectMessageEntry } from '../components/DirectMessageList'
 
+const identityClient = new IdentityClient()
+
+/**
+ * Resolves an array of public keys to display names.
+ * Falls back to the key if no name is found.
+ * Optionally exclude the current user's key.
+ */
 export async function resolveDisplayNames(
-  entries: DirectMessageEntry[]
-): Promise<DirectMessageEntry[]> {
-  const client = new IdentityClient({
-    networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
-  })
+  pubkeys: string[],
+  excludeKey?: string
+): Promise<Map<string, string>> {
+  console.log('[resolveDisplayNames] Raw input pubkeys:', pubkeys)
 
-  const names = await Promise.all(
-    entries.map((entry) =>
-      client
-        .resolve(entry.otherParticipantKey)
-        .then((identity) => ({
-          ...entry,
-          otherParticipantName:
-            (identity as DisplayableIdentity)?.name || entry.otherParticipantKey.slice(0, 12) + '...'
-        }))
-        .catch(() => ({
-          ...entry,
-          otherParticipantName: entry.otherParticipantKey.slice(0, 12) + '...'
-        }))
-    )
+  const filtered = pubkeys.filter(
+    (key) => key && key.length > 0 && key !== excludeKey
   )
 
-  return names
+  console.log('[resolveDisplayNames] Filtered keys (excluding self and blanks):', filtered)
+
+  const results = await Promise.all(
+    filtered.map(async (key) => {
+      try {
+        console.log(`[resolveDisplayNames] Attempting to resolve: ${key}`)
+
+        const identities = await identityClient.resolveByIdentityKey({ identityKey: key })
+
+        console.log(`[resolveDisplayNames] Resolved identities for ${key}:`, identities)
+
+        const name = identities.length > 0
+          ? identities[0].name || key.slice(0, 10) + '...'
+          : key.slice(0, 10) + '...'
+
+        return [key, name] as const
+      } catch (err) {
+        console.warn(`[resolveDisplayNames] Failed to resolve name for ${key}`, err)
+        return [key, key.slice(0, 10) + '...'] as const
+      }
+    })
+  )
+
+  const nameMap = new Map(results)
+
+  console.log('[resolveDisplayNames] Final name map:', Object.fromEntries(nameMap))
+
+  return nameMap
 }

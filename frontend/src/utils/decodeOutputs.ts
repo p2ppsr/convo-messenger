@@ -1,3 +1,4 @@
+// src/utils/decodeOutputs.ts
 import { Transaction, PushDrop, Utils } from '@bsv/sdk'
 
 export interface DecodedMessage {
@@ -9,6 +10,7 @@ export interface DecodedMessage {
   txid: string
   vout: number
   beef: number[]
+  recipients: string[]
 }
 
 export async function decodeOutput(
@@ -21,19 +23,43 @@ export async function decodeOutput(
   const decoded = PushDrop.decode(output.lockingScript)
   const fields = decoded.fields
 
+  console.log(`[decodeOutput] Decoding vout ${outputIndex} at timestamp ${timestamp}`)
+  console.log('[decodeOutput] PushDrop fields length:', fields.length)
+
   if (fields.length < 7) {
     throw new Error('Invalid PushDrop message: not enough fields')
   }
 
+  const threadId = Utils.toUTF8(fields[3])
+  const sender = Utils.toHex(Array.from(fields[2] as unknown as Uint8Array))
+
+  const recipients = Array.isArray(fields[6])
+    ? fields[6]
+        .map((r: unknown) => {
+          try {
+            return Utils.toHex(Array.from(r as unknown as Uint8Array))
+          } catch (err) {
+            console.warn('[decodeOutput] Failed to decode recipient field:', r, err)
+            return ''
+          }
+        })
+        .filter((r) => r.length > 0)
+    : []
+
+  console.log('[decodeOutput] Thread ID:', threadId)
+  console.log('[decodeOutput] Sender:', sender)
+  console.log('[decodeOutput] Recipients:', recipients)
+
   return {
-    threadId: Utils.toUTF8(fields[3]),
-    sender: Utils.toUTF8(fields[2]),
+    threadId,
+    sender,
     header: fields[4],
     encryptedPayload: fields[5],
     createdAt: timestamp,
     txid: decodedTx.id('hex'),
     vout: outputIndex,
-    beef
+    beef,
+    recipients
   }
 }
 

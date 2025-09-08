@@ -10,14 +10,14 @@ import {
 import {
   LookupResolver,
   Utils,
-  IdentityClient,
   WalletClient,
   SecurityLevel
 } from '@bsv/sdk'
 
 import { decodeOutputs } from '../utils/decodeOutputs'
-import { decryptMessageBatch } from '../utils/MessageDecryptor' // includes batch decryption
-import type { DirectMessageEntry } from '../types/types' // optionally extracted for reuse
+import { decryptMessageBatch } from '../utils/MessageDecryptor'
+import { resolveDisplayNames } from '../utils/resolveDisplayNames'
+import type { DirectMessageEntry } from '../types/types'
 
 interface DirectMessageListProps {
   identityKey: string
@@ -44,8 +44,6 @@ const DirectMessageList = ({
           networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
         })
 
-        const identityClient = new IdentityClient(client)
-
         const response = await resolver.query({
           service: 'ls_convo',
           query: { type: 'findAll' }
@@ -64,62 +62,71 @@ const DirectMessageList = ({
         }))
 
         const decoded = await decodeOutputs(toDecode)
-
         const decrypted = await decryptMessageBatch(client, decoded, protocolID, keyID)
 
+        // Filter to direct messages only
         const filtered = decrypted.filter(
           (msg) =>
             msg.threadId &&
-            msg.payload?.recipients?.length === 1 // ensure payload is present
+            msg.payload?.recipients?.length === 1
         )
 
-        const grouped: Record<string, DirectMessageEntry> = {}
+        // Group by threadId → keep most recent per thread
+        const grouped: Record<string, { threadId: string, participantKey: string, lastTimestamp: number }> = {}
 
-        for (const message of filtered) {
-          const { threadId, sender, payload, createdAt } = message
-          const otherKey =
-            sender === identityKey
-              ? (payload && payload.recipients && payload.recipients[0])
-                ? payload.recipients[0]
-                : ''
-              : sender
+        for (const msg of filtered) {
+          const { threadId, sender, payload, createdAt } = msg
 
-          if (!grouped[threadId]) {
+          const otherKey = sender === identityKey
+            ? payload?.recipients?.[0] ?? ''
+            : sender
+
+          if (!otherKey) continue
+
+          if (
+            !grouped[threadId] ||
+            createdAt > grouped[threadId].lastTimestamp
+          ) {
             grouped[threadId] = {
               threadId,
-              otherParticipantKey: otherKey,
-              otherParticipantName: otherKey.slice(0, 12) + '...',
+              participantKey: otherKey,
               lastTimestamp: createdAt
             }
-          } else {
-            grouped[threadId].lastTimestamp = Math.max(
-              grouped[threadId].lastTimestamp,
-              createdAt
-            )
           }
         }
 
-        const resolved = await Promise.all(
-            Object.values(grouped).map(async (entry) => {
-                try {
-                const identities = await identityClient.resolveByIdentityKey({
-                    identityKey: entry.otherParticipantKey
-                })
+        const uniqueEntries = Object.values(grouped)
 
-                const identity = identities[0] // pick the first match, if any
+        // Resolve all participant keys
+        const keyMap = await resolveDisplayNames(
+          uniqueEntries.map((entry) => entry.participantKey),
+          identityKey
+        )
 
-                return {
-                    ...entry,
-                    otherParticipantName:
-                    identity?.name || entry.otherParticipantKey.slice(0, 12) + '...'
-                }
-                } catch {
-                return entry
-                }
+        const dedupedByKey = new Map<string, DirectMessageEntry>()
+
+        for (const entry of uniqueEntries) {
+          const displayName = keyMap.get(entry.participantKey) ?? entry.participantKey.slice(0, 12) + '...'
+
+          // Ensure only one thread per identityKey (most recent one)
+          if (
+            !dedupedByKey.has(entry.participantKey) ||
+            entry.lastTimestamp > (dedupedByKey.get(entry.participantKey)?.lastTimestamp ?? 0)
+          ) {
+            dedupedByKey.set(entry.participantKey, {
+              threadId: entry.threadId,
+              otherParticipantKey: entry.participantKey,
+              otherParticipantName: displayName,
+              lastTimestamp: entry.lastTimestamp
             })
-            )
+          }
+        }
 
-        setMessages(resolved.sort((a, b) => b.lastTimestamp - a.lastTimestamp))
+        const finalMessages = Array.from(dedupedByKey.values()).sort(
+          (a, b) => b.lastTimestamp - a.lastTimestamp
+        )
+
+        setMessages(finalMessages)
       } catch (err) {
         console.error('[DirectMessageList] Failed to load messages:', err)
       } finally {

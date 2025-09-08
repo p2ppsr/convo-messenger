@@ -38,16 +38,19 @@ const ComposeDirectMessage: React.FC<ComposeDirectMessageProps> = ({
   keyID
 }) => {
   const [selectedIdentity, setSelectedIdentity] = useState<DisplayableIdentity | null>(null)
+  const [manualKey, setManualKey] = useState<string>('') // ✅ NEW
   const [message, setMessage] = useState('')
   const [sending, setSending] = useState(false)
 
+  const identityKey = selectedIdentity?.identityKey || manualKey.trim() || null // ✅ NEW
+
   const handleSend = async () => {
-    if (!selectedIdentity?.identityKey || !message) return
+    if (!identityKey || !message) return
 
     setSending(true)
 
     try {
-      const keys = [senderPublicKey, selectedIdentity.identityKey].sort()
+      const keys = [senderPublicKey, identityKey].sort()
       const threadId = await crypto.subtle.digest(
         'SHA-256',
         new TextEncoder().encode(keys.join('|'))
@@ -61,13 +64,14 @@ const ComposeDirectMessage: React.FC<ComposeDirectMessageProps> = ({
         senderPublicKey,
         threadId: threadIdHex,
         content: message,
-        recipients: [selectedIdentity.identityKey],
+        recipients: [identityKey],
         protocolID,
         keyID
       })
 
       onCreate(threadIdHex)
       setSelectedIdentity(null)
+      setManualKey('') // ✅ reset manual key
       setMessage('')
       onClose()
     } catch (err) {
@@ -80,77 +84,94 @@ const ComposeDirectMessage: React.FC<ComposeDirectMessageProps> = ({
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
-        <DialogTitle sx={{ backgroundColor: '#222', color: 'white' }}>
+      <DialogTitle sx={{ backgroundColor: '#222', color: 'white' }}>
         New 1-on-1 Message
-        </DialogTitle>
+      </DialogTitle>
 
-        <DialogContent sx={{ backgroundColor: '#333', color: 'white' }}>
+      <DialogContent sx={{ backgroundColor: '#333', color: 'white' }}>
         <Box sx={{ my: 2 }}>
-            <IdentitySearchField
+          <IdentitySearchField
             appName="Convo Messenger"
             onIdentitySelected={setSelectedIdentity}
-            />
+          />
+          <Typography variant="body2" sx={{ mt: 1, color: 'gray' }}>
+            or paste an identity key manually:
+          </Typography>
+          <TextField
+            label="Identity Key"
+            fullWidth
+            value={manualKey}
+            onChange={(e) => setManualKey(e.target.value)}
+            sx={{
+              mt: 1,
+              '& label': { color: 'white' },
+              '& .MuiOutlinedInput-root': {
+                color: 'white',
+                '& fieldset': { borderColor: 'gray' },
+                '&:hover fieldset': { borderColor: 'white' },
+                '&.Mui-focused fieldset': { borderColor: 'white' },
+              }
+            }}
+          />
         </Box>
 
-        {selectedIdentity && (
-            <Box
+        {identityKey && (
+          <Box
             sx={{
-                mt: 2,
-                p: 2,
-                borderRadius: 2,
-                backgroundColor: '#444',
-                color: 'white'
+              mt: 2,
+              p: 2,
+              borderRadius: 2,
+              backgroundColor: '#444',
+              color: 'white'
             }}
-            >
-            <Typography variant="subtitle1" sx={{ color: 'white' }}>
-                {selectedIdentity.name}
-            </Typography>
-            <Typography variant="body2" sx={{ color: 'gray', wordBreak: 'break-all' }}>
-                {selectedIdentity.identityKey}
+          >
+            <Typography variant="body2" sx={{ wordBreak: 'break-all' }}>
+              <strong>Recipient Key:</strong><br />
+              {identityKey}
             </Typography>
 
             <TextField
-                label="Message"
-                fullWidth
-                multiline
-                rows={3}
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                sx={{
+              label="Message"
+              fullWidth
+              multiline
+              rows={3}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              sx={{
                 mt: 2,
                 '& label': { color: 'white' },
                 '& .MuiOutlinedInput-root': {
-                    color: 'white',
-                    '& fieldset': {
+                  color: 'white',
+                  '& fieldset': {
                     borderColor: 'gray',
-                    },
-                    '&:hover fieldset': {
+                  },
+                  '&:hover fieldset': {
                     borderColor: 'white',
-                    },
-                    '&.Mui-focused fieldset': {
+                  },
+                  '&.Mui-focused fieldset': {
                     borderColor: 'white',
-                    },
+                  },
                 }
-                }}
+              }}
             />
-            </Box>
+          </Box>
         )}
-        </DialogContent>
+      </DialogContent>
 
-        <DialogActions sx={{ backgroundColor: '#222' }}>
+      <DialogActions sx={{ backgroundColor: '#222' }}>
         <Button onClick={onClose} disabled={sending}>
-            Cancel
+          Cancel
         </Button>
         <Button
-            variant="contained"
-            onClick={handleSend}
-            disabled={!selectedIdentity?.identityKey || !message || sending}
+          variant="contained"
+          onClick={handleSend}
+          disabled={!identityKey || !message || sending}
         >
-            Send
+          Send
         </Button>
-        </DialogActions>
+      </DialogActions>
     </Dialog>
-    )
+  )
 }
 
 export default ComposeDirectMessage

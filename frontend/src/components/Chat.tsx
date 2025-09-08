@@ -1,7 +1,7 @@
 // frontend/src/components/Chat.tsx
 
 import React, { useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useLocation } from 'react-router-dom'
 import { loadMessages } from '../utils/loadMessages'
 import { sendMessage } from '../utils/sendMessage'
 import type { MessagePayloadWithMetadata } from '../types/types'
@@ -12,17 +12,22 @@ interface ChatProps {
   protocolID: WalletProtocol
   keyID: string
   senderPublicKey: string // identity public key in hex
-  recipientPublicKeys: string[] // identity public keys of other participants
+}
+
+interface LocationState {
+  recipientPublicKeys: string[]
 }
 
 export const Chat: React.FC<ChatProps> = ({
   client,
   protocolID,
   keyID,
-  senderPublicKey,
-  recipientPublicKeys
+  senderPublicKey
 }) => {
   const { threadId } = useParams<{ threadId: string }>()
+  const location = useLocation()
+  const { recipientPublicKeys = [] } = (location.state || {}) as LocationState
+
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
   const [newMessage, setNewMessage] = useState('')
   const [loading, setLoading] = useState(true)
@@ -33,9 +38,11 @@ export const Chat: React.FC<ChatProps> = ({
   }
 
   useEffect(() => {
+    if (!threadId) return
+
+    let pollingInterval: NodeJS.Timeout
+
     const fetchMessages = async () => {
-      if (!threadId) return
-      setLoading(true)
       try {
         const loaded = await loadMessages({
           client,
@@ -43,7 +50,11 @@ export const Chat: React.FC<ChatProps> = ({
           keyID,
           topic: threadId
         })
-        setMessages(loaded)
+
+        setMessages((prev) => {
+          const hasChanged = JSON.stringify(prev) !== JSON.stringify(loaded)
+          return hasChanged ? loaded : prev
+        })
       } catch (err) {
         console.error('[Chat] Failed to load messages:', err)
       } finally {
@@ -52,13 +63,21 @@ export const Chat: React.FC<ChatProps> = ({
       }
     }
 
+    setLoading(true)
     fetchMessages()
+    pollingInterval = setInterval(fetchMessages, 5000)
+
+    return () => {
+      clearInterval(pollingInterval)
+    }
   }, [threadId, client, protocolID, keyID])
 
   const handleSend = async () => {
     if (!newMessage.trim() || !threadId) return
 
     try {
+      const content = newMessage.trim()
+
       await sendMessage({
         client,
         protocolID,
@@ -66,17 +85,21 @@ export const Chat: React.FC<ChatProps> = ({
         threadId,
         senderPublicKey,
         recipients: recipientPublicKeys,
-        content: newMessage.trim()
+        content
       })
 
-      const loaded = await loadMessages({
-        client,
-        protocolID,
-        keyID,
-        topic: threadId
-      })
+      setMessages((prev) => [
+        ...prev,
+        {
+          content,
+          sender: senderPublicKey,
+          createdAt: Date.now(),
+          txid: 'temp',
+          vout: 0,
+          threadId
+        }
+      ])
 
-      setMessages(loaded)
       setNewMessage('')
       scrollToBottom()
     } catch (err) {

@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react'
+// frontend/src/components/ThreadList.tsx
+
+import { useEffect, useState, useRef } from 'react'
 import { LookupResolver, Utils } from '@bsv/sdk'
 import {
   Box,
@@ -9,115 +11,134 @@ import {
   ListItemButton,
   CircularProgress
 } from '@mui/material'
+
 import { decodeOutputs } from '../utils/decodeOutputs'
+import { decryptMessageBatch } from '../utils/MessageDecryptor'
+import { resolveDisplayNames } from '../utils/resolveDisplayNames'
+import type { WalletInterface, WalletProtocol } from '@bsv/sdk'
 
 interface ThreadSummary {
   threadId: string
-  title: string
+  displayNames: string[]
+  recipientKeys: string[] // ✅ NEW
   lastTimestamp: number
 }
 
 interface ThreadListProps {
   identityKey: string
-  onSelectThread: (threadId: string) => void
+  wallet: WalletInterface
+  protocolID: WalletProtocol
+  keyID: string
+  onSelectThread: (threadId: string, recipientKeys: string[]) => void // ✅ UPDATED
 }
 
-const ThreadList = ({ identityKey, onSelectThread }: ThreadListProps) => {
+const POLLING_INTERVAL_MS = 5000
+
+const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: ThreadListProps) => {
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [loading, setLoading] = useState<boolean>(true)
+  const pollingRef = useRef<NodeJS.Timeout | null>(null)
 
-  useEffect(() => {
-    const loadThreads = async () => {
-      try {
-        const resolver = new LookupResolver({
-          networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
-        })
+  const loadThreads = async () => {
+    try {
+      const resolver = new LookupResolver({
+        networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
+      })
 
-        const response = await resolver.query({
-          service: 'ls_convo',
-          query: { type: 'findAll' }
-        })
+      const response = await resolver.query({
+        service: 'ls_convo',
+        query: { type: 'findAll' }
+      })
 
-        if (response.type !== 'output-list') {
-          throw new Error(`Unexpected response type: ${response.type}`)
-        }
+      if (response.type !== 'output-list') {
+        throw new Error(`Unexpected response type: ${response.type}`)
+      }
 
-        const result = response.outputs
-        if (!result?.length) {
-          setThreads([])
-          return
-        }
+      const toDecode = response.outputs.map((o) => ({
+        beef: o.beef,
+        outputIndex: o.outputIndex,
+        timestamp: parseInt(Utils.toUTF8(o.context ?? []))
+      }))
 
-        // Prepare outputs for decoding
-        const toDecode = result.map((o) => ({
-            beef: o.beef,
-            outputIndex: o.outputIndex,
-            timestamp: parseInt(Utils.toUTF8(o.context ?? []))
-            }))
+      const decoded = await decodeOutputs(toDecode)
+      const decrypted = await decryptMessageBatch(wallet, decoded, protocolID, keyID)
 
-        const decodedMessages = await decodeOutputs(toDecode)
+      const grouped: Record<string, ThreadSummary> = {}
 
-        const grouped: Record<string, ThreadSummary> = {}
+      for (const msg of decrypted) {
+        const { threadId, createdAt, payload } = msg
 
-        for (const message of decodedMessages) {
-        const { threadId, createdAt } = message
+        if (!payload) continue // Skip failed decryption
+
+        const recipients = payload.recipients?.filter((k) => k !== identityKey) ?? []
 
         if (!grouped[threadId]) {
-            const title = `Thread ${threadId.slice(0, 10)}...`
+          const nameMap = await resolveDisplayNames(recipients, identityKey)
+          const displayNames = Array.from(nameMap.values())
 
-            grouped[threadId] = {
+          grouped[threadId] = {
             threadId,
-            title,
+            displayNames,
+            recipientKeys: recipients, // ✅ ADDED
             lastTimestamp: createdAt
-            }
+          }
         } else {
-            grouped[threadId].lastTimestamp = Math.max(
+          grouped[threadId].lastTimestamp = Math.max(
             grouped[threadId].lastTimestamp,
             createdAt
-            )
+          )
         }
-        }
-
-
-        const sortedThreads = Object.values(grouped).sort(
-          (a, b) => b.lastTimestamp - a.lastTimestamp
-        )
-
-        setThreads(sortedThreads)
-      } catch (err) {
-        console.error('[ThreadList] Failed to load threads:', err)
-      } finally {
-        setLoading(false)
       }
-    }
 
+      const sortedThreads = Object.values(grouped).sort(
+        (a, b) => b.lastTimestamp - a.lastTimestamp
+      )
+
+      const hasChanged = JSON.stringify(threads) !== JSON.stringify(sortedThreads)
+      if (hasChanged) setThreads(sortedThreads)
+    } catch (err) {
+      console.error('[ThreadList] Failed to load threads:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
     loadThreads()
-  }, [identityKey])
+    pollingRef.current = setInterval(loadThreads, POLLING_INTERVAL_MS)
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current)
+    }
+  }, [identityKey, wallet, protocolID, keyID]) // re-poll if identity changes
 
   return (
     <Box sx={{ padding: 2, width: 300, borderRight: '1px solid #ccc' }}>
-        <Typography variant="h6" gutterBottom>
+      <Typography variant="h6" gutterBottom>
         Threads
-        </Typography>
+      </Typography>
 
-        {loading ? (
+      {loading ? (
         <CircularProgress />
-        ) : (
+      ) : (
         <List>
-            {threads.map((thread) => (
+          {threads.map((thread) => (
             <ListItem key={thread.threadId} disablePadding>
-                <ListItemButton onClick={() => onSelectThread(thread.threadId)}>
+              <ListItemButton
+                onClick={() => onSelectThread(thread.threadId, thread.recipientKeys)} // ✅ PASSES RECIPIENTS
+              >
                 <ListItemText
-                    primary={thread.title}
-                    secondary={`Last activity: ${new Date(thread.lastTimestamp).toLocaleString()}`}
+                  primary={thread.displayNames.length > 0
+                    ? `To: ${thread.displayNames.join(', ')}`
+                    : 'Unnamed Thread'}
+                  secondary={`Last activity: ${new Date(thread.lastTimestamp).toLocaleString()}`}
                 />
-                </ListItemButton>
+              </ListItemButton>
             </ListItem>
-            ))}
+          ))}
         </List>
-        )}
+      )}
     </Box>
-    )
+  )
 }
 
 export default ThreadList

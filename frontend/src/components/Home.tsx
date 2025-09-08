@@ -28,8 +28,10 @@ const Home: React.FC<HomeProps> = ({
   const [showComposeThread, setShowComposeThread] = useState(false)
   const [showComposeDM, setShowComposeDM] = useState(false)
 
-  const handleThreadSelect = (threadId: string) => {
-    navigate(`/thread/${threadId}`)
+  const handleThreadSelect = (threadId: string, recipientPublicKeys: string[]) => {
+    navigate(`/thread/${threadId}`, {
+      state: { recipientPublicKeys }
+    })
   }
 
   return (
@@ -61,6 +63,9 @@ const Home: React.FC<HomeProps> = ({
 
         <ThreadList
           identityKey={identityKey}
+          wallet={walletClient}
+          protocolID={[2, 'convo']}
+          keyID="1"
           onSelectThread={handleThreadSelect}
         />
 
@@ -70,9 +75,9 @@ const Home: React.FC<HomeProps> = ({
             senderPublicKey={identityKey}
             protocolID={protocolID}
             keyID={keyID}
-            onThreadCreated={(threadId) => {
+            onThreadCreated={(threadId, recipientPublicKeys) => {
               setShowComposeThread(false)
-              handleThreadSelect(threadId)
+              handleThreadSelect(threadId, recipientPublicKeys)
             }}
             onClose={() => setShowComposeThread(false)}
           />
@@ -108,7 +113,7 @@ const Home: React.FC<HomeProps> = ({
           client={walletClient}
           protocolID={protocolID}
           keyID={keyID}
-          onSelectThread={handleThreadSelect}
+          onSelectThread={(threadId) => handleThreadSelect(threadId, [])}
         />
 
         {showComposeDM && (
@@ -118,10 +123,12 @@ const Home: React.FC<HomeProps> = ({
             senderPublicKey={identityKey}
             protocolID={protocolID}
             keyID={keyID}
-            onCreate={(threadId: string) => {
-              setShowComposeDM(false)
-              handleThreadSelect(threadId)
-            }}
+            onCreate={
+              ((threadId: string, recipientKeys: string[]) => {
+                setShowComposeDM(false)
+                handleThreadSelect(threadId, recipientKeys)
+              }) as unknown as (threadId: string) => void
+            }
             onClose={() => setShowComposeDM(false)}
           />
         )}

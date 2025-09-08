@@ -1,3 +1,5 @@
+// src/utils/decryptMessage.ts
+
 import { WalletInterface, WalletProtocol, Utils } from '@bsv/sdk'
 import { CurvePoint } from 'curvepoint'
 import type { MessagePayload } from '../types/types'
@@ -11,7 +13,7 @@ import type { DecodedMessage } from '../utils/decodeOutputs'
  * @param encryptedPayload - The encrypted message (number[])
  * @param protocolID - Protocol ID (e.g. [2, 'convo'])
  * @param keyID - Recipient's key ID (e.g. '1')
- * @returns The decrypted and parsed MessagePayload, or null if decryption fails
+ * @returns The decrypted and parsed MessagePayload (with recipients), or null if decryption fails
  */
 export async function decryptMessage(
   wallet: WalletInterface,
@@ -19,7 +21,7 @@ export async function decryptMessage(
   encryptedPayload: number[],
   protocolID: WalletProtocol,
   keyID: string
-): Promise<MessagePayload | null> {
+): Promise<(MessagePayload & { recipients?: string[] }) | null> {
   try {
     console.log('\n[MessageDecryptor] --------------------------------------')
     console.log('[MessageDecryptor] Decryption Attempt Starting')
@@ -30,13 +32,6 @@ export async function decryptMessage(
     console.log('[MessageDecryptor] Header (hex preview):', Utils.toHex(header.slice(0, 16)), '...')
     console.log('[MessageDecryptor] Encrypted payload (hex preview):', Utils.toHex(encryptedPayload.slice(0, 16)), '...')
 
-    const pubKey = await wallet.getPublicKey({
-  protocolID,
-  keyID,
-  counterparty: 'self'
-})
-console.log('[MessageDecryptor] My derived public key:', pubKey)
-
     const curvePoint = new CurvePoint(wallet)
 
     // Combine header and payload into one ciphertext buffer
@@ -44,15 +39,42 @@ console.log('[MessageDecryptor] My derived public key:', pubKey)
     console.log('[MessageDecryptor] Total ciphertext length:', ciphertext.length)
     console.log('[MessageDecryptor] Ciphertext (hex preview):', Utils.toHex(ciphertext.slice(0, 32)), '...')
 
+    // Decrypt the full message
     const decryptedBytes = await curvePoint.decrypt(ciphertext, protocolID, keyID)
-
     const json = new TextDecoder().decode(Uint8Array.from(decryptedBytes))
     console.log('[MessageDecryptor] Decrypted JSON string preview:', json.slice(0, 128), json.length > 128 ? '...' : '')
 
     const parsed = JSON.parse(json) as MessagePayload
     console.log('[MessageDecryptor] Decryption successful. Parsed payload:', parsed)
 
-    return parsed
+    // Extract recipients from the header
+    const parsedHeader = curvePoint.parseHeader(ciphertext)
+    const reader = new Utils.Reader(parsedHeader.header)
+
+    const version = reader.readUInt32LE()
+    const numRecipients = reader.readVarIntNum()
+
+    console.log('[MessageDecryptor] Header version:', version)
+    console.log('[MessageDecryptor] Number of recipients in header:', numRecipients)
+
+    const recipients: string[] = []
+
+    for (let i = 0; i < numRecipients; i++) {
+      const recipientKey = reader.read(33)
+      const recipientHex = Utils.toHex(recipientKey)
+      recipients.push(recipientHex)
+
+      reader.read(33) // skip sender key
+      const encryptedKeyLength = reader.readVarIntNum()
+      reader.read(encryptedKeyLength) // skip encrypted symmetric key
+
+      console.log(`[MessageDecryptor] Recipient #${i + 1}: ${recipientHex}`)
+    }
+
+    return {
+      ...parsed,
+      recipients
+    }
   } catch (err) {
     console.error('[MessageDecryptor] Failed to decrypt message:', err)
     return null
@@ -64,11 +86,13 @@ export async function decryptMessageBatch(
   messages: DecodedMessage[],
   protocolID: WalletProtocol,
   keyID: string
-): Promise<Array<DecodedMessage & { payload: MessagePayload | null }>> {
+): Promise<Array<DecodedMessage & { payload: MessagePayload | null; recipients?: string[] }>> {
   console.log('\n[MessageDecryptor] Starting batch decryption for', messages.length, 'messages')
+
   const results = await Promise.all(
     messages.map(async (msg, index) => {
       console.log(`\n[MessageDecryptor] >>> Decrypting message #${index + 1} of ${messages.length}`)
+
       const payload = await decryptMessage(
         wallet,
         msg.header,
@@ -79,10 +103,12 @@ export async function decryptMessageBatch(
 
       return {
         ...msg,
-        payload
+        payload,
+        recipients: payload?.recipients ?? []
       }
     })
   )
+
   console.log('[MessageDecryptor] Batch decryption complete.')
   return results
 }
