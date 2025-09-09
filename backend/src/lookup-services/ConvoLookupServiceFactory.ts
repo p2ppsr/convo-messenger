@@ -1,5 +1,3 @@
-// backend/src/lookup-services/ConvoLookupServiceFactory.ts
-
 import {
   LookupService,
   LookupQuestion,
@@ -52,7 +50,8 @@ export class ConvoLookupService implements LookupService {
         headerBuf,
         payloadBuf,
         timestampBuf,
-        uniqueIdBuf
+        uniqueIdBuf,
+        threadNameBuf // optional
       ] = fields
 
       const topicVal = Utils.toUTF8(topicBuf)
@@ -69,6 +68,7 @@ export class ConvoLookupService implements LookupService {
       const encryptedPayload = Array.from(payloadBuf)
       const createdAt = timestampBuf ? parseInt(Utils.toUTF8(timestampBuf)) : Date.now()
       const uniqueId = uniqueIdBuf ? Utils.toUTF8(uniqueIdBuf) : undefined
+      const threadName = threadNameBuf ? Utils.toUTF8(threadNameBuf) : undefined
 
       const record: EncryptedMessage = {
         txid,
@@ -78,7 +78,8 @@ export class ConvoLookupService implements LookupService {
         encryptedPayload,
         header,
         createdAt,
-        ...(uniqueId ? { uniqueId } : {})
+        ...(uniqueId ? { uniqueId } : {}),
+        ...(threadName ? { threadName } : {})
       }
 
       console.log('[ConvoLookupService] Storing message record:', record)
@@ -147,7 +148,7 @@ export class ConvoLookupService implements LookupService {
       txid: msg.txid,
       outputIndex: msg.outputIndex,
       context: [
-        ...[], // placeholder for more metadata
+        ...[], // placeholder for future metadata
         ...Utils.toArray(msg.createdAt.toString(), 'utf8')
       ]
     }))

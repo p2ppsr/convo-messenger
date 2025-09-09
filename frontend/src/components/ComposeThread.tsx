@@ -19,7 +19,7 @@ interface ComposeThreadProps {
   senderPublicKey: string
   protocolID: WalletProtocol
   keyID: string
-  onThreadCreated: (threadId: string, recipientPublicKeys: string[]) => void
+  onThreadCreated: (threadId: string, recipientPublicKeys: string[], threadName: string) => void
   onClose: () => void
   open?: boolean
 }
@@ -65,7 +65,7 @@ const ComposeThread: React.FC<ComposeThreadProps> = ({
         keyID
       })
 
-      onThreadCreated(threadId, recipientPublicKeys)
+      onThreadCreated(threadId, recipientPublicKeys, name)
       onClose()
     } catch (err) {
       console.error('[ComposeThread] Failed to create thread:', err)
@@ -73,6 +73,7 @@ const ComposeThread: React.FC<ComposeThreadProps> = ({
       setCreating(false)
     }
   }
+
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
@@ -114,16 +115,14 @@ const ComposeThread: React.FC<ComposeThreadProps> = ({
           ))}
         </Box>
 
-        {selectedIdentities.length > 1 && (
-          <TextField
-            label="Group Name"
-            value={threadName}
-            onChange={(e) => setThreadName(e.target.value)}
-            fullWidth
-            margin="normal"
-            disabled={creating}
-          />
-        )}
+        <TextField
+          label="Thread Name"
+          value={threadName}
+          onChange={(e) => setThreadName(e.target.value)}
+          fullWidth
+          margin="normal"
+          disabled={creating}
+        />
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>

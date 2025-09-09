@@ -11,6 +11,7 @@ export interface DecodedMessage {
   vout: number
   beef: number[]
   recipients: string[]
+  threadName?: string
 }
 
 export async function decodeOutput(
@@ -46,6 +47,16 @@ export async function decodeOutput(
         .filter((r) => r.length > 0)
     : []
 
+  let threadName: string | undefined
+  if (fields.length > 9) {
+  try {
+    threadName = Utils.toUTF8(fields[8])
+    console.log('[decodeOutput] Found thread name:', threadName)
+  } catch (err) {
+    console.warn('[decodeOutput] Failed to decode thread name:', err)
+  }
+}
+
   console.log('[decodeOutput] Thread ID:', threadId)
   console.log('[decodeOutput] Sender:', sender)
   console.log('[decodeOutput] Recipients:', recipients)
@@ -59,7 +70,8 @@ export async function decodeOutput(
     txid: decodedTx.id('hex'),
     vout: outputIndex,
     beef,
-    recipients
+    recipients,
+    threadName
   }
 }
 

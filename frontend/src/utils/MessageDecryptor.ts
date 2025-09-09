@@ -3,17 +3,10 @@
 import { WalletInterface, WalletProtocol, Utils } from '@bsv/sdk'
 import { CurvePoint } from 'curvepoint'
 import type { MessagePayload } from '../types/types'
-import type { DecodedMessage } from '../utils/decodeOutputs'
+import type { DecodedMessage } from './decodeOutputs'
 
 /**
  * Decrypts a message using CurvePoint.
- *
- * @param wallet - The recipient’s WalletInterface
- * @param header - The CurvePoint header (number[])
- * @param encryptedPayload - The encrypted message (number[])
- * @param protocolID - Protocol ID (e.g. [2, 'convo'])
- * @param keyID - Recipient's key ID (e.g. '1')
- * @returns The decrypted and parsed MessagePayload (with recipients), or null if decryption fails
  */
 export async function decryptMessage(
   wallet: WalletInterface,
@@ -29,23 +22,16 @@ export async function decryptMessage(
     console.log('[MessageDecryptor] Encrypted payload length:', encryptedPayload.length)
     console.log('[MessageDecryptor] Protocol ID:', protocolID)
     console.log('[MessageDecryptor] Key ID:', keyID)
-    console.log('[MessageDecryptor] Header (hex preview):', Utils.toHex(header.slice(0, 16)), '...')
-    console.log('[MessageDecryptor] Encrypted payload (hex preview):', Utils.toHex(encryptedPayload.slice(0, 16)), '...')
 
     const curvePoint = new CurvePoint(wallet)
-
-    // Combine header and payload into one ciphertext buffer
     const ciphertext = [...header, ...encryptedPayload]
+
     console.log('[MessageDecryptor] Total ciphertext length:', ciphertext.length)
     console.log('[MessageDecryptor] Ciphertext (hex preview):', Utils.toHex(ciphertext.slice(0, 32)), '...')
 
-    // Decrypt the full message
     const decryptedBytes = await curvePoint.decrypt(ciphertext, protocolID, keyID)
     const json = new TextDecoder().decode(Uint8Array.from(decryptedBytes))
-    console.log('[MessageDecryptor] Decrypted JSON string preview:', json.slice(0, 128), json.length > 128 ? '...' : '')
-
     const parsed = JSON.parse(json) as MessagePayload
-    console.log('[MessageDecryptor] Decryption successful. Parsed payload:', parsed)
 
     // Extract recipients from the header
     const parsedHeader = curvePoint.parseHeader(ciphertext)
@@ -55,20 +41,22 @@ export async function decryptMessage(
     const numRecipients = reader.readVarIntNum()
 
     console.log('[MessageDecryptor] Header version:', version)
-    console.log('[MessageDecryptor] Number of recipients in header:', numRecipients)
-
+    
     const recipients: string[] = []
 
     for (let i = 0; i < numRecipients; i++) {
       const recipientKey = reader.read(33)
       const recipientHex = Utils.toHex(recipientKey)
+
+      console.log(`[MessageDecryptor] Recipient #${i}:`)
+      console.log(`  Raw Bytes:`, recipientKey)
+      console.log(`  Hex: ${recipientHex}`)
+
       recipients.push(recipientHex)
 
       reader.read(33) // skip sender key
       const encryptedKeyLength = reader.readVarIntNum()
-      reader.read(encryptedKeyLength) // skip encrypted symmetric key
-
-      console.log(`[MessageDecryptor] Recipient #${i + 1}: ${recipientHex}`)
+      reader.read(encryptedKeyLength)
     }
 
     return {
@@ -100,6 +88,10 @@ export async function decryptMessageBatch(
         protocolID,
         keyID
       )
+
+      if (payload && !payload.name && msg.threadName) {
+        payload.name = msg.threadName
+      }
 
       return {
         ...msg,

@@ -16,6 +16,7 @@ interface ChatProps {
 
 interface LocationState {
   recipientPublicKeys: string[]
+  threadName?: string
 }
 
 export const Chat: React.FC<ChatProps> = ({
@@ -26,7 +27,7 @@ export const Chat: React.FC<ChatProps> = ({
 }) => {
   const { threadId } = useParams<{ threadId: string }>()
   const location = useLocation()
-  const { recipientPublicKeys = [] } = (location.state || {}) as LocationState
+  const { recipientPublicKeys = [], threadName } = (location.state || {}) as LocationState
 
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
   const [newMessage, setNewMessage] = useState('')
@@ -85,7 +86,8 @@ export const Chat: React.FC<ChatProps> = ({
         threadId,
         senderPublicKey,
         recipients: recipientPublicKeys,
-        content
+        content,
+        threadName // <-- ✅ include thread name in metadata
       })
 
       setMessages((prev) => [

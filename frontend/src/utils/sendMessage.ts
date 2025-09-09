@@ -23,6 +23,7 @@ export interface SendMessageOptions {
   keyID?: string
   topic?: string
   basket?: string
+  threadName?: string
 }
 
 export async function sendMessage({
@@ -34,7 +35,8 @@ export async function sendMessage({
   protocolID = [2, 'tmconvo'],
   keyID = '1',
   topic = 'convo',
-  basket = 'convo'
+  basket = 'convo',
+  threadName
 }: SendMessageOptions): Promise<string> {
   const pushdrop = new PushDrop(client)
   const broadcaster = new TopicBroadcaster([`tm_${topic}`], {
@@ -95,6 +97,11 @@ export async function sendMessage({
     Utils.toArray(String(timestamp), 'utf8'),           // 6
     Utils.toArray(uniqueID, 'utf8')                     // 7
   ]
+
+  if (threadName) {
+    fields.push(Utils.toArray(threadName, 'utf8'))      // 8 (optional)
+    console.log(`[Convo] Included threadName: "${threadName}"`)
+  }
 
   console.log(`[Convo] PushDrop Field Breakdown:`)
   fields.forEach((field, index) => {

@@ -23,6 +23,7 @@ export interface EncryptedMessage {
   createdAt: number           // Unix timestamp (ms)
   mediaURL?: string           // Optional pointer to uploaded media
   uniqueId?: string           // Optional unique identifier for the message
+  threadName?: string         // Optional thread name at time of sending
 }
 
 export interface ParticipantChangeLog {

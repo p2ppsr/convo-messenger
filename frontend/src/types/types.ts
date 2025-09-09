@@ -15,6 +15,7 @@ export interface MessagePayload {
   mediaURL?: string
   contentType?: 'text' | 'image' | 'video' | 'file' | 'custom'
   recipients?: string[]
+  name?: string
 }
 
 export interface MessagePayloadWithMetadata extends MessagePayload {
