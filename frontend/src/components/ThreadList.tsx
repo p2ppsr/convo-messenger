@@ -20,7 +20,7 @@ import type { WalletInterface, WalletProtocol } from '@bsv/sdk'
 interface ThreadSummary {
   threadId: string
   displayNames: string[]
-  recipientKeys: string[] // ✅ NEW
+  recipientKeys: string[]
   lastTimestamp: number
 }
 
@@ -71,7 +71,7 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
 
         if (!payload) continue // Skip failed decryption
 
-        const recipients = payload.recipients?.filter((k) => k !== identityKey) ?? []
+        const recipients = payload.recipients ?? []
 
         if (!grouped[threadId]) {
           const nameMap = await resolveDisplayNames(recipients, identityKey)

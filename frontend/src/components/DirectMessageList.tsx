@@ -1,4 +1,4 @@
-// frontend/src/components/ThreadList.tsx
+// frontend/src/components/DirectMessageList.tsx
 
 import { useEffect, useState, useRef } from 'react'
 import { LookupResolver, Utils } from '@bsv/sdk'
@@ -70,7 +70,7 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
 
         if (!payload) continue // Skip failed decryption
 
-        const recipients = payload.recipients?.filter((k) => k !== identityKey) ?? []
+        const recipients = payload.recipients ?? []
 
         if (!grouped[threadId]) {
           const nameMap = await resolveDisplayNames(recipients, identityKey)

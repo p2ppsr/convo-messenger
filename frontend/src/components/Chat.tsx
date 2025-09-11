@@ -41,7 +41,7 @@ export const Chat: React.FC<ChatProps> = ({
   useEffect(() => {
     if (!threadId) return
 
-    let pollingInterval: NodeJS.Timeout
+    // let pollingInterval: NodeJS.Timeout
 
     const fetchMessages = async () => {
       try {
@@ -66,11 +66,11 @@ export const Chat: React.FC<ChatProps> = ({
 
     setLoading(true)
     fetchMessages()
-    pollingInterval = setInterval(fetchMessages, 5000)
+    // pollingInterval = setInterval(fetchMessages, 5000)
 
-    return () => {
-      clearInterval(pollingInterval)
-    }
+    // return () => {
+    //   clearInterval(pollingInterval)
+    // }
   }, [threadId, client, protocolID, keyID])
 
   const handleSend = async () => {

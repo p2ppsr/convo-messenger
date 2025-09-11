@@ -21,7 +21,7 @@ import { sendMessage } from '../utils/sendMessage'
 interface ComposeDirectMessageProps {
   open: boolean
   onClose: () => void
-  onCreate: (threadId: string) => void
+  onCreate: (threadId: string, allRecipients: string[]) => void
   client: WalletClient
   senderPublicKey: string
   protocolID: WalletProtocol
@@ -59,19 +59,21 @@ const ComposeDirectMessage: React.FC<ComposeDirectMessageProps> = ({
         .map((b) => b.toString(16).padStart(2, '0'))
         .join('')
 
+      const allRecipients = Array.from(new Set([identityKey, senderPublicKey]))
+
       await sendMessage({
         client,
         senderPublicKey,
         threadId: threadIdHex,
         content: message,
-        recipients: [identityKey],
+        recipients: allRecipients,
         protocolID,
         keyID
       })
 
-      onCreate(threadIdHex)
+      onCreate(threadIdHex, allRecipients)
       setSelectedIdentity(null)
-      setManualKey('') // ✅ reset manual key
+      setManualKey('')
       setMessage('')
       onClose()
     } catch (err) {
