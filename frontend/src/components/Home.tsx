@@ -1,6 +1,6 @@
 // frontend/src/components/Home.tsx
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Box, Button, Typography } from '@mui/material'
 import { useNavigate } from 'react-router-dom'
 
@@ -10,9 +10,6 @@ import ThreadList from './ThreadList'
 import DirectMessageList from './DirectMessageList'
 import ComposeThread from './ComposeThread'
 import ComposeDirectMessage from './ComposeDirectMessage'
-
-// Utils
-import { loadAllMessages, type ThreadSummary } from '../utils/loadAllMessages'
 
 // Types
 import type { WalletClient, WalletProtocol } from '@bsv/sdk'
@@ -33,8 +30,7 @@ const Home: React.FC<HomeProps> = ({
   const navigate = useNavigate()
   const [showComposeThread, setShowComposeThread] = useState(false)
   const [showComposeDM, setShowComposeDM] = useState(false)
-  const [threads, setThreads] = useState<ThreadSummary[]>([])
-  const [directMessages, setDirectMessages] = useState<ThreadSummary[]>([])
+
 
   const handleThreadSelect = (
     threadId: string,
@@ -47,29 +43,29 @@ const Home: React.FC<HomeProps> = ({
   }
 
   // --- Polling all messages ---
-  useEffect(() => {
-    let isMounted = true
+  // useEffect(() => {
+  //   let isMounted = true
 
-    const fetchMessages = async () => {
-      try {
-        const result = await loadAllMessages(walletClient, identityKey, protocolID, keyID)
-        if (isMounted) {
-          setThreads(result.threads)
-          setDirectMessages(result.directMessages)
-        }
-      } catch (err) {
-        console.error('[Home] Failed to load messages:', err)
-      }
-    }
+  //   const fetchMessages = async () => {
+  //     try {
+  //       const result = await loadAllMessages(walletClient, identityKey, protocolID, keyID)
+  //       if (isMounted) {
+  //         setThreads(result.threads)
+  //         setDirectMessages(result.directMessages)
+  //       }
+  //     } catch (err) {
+  //       console.error('[Home] Failed to load messages:', err)
+  //     }
+  //   }
 
-    fetchMessages()
-    const interval = setInterval(fetchMessages, 10000) // poll every 10s
+  //   fetchMessages()
+  //   const interval = setInterval(fetchMessages, 10000) // poll every 10s
 
-    return () => {
-      isMounted = false
-      clearInterval(interval)
-    }
-  }, [walletClient, identityKey, protocolID, keyID])
+  //   return () => {
+  //     isMounted = false
+  //     clearInterval(interval)
+  //   }
+  // }, [walletClient, identityKey, protocolID, keyID])
 
   // --- Sidebar: Thread List + Button ---
   const sidebar = (
@@ -93,9 +89,13 @@ const Home: React.FC<HomeProps> = ({
       </Box>
 
       <ThreadList
-        threads={threads}
-        onSelectThread={handleThreadSelect}
-      />
+  identityKey={identityKey}
+  wallet={walletClient}
+  protocolID={protocolID}
+  keyID={keyID}
+  onSelectThread={handleThreadSelect}
+/>
+
 
       {showComposeThread && (
         <ComposeThread
@@ -136,9 +136,13 @@ const Home: React.FC<HomeProps> = ({
       </Box>
 
       <DirectMessageList
-        messages={directMessages}
-        onSelectThread={handleThreadSelect}
-      />
+  identityKey={identityKey}
+  wallet={walletClient}
+  protocolID={protocolID}
+  keyID={keyID}
+  onSelectThread={handleThreadSelect}
+/>
+
 
       {showComposeDM && (
         <ComposeDirectMessage

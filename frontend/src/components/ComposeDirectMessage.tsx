@@ -38,11 +38,11 @@ const ComposeDirectMessage: React.FC<ComposeDirectMessageProps> = ({
   keyID
 }) => {
   const [selectedIdentity, setSelectedIdentity] = useState<DisplayableIdentity | null>(null)
-  const [manualKey, setManualKey] = useState<string>('') // ✅ NEW
+  const [manualKey, setManualKey] = useState<string>('')
   const [message, setMessage] = useState('')
   const [sending, setSending] = useState(false)
 
-  const identityKey = selectedIdentity?.identityKey || manualKey.trim() || null // ✅ NEW
+  const identityKey = selectedIdentity?.identityKey || manualKey.trim() || null
 
   const handleSend = async () => {
     if (!identityKey || !message) return
