@@ -30,7 +30,7 @@ interface DirectMessageListProps {
   onSelectThread: (threadId: string, recipientKeys: string[]) => void
 }
 
-const POLLING_INTERVAL_MS = 5000
+// const POLLING_INTERVAL_MS = 5000
 
 const DirectMessageList = ({
   identityKey,
@@ -41,7 +41,7 @@ const DirectMessageList = ({
 }: DirectMessageListProps) => {
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [loading, setLoading] = useState<boolean>(true)
-  const pollingRef = useRef<NodeJS.Timeout | null>(null)
+  // const pollingRef = useRef<NodeJS.Timeout | null>(null)
 
   const loadThreads = async () => {
     try {
@@ -98,7 +98,6 @@ const DirectMessageList = ({
         }
       }
 
-      // ✅ Filter out group threads before display
       const directThreads = Object.values(grouped)
         .filter((t) => !t.isGroup)
         .sort((a, b) => b.lastTimestamp - a.lastTimestamp)
@@ -114,10 +113,10 @@ const DirectMessageList = ({
 
   useEffect(() => {
     loadThreads()
-    pollingRef.current = setInterval(loadThreads, POLLING_INTERVAL_MS)
-    return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current)
-    }
+    // pollingRef.current = setInterval(loadThreads, POLLING_INTERVAL_MS)
+    // return () => {
+    //   if (pollingRef.current) clearInterval(pollingRef.current)
+    // }
   }, [identityKey, wallet, protocolID, keyID])
 
   return (

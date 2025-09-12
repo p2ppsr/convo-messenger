@@ -1,6 +1,7 @@
 import { LookupResolver, type WalletInterface, type WalletProtocol, Utils } from '@bsv/sdk'
 import { checkMessages } from './checkMessages'
 import type { MessagePayloadWithMetadata } from '../types/types'
+import { resolveDisplayNames } from './resolveDisplayNames'
 
 export interface LoadMessagesOptions {
   client: WalletInterface
@@ -20,7 +21,10 @@ export async function loadMessages({
   protocolID,
   keyID,
   topic
-}: LoadMessagesOptions): Promise<MessagePayloadWithMetadata[]> {
+}: LoadMessagesOptions): Promise<{
+  messages: MessagePayloadWithMetadata[]
+  nameMap: Map<string, string>
+}> {
   console.log('\n[LoadMessages] --------------------------------------')
   console.log(`[LoadMessages] Starting message load for topic: ${topic}`)
   console.log('[LoadMessages] Protocol ID:', protocolID)
@@ -46,12 +50,12 @@ export async function loadMessages({
     console.log('[LoadMessages] Raw overlay response:', response)
   } catch (err) {
     console.error('[LoadMessages] Overlay query failed:', err)
-    return []
+    return { messages: [], nameMap: new Map() }
   }
 
   if (response.type !== 'output-list' || !Array.isArray(response.outputs)) {
     console.warn('[LoadMessages] Unexpected overlay response type:', response.type)
-    return []
+    return { messages: [], nameMap: new Map() }
   }
 
   console.log(`[LoadMessages] Retrieved ${response.outputs.length} outputs from overlay.`)
@@ -85,7 +89,39 @@ export async function loadMessages({
     lookupResults
   })
 
+  console.log('[LoadMessages] Decrypted messages:', messages)
+
+  // Collect all unique sender public keys
+  const allSenders = [...new Set(
+    messages
+      .map(m => {
+        try {
+          // If already a string, return it
+          if (typeof m.sender === 'string') return m.sender
+          // If it's a Uint8Array or Buffer, convert to base64
+          if (m.sender instanceof Uint8Array || Array.isArray(m.sender)) {
+            return Buffer.from(m.sender).toString('base64')
+          }
+          return ''
+        } catch (err) {
+          console.warn('[LoadMessages] Failed to encode sender key:', m.sender, err)
+          return ''
+        }
+      })
+      .filter(k => !!k)
+  )]
+
+  console.log('[LoadMessages] Unique senders:', allSenders)
+
+  // Resolve display names
+  const nameMap = await resolveDisplayNames(allSenders, keyID)
+  console.log('[LoadMessages] Resolved nameMap:', Object.fromEntries(nameMap))
+
+
   const sorted = messages.sort((a, b) => a.createdAt - b.createdAt)
   console.log(`[LoadMessages] Returning ${sorted.length} sorted messages.`)
-  return sorted
+  return {
+    messages: sorted,
+    nameMap
+  }
 }

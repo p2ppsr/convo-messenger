@@ -33,12 +33,12 @@ interface ThreadListProps {
   onSelectThread: (threadId: string, recipientKeys: string[]) => void
 }
 
-const POLLING_INTERVAL_MS = 5000
+// const POLLING_INTERVAL_MS = 5000
 
 const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: ThreadListProps) => {
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [loading, setLoading] = useState<boolean>(true)
-  const pollingRef = useRef<NodeJS.Timeout | null>(null)
+  // const pollingRef = useRef<NodeJS.Timeout | null>(null)
 
   const loadThreads = async () => {
     console.log('[ThreadList] loadThreads called with protocolID:', protocolID, 'keyID:', keyID)
@@ -106,10 +106,10 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
 
   useEffect(() => {
     loadThreads()
-    pollingRef.current = setInterval(loadThreads, POLLING_INTERVAL_MS)
-    return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current)
-    }
+    // pollingRef.current = setInterval(loadThreads, POLLING_INTERVAL_MS)
+    // return () => {
+    //   if (pollingRef.current) clearInterval(pollingRef.current)
+    // }
   }, [identityKey, wallet, protocolID, keyID]) // re-poll if identity changes
 
   return (

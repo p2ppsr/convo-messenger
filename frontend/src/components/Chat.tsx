@@ -1,7 +1,4 @@
-// frontend/src/components/Chat.tsx
-
 import React, { useEffect, useRef, useState } from 'react'
-import { useParams, useLocation } from 'react-router-dom'
 import { loadMessages } from '../utils/loadMessages'
 import { sendMessage } from '../utils/sendMessage'
 import type { MessagePayloadWithMetadata } from '../types/types'
@@ -11,27 +8,62 @@ interface ChatProps {
   client: WalletClient
   protocolID: WalletProtocol
   keyID: string
-  senderPublicKey: string // identity public key in hex
-}
-
-interface LocationState {
+  senderPublicKey: string
+  threadId: string
   recipientPublicKeys: string[]
   threadName?: string
 }
+
+// --- normalize sender for nameMap lookup ---
+// --- normalize sender for nameMap lookup ---
+function normalizeSender(sender: string): string {
+  try {
+    console.log("[normalizeSender] Raw sender input:", sender)
+
+    // Case 1: already looks like a pubkey
+    if (sender.startsWith("02") || sender.startsWith("03")) {
+      console.log("[normalizeSender] Detected direct pubkey:", sender)
+      return sender
+    }
+
+    // Case 2: might be hex of ASCII characters (like "3033...")
+    // Decode safely without Buffer
+    const ascii = sender
+      .match(/.{1,2}/g) // split into hex byte pairs
+      ?.map((byte) => String.fromCharCode(parseInt(byte, 16)))
+      .join("") ?? sender
+
+    console.log("[normalizeSender] Decoded ASCII:", ascii)
+
+    if (ascii.startsWith("02") || ascii.startsWith("03")) {
+      console.log("[normalizeSender] Decoded to pubkey:", ascii)
+      return ascii
+    }
+
+    console.log("[normalizeSender] Fallback return (no match):", sender)
+    return sender
+  } catch (err) {
+    console.warn("[normalizeSender] Failed to normalize:", sender, err)
+    return sender
+  }
+}
+
+
 
 export const Chat: React.FC<ChatProps> = ({
   client,
   protocolID,
   keyID,
-  senderPublicKey
+  senderPublicKey,
+  threadId,
+  recipientPublicKeys,
+  threadName
 }) => {
-  const { threadId } = useParams<{ threadId: string }>()
-  const location = useLocation()
-  const { recipientPublicKeys = [], threadName } = (location.state || {}) as LocationState
-
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
   const [newMessage, setNewMessage] = useState('')
   const [loading, setLoading] = useState(true)
+  const [nameMap, setNameMap] = useState<Map<string, string>>(new Map())
+
   const chatEndRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
@@ -39,23 +71,27 @@ export const Chat: React.FC<ChatProps> = ({
   }
 
   useEffect(() => {
-    if (!threadId) return
-
-    // let pollingInterval: NodeJS.Timeout
-
     const fetchMessages = async () => {
       try {
-        const loaded = await loadMessages({
+        const result = await loadMessages({
           client,
           protocolID,
           keyID,
           topic: threadId
         })
 
+        if (!('messages' in result) || !('nameMap' in result)) {
+          throw new Error('[Chat] loadMessages returned unexpected structure')
+        }
+
+        const { messages: loadedMessages, nameMap: resolvedNames } = result
+
         setMessages((prev) => {
-          const hasChanged = JSON.stringify(prev) !== JSON.stringify(loaded)
-          return hasChanged ? loaded : prev
+          const hasChanged = JSON.stringify(prev) !== JSON.stringify(loadedMessages)
+          return hasChanged ? loadedMessages : prev
         })
+
+        setNameMap(resolvedNames)
       } catch (err) {
         console.error('[Chat] Failed to load messages:', err)
       } finally {
@@ -66,19 +102,17 @@ export const Chat: React.FC<ChatProps> = ({
 
     setLoading(true)
     fetchMessages()
-    // pollingInterval = setInterval(fetchMessages, 5000)
-
-    // return () => {
-    //   clearInterval(pollingInterval)
-    // }
+    // Optional polling:
+    // const polling = setInterval(fetchMessages, 5000)
+    // return () => clearInterval(polling)
   }, [threadId, client, protocolID, keyID])
 
   const handleSend = async () => {
-    if (!newMessage.trim() || !threadId) return
+    if (!newMessage.trim()) return
+
+    const content = newMessage.trim()
 
     try {
-      const content = newMessage.trim()
-
       await sendMessage({
         client,
         protocolID,
@@ -87,7 +121,7 @@ export const Chat: React.FC<ChatProps> = ({
         senderPublicKey,
         recipients: recipientPublicKeys,
         content,
-        threadName // <-- ✅ include thread name in metadata
+        threadName
       })
 
       setMessages((prev) => [
@@ -119,30 +153,49 @@ export const Chat: React.FC<ChatProps> = ({
   return (
     <div className="flex flex-col h-full p-4">
       <div className="flex-1 overflow-y-auto space-y-2">
+        {/* Thread name header */}
+        {threadName && (
+          <div className="text-lg font-semibold text-center mb-4">
+            {threadName}
+          </div>
+        )}
+
+        {/* Message list */}
         {loading ? (
           <div className="text-center text-gray-400">Loading messages...</div>
         ) : messages.length === 0 ? (
           <div className="text-center text-gray-400">No messages yet</div>
         ) : (
-          messages.map((msg) => (
-            <div
-              key={`${msg.txid}-${msg.vout}`}
-              className={`p-2 rounded-lg max-w-[75%] ${
-                msg.sender === senderPublicKey
-                  ? 'bg-blue-500 text-white self-end ml-auto'
-                  : 'bg-gray-200 text-black self-start mr-auto'
-              }`}
-            >
-              <div className="text-sm whitespace-pre-wrap">{msg.content}</div>
-              <div className="text-xs text-right opacity-60 mt-1">
-                {new Date(msg.createdAt).toLocaleTimeString()}
+          messages.map((msg) => {
+            const normalized = normalizeSender(msg.sender as string)
+            const displaySender =
+              nameMap.get(normalized) || normalized.slice(0, 10) + "..."
+
+            return (
+              <div
+                key={`${msg.txid}-${msg.vout}`}
+                className={`p-2 rounded-lg max-w-[75%] ${
+                  msg.sender === senderPublicKey
+                    ? "bg-blue-500 text-white self-end ml-auto"
+                    : "bg-gray-200 text-black self-start mr-auto"
+                }`}
+              >
+                <div className="text-sm whitespace-pre-wrap">{msg.content}</div>
+                <div className="text-xs text-right opacity-60 mt-1">
+                  {new Date(msg.createdAt).toLocaleTimeString()}
+                  <br />
+                  {displaySender}
+                </div>
               </div>
-            </div>
-          ))
+            )
+          })
         )}
+
+        {/* Scroll anchor */}
         <div ref={chatEndRef} />
       </div>
 
+      {/* Input box */}
       <div className="mt-4 flex gap-2">
         <textarea
           className="flex-1 p-2 border rounded resize-none min-h-[40px] max-h-[120px]"

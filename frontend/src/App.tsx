@@ -6,7 +6,6 @@ import { WalletClient, SecurityLevel } from '@bsv/sdk'
 
 // Components
 import Home from './components/Home'
-import { Chat } from './components/Chat'
 
 // Utils
 import checkForMetaNetClient from './utils/checkForMetaNetClient'
@@ -65,9 +64,9 @@ const App = () => {
         <Route
           path="/thread/:threadId"
           element={
-            <Chat
-              client={walletClient}
-              senderPublicKey={identityKey}
+            <Home
+              identityKey={identityKey}
+              walletClient={walletClient}
               protocolID={protocolID}
               keyID={keyID}
             />

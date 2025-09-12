@@ -26,7 +26,7 @@ export async function createThread({
   protocolID,
   keyID
 }: CreateThreadOptions): Promise<string> {
-  // 🧑‍🤝‍🧑 Combine sender + recipients and sort to create deterministic ID
+  // Combine sender + recipients and sort to create deterministic ID
   const allParticipants = [...recipientPublicKeys, senderPublicKey].sort()
   const threadSeed = allParticipants.join('|') + '|' + Date.now()
   const threadId = Utils.toHex(Hash.sha256(Utils.toArray(threadSeed, 'utf8')))
@@ -35,10 +35,10 @@ export async function createThread({
   console.log('  ID:', threadId)
   console.log('  Participants:', allParticipants)
 
-  // 📨 Send initial system message to start the thread
+  // Send initial system message to start the thread
   const payload: MessagePayload = {
     type: 'thread-init',
-    content: `${senderPublicKey.slice(0, 12)}... started a thread: "${threadName}"`,
+    content: `"${threadName}"`,
     mediaURL: undefined
   }
 
@@ -48,7 +48,7 @@ export async function createThread({
     protocolID,
     keyID,
     senderPublicKey,
-    recipients: recipientPublicKeys, // don't include sender here
+    recipients: recipientPublicKeys,
     content: payload.content
   })
 

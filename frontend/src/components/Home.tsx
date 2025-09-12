@@ -1,15 +1,13 @@
-// frontend/src/components/Home.tsx
-
 import { useState } from 'react'
 import { Box, Button, Typography } from '@mui/material'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useParams, useLocation } from 'react-router-dom'
 
 // Components
-import MainLayout from './MainLayout'
 import ThreadList from './ThreadList'
 import DirectMessageList from './DirectMessageList'
 import ComposeThread from './ComposeThread'
 import ComposeDirectMessage from './ComposeDirectMessage'
+import Chat from './Chat'
 
 // Types
 import type { WalletClient, WalletProtocol } from '@bsv/sdk'
@@ -28,9 +26,11 @@ const Home: React.FC<HomeProps> = ({
   keyID
 }) => {
   const navigate = useNavigate()
+  const { threadId } = useParams()
+  const location = useLocation()
+
   const [showComposeThread, setShowComposeThread] = useState(false)
   const [showComposeDM, setShowComposeDM] = useState(false)
-
 
   const handleThreadSelect = (
     threadId: string,
@@ -42,126 +42,146 @@ const Home: React.FC<HomeProps> = ({
     })
   }
 
-  // --- Polling all messages ---
-  // useEffect(() => {
-  //   let isMounted = true
-
-  //   const fetchMessages = async () => {
-  //     try {
-  //       const result = await loadAllMessages(walletClient, identityKey, protocolID, keyID)
-  //       if (isMounted) {
-  //         setThreads(result.threads)
-  //         setDirectMessages(result.directMessages)
-  //       }
-  //     } catch (err) {
-  //       console.error('[Home] Failed to load messages:', err)
-  //     }
-  //   }
-
-  //   fetchMessages()
-  //   const interval = setInterval(fetchMessages, 10000) // poll every 10s
-
-  //   return () => {
-  //     isMounted = false
-  //     clearInterval(interval)
-  //   }
-  // }, [walletClient, identityKey, protocolID, keyID])
-
-  // --- Sidebar: Thread List + Button ---
-  const sidebar = (
-    <Box sx={{ p: 2 }}>
+  return (
+    <Box sx={{ display: 'flex', height: '100vh' }}>
+      {/* Column 1: Group Threads */}
       <Box
         sx={{
+          width: 280,
+          backgroundColor: '#1e1e1e',
+          color: 'white',
+          borderRight: '1px solid #444',
+          overflowY: 'auto',
           display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          mb: 2
+          flexDirection: 'column',
+          p: 2
         }}
       >
-        <Typography variant="h6">Group Threads</Typography>
-        <Button
-          variant="contained"
-          onClick={() => setShowComposeThread(true)}
-          size="small"
+        <Box
+          sx={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            mb: 2
+          }}
         >
-          Start Thread
-        </Button>
-      </Box>
+          <Typography variant="h6">Group Threads</Typography>
+          <Button
+            variant="contained"
+            onClick={() => setShowComposeThread(true)}
+            size="small"
+          >
+            Start
+          </Button>
+        </Box>
 
-      <ThreadList
-  identityKey={identityKey}
-  wallet={walletClient}
-  protocolID={protocolID}
-  keyID={keyID}
-  onSelectThread={handleThreadSelect}
-/>
-
-
-      {showComposeThread && (
-        <ComposeThread
-          client={walletClient}
-          senderPublicKey={identityKey}
+        <ThreadList
+          identityKey={identityKey}
+          wallet={walletClient}
           protocolID={protocolID}
           keyID={keyID}
-          onThreadCreated={(threadId, recipientPublicKeys, threadName) => {
-          setShowComposeThread(false)
-          handleThreadSelect(threadId, recipientPublicKeys, threadName)
-        }}
-
-          onClose={() => setShowComposeThread(false)}
+          onSelectThread={handleThreadSelect}
         />
-      )}
-    </Box>
-  )
 
-  // --- Main Content: Direct Messages + Button ---
-  const content = (
-    <Box sx={{ p: 2 }}>
+        {showComposeThread && (
+          <ComposeThread
+            client={walletClient}
+            senderPublicKey={identityKey}
+            protocolID={protocolID}
+            keyID={keyID}
+            onThreadCreated={(threadId, recipientPublicKeys, threadName) => {
+              setShowComposeThread(false)
+              handleThreadSelect(threadId, recipientPublicKeys, threadName)
+            }}
+            onClose={() => setShowComposeThread(false)}
+          />
+        )}
+      </Box>
+
+      {/* Column 2: Direct Messages */}
       <Box
         sx={{
+          width: 280,
+          backgroundColor: '#1e1e1e',
+          color: 'white',
+          borderRight: '1px solid #444',
+          overflowY: 'auto',
           display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          mb: 2
+          flexDirection: 'column',
+          p: 2
         }}
       >
-        <Typography variant="h6">1-on-1 Messages</Typography>
-        <Button
-          variant="contained"
-          onClick={() => setShowComposeDM(true)}
-          size="small"
+        <Box
+          sx={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            mb: 2
+          }}
         >
-          New 1-on-1
-        </Button>
-      </Box>
+          <Typography variant="h6">1-on-1 Messages</Typography>
+          <Button
+            variant="contained"
+            onClick={() => setShowComposeDM(true)}
+            size="small"
+          >
+            New
+          </Button>
+        </Box>
 
-      <DirectMessageList
-  identityKey={identityKey}
-  wallet={walletClient}
-  protocolID={protocolID}
-  keyID={keyID}
-  onSelectThread={handleThreadSelect}
-/>
-
-
-      {showComposeDM && (
-        <ComposeDirectMessage
-          open={showComposeDM}
-          client={walletClient}
-          senderPublicKey={identityKey}
+        <DirectMessageList
+          identityKey={identityKey}
+          wallet={walletClient}
           protocolID={protocolID}
           keyID={keyID}
-          onCreate={((threadId: string, recipientKeys: string[]) => {
-            setShowComposeDM(false)
-            handleThreadSelect(threadId, recipientKeys)
-          }) as unknown as (threadId: string) => void}
-          onClose={() => setShowComposeDM(false)}
+          onSelectThread={handleThreadSelect}
         />
-      )}
+
+        {showComposeDM && (
+          <ComposeDirectMessage
+            open={showComposeDM}
+            client={walletClient}
+            senderPublicKey={identityKey}
+            protocolID={protocolID}
+            keyID={keyID}
+            onCreate={(threadId: string, recipientKeys: string[]) => {
+              setShowComposeDM(false)
+              handleThreadSelect(threadId, recipientKeys)
+            }}
+            onClose={() => setShowComposeDM(false)}
+          />
+        )}
+      </Box>
+
+      {/* Column 3: Chat View or Placeholder */}
+      <Box
+        sx={{
+          flex: 1,
+          backgroundColor: '#121212',
+          color: 'white',
+          display: 'flex',
+          flexDirection: 'column',
+          p: 2
+        }}
+      >
+        {threadId ? (
+          <Chat
+            client={walletClient}
+            senderPublicKey={identityKey}
+            protocolID={protocolID}
+            keyID={keyID}
+            threadId={threadId}
+            recipientPublicKeys={location.state?.recipientPublicKeys || []}
+            threadName={location.state?.threadName}
+          />
+        ) : (
+          <Typography variant="h5" sx={{ color: '#888' }}>
+            Select a thread to view messages.
+          </Typography>
+        )}
+      </Box>
     </Box>
   )
-
-  return <MainLayout sidebar={sidebar} content={content} />
 }
 
 export default Home
