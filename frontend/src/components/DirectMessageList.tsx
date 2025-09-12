@@ -1,5 +1,3 @@
-// frontend/src/components/DirectMessageList.tsx
-
 import { useEffect, useState, useRef } from 'react'
 import { LookupResolver, Utils } from '@bsv/sdk'
 import {
@@ -24,7 +22,7 @@ interface ThreadSummary {
   lastTimestamp: number
 }
 
-interface ThreadListProps {
+interface DirectMessageListProps {
   identityKey: string
   wallet: WalletInterface
   protocolID: WalletProtocol
@@ -34,7 +32,13 @@ interface ThreadListProps {
 
 const POLLING_INTERVAL_MS = 5000
 
-const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: ThreadListProps) => {
+const DirectMessageList = ({
+  identityKey,
+  wallet,
+  protocolID,
+  keyID,
+  onSelectThread
+}: DirectMessageListProps) => {
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [loading, setLoading] = useState<boolean>(true)
   const pollingRef = useRef<NodeJS.Timeout | null>(null)
@@ -63,13 +67,13 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
       const decoded = await decodeOutputs(toDecode)
       const decrypted = await decryptMessageBatch(wallet, decoded, protocolID, keyID)
 
-      const grouped: Record<string, ThreadSummary> = {}
+      const grouped: Record<string, ThreadSummary & { isGroup: boolean }> = {}
 
       for (const msg of decrypted) {
         const { threadId, createdAt, payload } = msg
+        if (!payload) continue
 
-        if (!payload) continue // Skip failed decryption
-
+        const threadName = payload.name?.trim()
         const recipients = payload.recipients ?? []
 
         if (!grouped[threadId]) {
@@ -80,24 +84,29 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
             threadId,
             displayNames,
             recipientKeys: recipients,
-            lastTimestamp: createdAt
+            lastTimestamp: createdAt,
+            isGroup: !!threadName
           }
         } else {
           grouped[threadId].lastTimestamp = Math.max(
             grouped[threadId].lastTimestamp,
             createdAt
           )
+          if (threadName) {
+            grouped[threadId].isGroup = true
+          }
         }
       }
 
-      const sortedThreads = Object.values(grouped).sort(
-        (a, b) => b.lastTimestamp - a.lastTimestamp
-      )
+      // ✅ Filter out group threads before display
+      const directThreads = Object.values(grouped)
+        .filter((t) => !t.isGroup)
+        .sort((a, b) => b.lastTimestamp - a.lastTimestamp)
 
-      const hasChanged = JSON.stringify(threads) !== JSON.stringify(sortedThreads)
-      if (hasChanged) setThreads(sortedThreads)
+      const hasChanged = JSON.stringify(threads) !== JSON.stringify(directThreads)
+      if (hasChanged) setThreads(directThreads)
     } catch (err) {
-      console.error('[ThreadList] Failed to load threads:', err)
+      console.error('[DirectMessageList] Failed to load threads:', err)
     } finally {
       setLoading(false)
     }
@@ -109,7 +118,7 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current)
     }
-  }, [identityKey, wallet, protocolID, keyID]) // re-poll if identity changes
+  }, [identityKey, wallet, protocolID, keyID])
 
   return (
     <Box sx={{ padding: 2, width: 300, borderRight: '1px solid #ccc' }}>
@@ -123,13 +132,13 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
         <List>
           {threads.map((thread) => (
             <ListItem key={thread.threadId} disablePadding>
-              <ListItemButton
-                onClick={() => onSelectThread(thread.threadId, thread.recipientKeys)}
-              >
+              <ListItemButton onClick={() => onSelectThread(thread.threadId, thread.recipientKeys)}>
                 <ListItemText
-                  primary={thread.displayNames.length > 0
-                    ? `To: ${thread.displayNames.join(', ')}`
-                    : 'Unnamed Thread'}
+                  primary={
+                    thread.displayNames.length > 0
+                      ? `To: ${thread.displayNames.join(', ')}`
+                      : 'Unnamed Thread'
+                  }
                   secondary={`Last activity: ${new Date(thread.lastTimestamp).toLocaleString()}`}
                 />
               </ListItemButton>
@@ -141,4 +150,4 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
   )
 }
 
-export default ThreadList
+export default DirectMessageList

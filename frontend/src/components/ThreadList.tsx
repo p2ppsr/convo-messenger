@@ -22,6 +22,7 @@ interface ThreadSummary {
   displayNames: string[]
   recipientKeys: string[]
   lastTimestamp: number
+  threadName: string
 }
 
 interface ThreadListProps {
@@ -74,6 +75,10 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
         const recipients = payload.recipients ?? []
 
         if (!grouped[threadId]) {
+          const threadName = payload.name?.trim()
+
+          if (!threadName) continue
+
           const nameMap = await resolveDisplayNames(recipients, identityKey)
           const displayNames = Array.from(nameMap.values())
 
@@ -81,16 +86,11 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
             threadId,
             displayNames,
             recipientKeys: recipients,
-            lastTimestamp: createdAt
+            lastTimestamp: createdAt,
+            threadName
           }
-        } else {
-          grouped[threadId].lastTimestamp = Math.max(
-            grouped[threadId].lastTimestamp,
-            createdAt
-          )
         }
       }
-
       const sortedThreads = Object.values(grouped).sort(
         (a, b) => b.lastTimestamp - a.lastTimestamp
       )
@@ -122,20 +122,18 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
         <CircularProgress />
       ) : (
         <List>
-          {threads.map((thread) => (
-            <ListItem key={thread.threadId} disablePadding>
-              <ListItemButton
-                onClick={() => onSelectThread(thread.threadId, thread.recipientKeys)}
-              >
-                <ListItemText
-                  primary={thread.displayNames.length > 0
-                    ? `To: ${thread.displayNames.join(', ')}`
-                    : 'Unnamed Thread'}
-                  secondary={`Last activity: ${new Date(thread.lastTimestamp).toLocaleString()}`}
-                />
-              </ListItemButton>
-            </ListItem>
-          ))}
+          {threads
+            .filter((t) => t.threadName && t.threadName.length > 0)
+            .map((thread) => (
+              <ListItem key={thread.threadId} disablePadding>
+                <ListItemButton onClick={() => onSelectThread(thread.threadId, thread.recipientKeys)}>
+                  <ListItemText
+                    primary={thread.threadName}
+                    secondary={`Last activity: ${new Date(thread.lastTimestamp).toLocaleString()}`}
+                  />
+                </ListItemButton>
+              </ListItem>
+            ))}
         </List>
       )}
     </Box>
