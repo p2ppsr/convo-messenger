@@ -30,7 +30,7 @@ interface ThreadListProps {
   wallet: WalletInterface
   protocolID: WalletProtocol
   keyID: string
-  onSelectThread: (threadId: string, recipientKeys: string[]) => void
+  onSelectThread: (threadId: string, recipientKeys: string[], threadName?: string) => void
 }
 
 // const POLLING_INTERVAL_MS = 5000
@@ -126,7 +126,7 @@ const ThreadList = ({ identityKey, wallet, protocolID, keyID, onSelectThread }: 
             .filter((t) => t.threadName && t.threadName.length > 0)
             .map((thread) => (
               <ListItem key={thread.threadId} disablePadding>
-                <ListItemButton onClick={() => onSelectThread(thread.threadId, thread.recipientKeys)}>
+                <ListItemButton onClick={() => onSelectThread(thread.threadId, thread.recipientKeys, thread.threadName)}>
                   <ListItemText
                     primary={thread.threadName}
                     secondary={`Last activity: ${new Date(thread.lastTimestamp).toLocaleString()}`}

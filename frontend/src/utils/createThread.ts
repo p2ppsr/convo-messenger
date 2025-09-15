@@ -4,7 +4,6 @@ import type { WalletProtocol, WalletClient } from '@bsv/sdk'
 import { Hash, Utils } from '@bsv/sdk'
 
 import { sendMessage } from './sendMessage'
-import type { MessagePayload } from '../types/types'
 
 export interface CreateThreadOptions {
   client: WalletClient
@@ -16,7 +15,7 @@ export interface CreateThreadOptions {
 }
 
 /**
- * Creates a new conversation thread and sends the initial message.
+ * Creates a new conversation thread and sends the initial system "thread-init".
  */
 export async function createThread({
   client,
@@ -34,14 +33,9 @@ export async function createThread({
   console.log('[Convo] Creating new thread:')
   console.log('  ID:', threadId)
   console.log('  Participants:', allParticipants)
+  console.log('  Thread name:', threadName)
 
-  // Send initial system message to start the thread
-  const payload: MessagePayload = {
-    type: 'thread-init',
-    content: `"${threadName}"`,
-    mediaURL: undefined
-  }
-
+  // Send initial system "thread-init" (not a visible chat message)
   await sendMessage({
     client,
     threadId,
@@ -49,7 +43,8 @@ export async function createThread({
     keyID,
     senderPublicKey,
     recipients: recipientPublicKeys,
-    content: payload.content
+    content: `🟢 Thread started: ${threadName}`,
+    threadName
   })
 
   console.log('[Convo] Thread created successfully.')

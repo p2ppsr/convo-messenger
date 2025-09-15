@@ -51,7 +51,7 @@ const ComposeThread: React.FC<ComposeThreadProps> = ({
     if (selectedIdentities.length === 0) return
 
     const recipientPublicKeys = selectedIdentities.map((id) => id.identityKey)
-    const name = selectedIdentities.length > 1 ? threadName || 'Untitled Group' : ''
+    const name = (threadName || 'Untitled Group').trim()
 
     setCreating(true)
 

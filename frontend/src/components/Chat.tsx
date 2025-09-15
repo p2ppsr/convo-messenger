@@ -155,10 +155,12 @@ export const Chat: React.FC<ChatProps> = ({
       <div className="flex-1 overflow-y-auto space-y-2">
         {/* Thread name header */}
         {threadName && (
-          <div className="text-lg font-semibold text-center mb-4">
-            {threadName}
-          </div>
-        )}
+  <div className="my-4 flex justify-center">
+    <span className="px-4 py-2 rounded-full bg-gradient-to-r from-purple-500 to-blue-500 text-white text-lg font-bold shadow">
+      {threadName}
+    </span>
+  </div>
+)}
 
         {/* Message list */}
         {loading ? (
