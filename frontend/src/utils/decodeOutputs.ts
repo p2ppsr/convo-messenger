@@ -1,19 +1,43 @@
 // src/utils/decodeOutputs.ts
+
 import { Transaction, PushDrop, Utils } from '@bsv/sdk'
 
+/**
+ * DecodedMessage
+ * Represents the structure of a message that has been pulled
+ * from the blockchain overlay but has NOT yet been decrypted.
+ * - Contains sender, recipients, threadId, and raw header/payload.
+ */
 export interface DecodedMessage {
-  threadId: string
-  sender: string
-  header: number[]
-  encryptedPayload: number[]
-  createdAt: number
-  txid: string
-  vout: number
-  beef: number[]
-  recipients: string[]
-  threadName?: string
+  threadId: string            // unique thread ID (set by sender)
+  sender: string              // pubkey of message sender
+  header: number[]            // encrypted header (contains key wrapping)
+  encryptedPayload: number[]  // ciphertext of the actual message payload
+  createdAt: number           // timestamp (provided by overlay context)
+  txid: string                // blockchain txid
+  vout: number                // output index inside the tx
+  beef: number[]              // raw BEEF encoding of tx for reference
+  recipients: string[]        // all recipient keys extracted from PushDrop
+  threadName?: string         // optional group thread name
 }
 
+/**
+ * decodeOutput
+ *
+ * Takes:
+ *   - beef: raw BEEF encoding of a transaction
+ *   - outputIndex: which output contains the PushDrop
+ *   - timestamp: overlay-provided message timestamp
+ *
+ * Steps:
+ *   1. Reconstruct Transaction from BEEF
+ *   2. Grab the correct output
+ *   3. Decode PushDrop fields (structured slots in the locking script)
+ *   4. Extract threadId, sender pubkey, header, ciphertext, recipients, etc.
+ *
+ * Returns:
+ *   A DecodedMessage object that can be passed to decryptMessage().
+ */
 export async function decodeOutput(
   beef: number[],
   outputIndex: number,
@@ -27,13 +51,18 @@ export async function decodeOutput(
   console.log(`[decodeOutput] Decoding vout ${outputIndex} at timestamp ${timestamp}`)
   console.log('[decodeOutput] PushDrop fields length:', fields.length)
 
+  // Expecting at least 7 fields in our schema
   if (fields.length < 7) {
     throw new Error('Invalid PushDrop message: not enough fields')
   }
 
+  // Field 3: threadId (UTF8 string)
   const threadId = Utils.toUTF8(fields[3])
+
+  // Field 2: sender public key (hex)
   const sender = Utils.toHex(Array.from(fields[2] as unknown as Uint8Array))
 
+  // Field 6: recipients array (each an identity key)
   const recipients = Array.isArray(fields[6])
     ? fields[6]
         .map((r: unknown) => {
@@ -47,15 +76,16 @@ export async function decodeOutput(
         .filter((r) => r.length > 0)
     : []
 
+  // Field 8 (optional): thread name (UTF8 string)
   let threadName: string | undefined
   if (fields.length > 9) {
-  try {
-    threadName = Utils.toUTF8(fields[8])
-    console.log('[decodeOutput] Found thread name:', threadName)
-  } catch (err) {
-    console.warn('[decodeOutput] Failed to decode thread name:', err)
+    try {
+      threadName = Utils.toUTF8(fields[8])
+      console.log('[decodeOutput] Found thread name:', threadName)
+    } catch (err) {
+      console.warn('[decodeOutput] Failed to decode thread name:', err)
+    }
   }
-}
 
   console.log('[decodeOutput] Thread ID:', threadId)
   console.log('[decodeOutput] Sender:', sender)
@@ -64,8 +94,8 @@ export async function decodeOutput(
   return {
     threadId,
     sender,
-    header: fields[4],
-    encryptedPayload: fields[5],
+    header: fields[4],             // encrypted symmetric key header
+    encryptedPayload: fields[5],   // actual ciphertext payload
     createdAt: timestamp,
     txid: decodedTx.id('hex'),
     vout: outputIndex,
@@ -75,6 +105,13 @@ export async function decodeOutput(
   }
 }
 
+/**
+ * decodeOutputs
+ *
+ * Convenience wrapper for decoding multiple outputs at once.
+ * - Runs decodeOutput() on each.
+ * - Skips and logs any failures instead of crashing the whole batch.
+ */
 export async function decodeOutputs(
   outputs: Array<{ beef: number[]; outputIndex: number; timestamp: number }>
 ): Promise<DecodedMessage[]> {

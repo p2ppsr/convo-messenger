@@ -1,9 +1,27 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { loadMessages } from '../utils/loadMessages'
 import { sendMessage } from '../utils/sendMessage'
+import { IdentitySearchField } from '@bsv/identity-react'
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button
+} from '@mui/material'
+import type { DisplayableIdentity, WalletClient, WalletProtocol } from '@bsv/sdk'
 import type { MessagePayloadWithMetadata } from '../types/types'
-import type { WalletClient, WalletProtocol } from '@bsv/sdk'
 
+/**
+ * Props passed into the Chat component.
+ * - client: WalletClient instance for signing/encrypting/broadcasting
+ * - protocolID: namespace (ex: [2, 'convo'])
+ * - keyID: wallet key index under identity (ex: "1")
+ * - senderPublicKey: current user’s pubkey (used as "from")
+ * - threadId: ID that uniquely identifies the conversation
+ * - recipientPublicKeys: initial participants in the thread
+ * - threadName: optional human-readable name (mainly for group chats)
+ */
 interface ChatProps {
   client: WalletClient
   protocolID: WalletProtocol
@@ -14,42 +32,32 @@ interface ChatProps {
   threadName?: string
 }
 
-// --- normalize sender for nameMap lookup ---
-// --- normalize sender for nameMap lookup ---
+/**
+ * normalizeSender
+ * Utility function that attempts to standardize a "sender" field
+ * into a proper compressed pubkey format (02... or 03...).
+ */
 function normalizeSender(sender: string): string {
   try {
-    console.log("[normalizeSender] Raw sender input:", sender)
-
-    // Case 1: already looks like a pubkey
-    if (sender.startsWith("02") || sender.startsWith("03")) {
-      console.log("[normalizeSender] Detected direct pubkey:", sender)
-      return sender
-    }
-
-    // Case 2: might be hex of ASCII characters (like "3033...")
-    // Decode safely without Buffer
+    if (sender.startsWith("02") || sender.startsWith("03")) return sender
     const ascii = sender
-      .match(/.{1,2}/g) // split into hex byte pairs
-      ?.map((byte) => String.fromCharCode(parseInt(byte, 16)))
+      .match(/.{1,2}/g)
+      ?.map((b) => String.fromCharCode(parseInt(b, 16)))
       .join("") ?? sender
-
-    console.log("[normalizeSender] Decoded ASCII:", ascii)
-
-    if (ascii.startsWith("02") || ascii.startsWith("03")) {
-      console.log("[normalizeSender] Decoded to pubkey:", ascii)
-      return ascii
-    }
-
-    console.log("[normalizeSender] Fallback return (no match):", sender)
+    if (ascii.startsWith("02") || ascii.startsWith("03")) return ascii
     return sender
-  } catch (err) {
-    console.warn("[normalizeSender] Failed to normalize:", sender, err)
+  } catch {
     return sender
   }
 }
 
-
-
+/**
+ * Chat component
+ * Handles:
+ *  - Loading past messages
+ *  - Sending new messages
+ *  - Inviting new participants (via identity-react search)
+ */
 export const Chat: React.FC<ChatProps> = ({
   client,
   protocolID,
@@ -59,38 +67,42 @@ export const Chat: React.FC<ChatProps> = ({
   recipientPublicKeys,
   threadName
 }) => {
+  // 📨 State for conversation messages
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
+  // ✍️ State for new message being composed
   const [newMessage, setNewMessage] = useState('')
+  // ⏳ Show spinner until messages are loaded
   const [loading, setLoading] = useState(true)
+  // 🧾 Map of pubkey → resolved display name
   const [nameMap, setNameMap] = useState<Map<string, string>>(new Map())
+  // 🔑 Current list of recipients (starts with props but grows after invites)
+  const [currentRecipients, setCurrentRecipients] = useState<string[]>(recipientPublicKeys)
 
+  // 🆕 Invite dialog state
+  const [inviteOpen, setInviteOpen] = useState(false)
+  const [pendingInvite, setPendingInvite] = useState<DisplayableIdentity | null>(null)
+
+  // 📜 Scroll anchor for always jumping to bottom of chat
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
 
-  const scrollToBottom = () => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }
-
+  /**
+   * Effect: Load messages when thread changes.
+   * Uses loadMessages() to query overlay and decrypt.
+   */
   useEffect(() => {
     const fetchMessages = async () => {
       try {
-        const result = await loadMessages({
-          client,
-          protocolID,
-          keyID,
-          topic: threadId
-        })
-
+        const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
         if (!('messages' in result) || !('nameMap' in result)) {
           throw new Error('[Chat] loadMessages returned unexpected structure')
         }
-
         const { messages: loadedMessages, nameMap: resolvedNames } = result
 
-        setMessages((prev) => {
-          const hasChanged = JSON.stringify(prev) !== JSON.stringify(loadedMessages)
-          return hasChanged ? loadedMessages : prev
-        })
-
+        // Replace state only if messages changed
+        setMessages((prev) =>
+          JSON.stringify(prev) !== JSON.stringify(loadedMessages) ? loadedMessages : prev
+        )
         setNameMap(resolvedNames)
       } catch (err) {
         console.error('[Chat] Failed to load messages:', err)
@@ -99,18 +111,49 @@ export const Chat: React.FC<ChatProps> = ({
         scrollToBottom()
       }
     }
-
     setLoading(true)
     fetchMessages()
-    // Optional polling:
-    // const polling = setInterval(fetchMessages, 5000)
-    // return () => clearInterval(polling)
   }, [threadId, client, protocolID, keyID])
 
+  /**
+   * Send a normal text message.
+   * - Calls sendMessage to encrypt + broadcast
+   * - Optimistically adds message to UI
+   */
   const handleSend = async () => {
     if (!newMessage.trim()) return
-
     const content = newMessage.trim()
+    try {
+      await sendMessage({
+        client,
+        protocolID,
+        keyID,
+        threadId,
+        senderPublicKey,
+        recipients: currentRecipients,
+        content,
+        threadName
+      })
+      setMessages((prev) => [
+        ...prev,
+        { content, sender: senderPublicKey, createdAt: Date.now(), txid: 'temp', vout: 0, threadId }
+      ])
+      setNewMessage('')
+      scrollToBottom()
+    } catch (err) {
+      console.error('[Chat] Failed to send message:', err)
+    }
+  }
+
+  /**
+   * Confirm an invite once identity is selected from IdentitySearchField.
+   * - Appends new recipient key to local state
+   * - Sends a system-style "invited" message
+   */
+  const handleConfirmInvite = async () => {
+    if (!pendingInvite) return
+    const newKey = pendingInvite.identityKey
+    const updated = [...new Set([...currentRecipients, newKey])] // dedupe
 
     try {
       await sendMessage({
@@ -119,15 +162,19 @@ export const Chat: React.FC<ChatProps> = ({
         keyID,
         threadId,
         senderPublicKey,
-        recipients: recipientPublicKeys,
-        content,
+        recipients: updated,
+        content: `🔔 Invited new participant: ${pendingInvite.name || newKey.slice(0, 12)}...`,
         threadName
       })
 
+      // Update state so future messages include this new participant
+      setCurrentRecipients(updated)
+
+      // Optimistically show invite message
       setMessages((prev) => [
         ...prev,
         {
-          content,
+          content: `🔔 Invited new participant: ${pendingInvite.name || newKey.slice(0, 12)}...`,
           sender: senderPublicKey,
           createdAt: Date.now(),
           txid: 'temp',
@@ -135,14 +182,18 @@ export const Chat: React.FC<ChatProps> = ({
           threadId
         }
       ])
-
-      setNewMessage('')
+      setPendingInvite(null)
+      setInviteOpen(false)
       scrollToBottom()
     } catch (err) {
-      console.error('[Chat] Failed to send message:', err)
+      console.error('[Chat] Failed to invite new participant:', err)
     }
   }
 
+  /**
+   * Intercept Enter key → send message
+   * Shift+Enter still allows newline
+   */
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -150,17 +201,20 @@ export const Chat: React.FC<ChatProps> = ({
     }
   }
 
+  /**
+   * Render
+   */
   return (
     <div className="flex flex-col h-full p-4">
       <div className="flex-1 overflow-y-auto space-y-2">
-        {/* Thread name header */}
+        {/* Banner for group thread name */}
         {threadName && (
-  <div className="my-4 flex justify-center">
-    <span className="px-4 py-2 rounded-full bg-gradient-to-r from-purple-500 to-blue-500 text-white text-lg font-bold shadow">
-      {threadName}
-    </span>
-  </div>
-)}
+          <div className="my-4 flex justify-center">
+            <span className="px-4 py-2 rounded-full bg-gradient-to-r from-purple-500 to-blue-500 text-white text-lg font-bold shadow">
+              {threadName}
+            </span>
+          </div>
+        )}
 
         {/* Message list */}
         {loading ? (
@@ -172,7 +226,6 @@ export const Chat: React.FC<ChatProps> = ({
             const normalized = normalizeSender(msg.sender as string)
             const displaySender =
               nameMap.get(normalized) || normalized.slice(0, 10) + "..."
-
             return (
               <div
                 key={`${msg.txid}-${msg.vout}`}
@@ -192,12 +245,10 @@ export const Chat: React.FC<ChatProps> = ({
             )
           })
         )}
-
-        {/* Scroll anchor */}
         <div ref={chatEndRef} />
       </div>
 
-      {/* Input box */}
+      {/* Input + actions */}
       <div className="mt-4 flex gap-2">
         <textarea
           className="flex-1 p-2 border rounded resize-none min-h-[40px] max-h-[120px]"
@@ -213,7 +264,35 @@ export const Chat: React.FC<ChatProps> = ({
         >
           Send
         </button>
+        {/* Invite button opens search dialog */}
+        <button
+          className="px-4 py-2 bg-green-600 text-white rounded"
+          onClick={() => setInviteOpen(true)}
+        >
+          Invite
+        </button>
       </div>
+
+      {/* Invite participant dialog */}
+      <Dialog open={inviteOpen} onClose={() => setInviteOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Invite New Participant</DialogTitle>
+        <DialogContent>
+          <IdentitySearchField
+            appName="Convo"
+            onIdentitySelected={(id) => setPendingInvite(id)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setInviteOpen(false)}>Cancel</Button>
+          <Button
+            onClick={handleConfirmInvite}
+            disabled={!pendingInvite}
+            variant="contained"
+          >
+            Invite
+          </Button>
+        </DialogActions>
+      </Dialog>
     </div>
   )
 }

@@ -3,19 +3,42 @@ import { checkMessages } from './checkMessages'
 import type { MessagePayloadWithMetadata } from '../types/types'
 import { resolveDisplayNames } from './resolveDisplayNames'
 
+/**
+ * Options for loading messages from the overlay
+ */
 export interface LoadMessagesOptions {
   client: WalletInterface
   protocolID: WalletProtocol
   keyID: string
-  topic: string
+  topic: string              // Thread ID (used as overlay query value)
 }
 
+/**
+ * OverlayOutput represents a single UTXO-like result from the overlay.
+ * - beef: encoded transaction data
+ * - outputIndex: which vout holds the PushDrop
+ * - context: optional timestamp or metadata
+ */
 interface OverlayOutput {
   outputIndex: number
   beef: number[]
   context?: number[]
 }
 
+/**
+ * loadMessages
+ *
+ * Purpose:
+ *   Queries the overlay for all messages in a thread, then
+ *   decodes + decrypts them into usable app objects.
+ *
+ * Flow:
+ *   1. Query overlay for outputs by threadId.
+ *   2. Parse timestamps from context.
+ *   3. Decode + decrypt outputs via checkMessages().
+ *   4. Collect sender pubkeys and resolve them to display names.
+ *   5. Return sorted messages + nameMap.
+ */
 export async function loadMessages({
   client,
   protocolID,
@@ -30,6 +53,7 @@ export async function loadMessages({
   console.log('[LoadMessages] Protocol ID:', protocolID)
   console.log('[LoadMessages] Key ID:', keyID)
 
+  // --- Step 1: Query overlay for all messages in a thread ---
   const resolver = new LookupResolver({
     networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
   })
@@ -53,6 +77,7 @@ export async function loadMessages({
     return { messages: [], nameMap: new Map() }
   }
 
+  // If overlay didn’t return the expected format, bail out
   if (response.type !== 'output-list' || !Array.isArray(response.outputs)) {
     console.warn('[LoadMessages] Unexpected overlay response type:', response.type)
     return { messages: [], nameMap: new Map() }
@@ -60,6 +85,8 @@ export async function loadMessages({
 
   console.log(`[LoadMessages] Retrieved ${response.outputs.length} outputs from overlay.`)
 
+  // --- Step 2: Extract and parse overlay results ---
+  // Each output has a BEEF, an outputIndex, and an optional context (timestamp).
   const lookupResults = response.outputs.map((o: OverlayOutput, i: number) => {
     let timestamp = Date.now()
     try {
@@ -82,6 +109,7 @@ export async function loadMessages({
 
   console.log(`[LoadMessages] Decoding and decrypting ${lookupResults.length} outputs...`)
 
+  // --- Step 3: Decode + decrypt via checkMessages ---
   const messages = await checkMessages({
     client,
     protocolID,
@@ -91,14 +119,12 @@ export async function loadMessages({
 
   console.log('[LoadMessages] Decrypted messages:', messages)
 
-  // Collect all unique sender public keys
+  // --- Step 4: Collect unique senders for display name lookup ---
   const allSenders = [...new Set(
     messages
       .map(m => {
         try {
-          // If already a string, return it
           if (typeof m.sender === 'string') return m.sender
-          // If it's a Uint8Array or Buffer, convert to base64
           if (m.sender instanceof Uint8Array || Array.isArray(m.sender)) {
             return Buffer.from(m.sender).toString('base64')
           }
@@ -113,11 +139,11 @@ export async function loadMessages({
 
   console.log('[LoadMessages] Unique senders:', allSenders)
 
-  // Resolve display names
+  // --- Step 5: Resolve names for those senders (identity service lookup) ---
   const nameMap = await resolveDisplayNames(allSenders, keyID)
   console.log('[LoadMessages] Resolved nameMap:', Object.fromEntries(nameMap))
 
-
+  // --- Step 6: Sort chronologically and return ---
   const sorted = messages.sort((a, b) => a.createdAt - b.createdAt)
   console.log(`[LoadMessages] Returning ${sorted.length} sorted messages.`)
   return {
