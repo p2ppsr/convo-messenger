@@ -37,7 +37,7 @@
   "license": "SEE LICENSE IN LICENSE.txt",
   "dependencies": {
     "@bsv/overlay": "^0.4.1",
-    "@bsv/sdk": "^1.6.16",
+    "@bsv/sdk": "^1.7.6",
     "express": "^5.1.0",
     "mongodb": "^6.16.0"
   },

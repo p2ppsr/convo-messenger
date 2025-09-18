@@ -1,18 +1,18 @@
-// frontend/src/utils/sendMessage.ts
-
+// Import needed SDK utilities and helpers
 import {
-  PushDrop,
-  WalletClient,
-  Utils,
-  Transaction,
-  TopicBroadcaster,
+  PushDrop,            // For building locking scripts with structured fields
+  WalletClient,        // Client interface for wallet actions
+  Utils,               // Encoding/decoding helpers
+  Transaction,         // For working with transactions
+  TopicBroadcaster,    // Publishes transactions to an overlay topic
   Hash,
   WalletProtocol
 } from '@bsv/sdk'
 
-import { encryptMessage } from './MessageEncryptor'
+import { encryptMessage } from './MessageEncryptor'  // Our CurvePoint encryption wrapper
 import type { MessagePayload } from '../types/types'
 
+// Define expected options when sending a message
 export interface SendMessageOptions {
   client: WalletClient
   senderPublicKey: string
@@ -26,18 +26,31 @@ export interface SendMessageOptions {
   threadName?: string
 }
 
+/**
+ * sendMessage
+ *
+ * Purpose:
+ *   - Encrypt a chat message payload with CurvePoint for a set of recipients.
+ *   - Wrap encrypted data + metadata into a PushDrop locking script.
+ *   - Broadcast transaction to overlay via TopicBroadcaster.
+ *
+ * Key idea:
+ *   -> The "header" from encryptMessage is where all recipient keys live.
+ *   -> If the recipient is missing here, they will never be able to decrypt.
+ */
 export async function sendMessage({
   client,
   senderPublicKey,
   threadId,
   content,
   recipients,
-  protocolID = [2, 'tmconvo'],
-  keyID = '1',
-  topic = 'convo',
-  basket = 'convo',
+  protocolID = [2, 'tmconvo'],   // Default protocol if not passed
+  keyID = '1',                   // Default key slot
+  topic = 'convo',               // Overlay topic tag
+  basket = 'convo',              // Basket for wallet bookkeeping
   threadName
 }: SendMessageOptions): Promise<string> {
+  // Setup helpers
   const pushdrop = new PushDrop(client)
   const broadcaster = new TopicBroadcaster([`tm_${topic}`], {
     networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
@@ -50,22 +63,26 @@ export async function sendMessage({
   console.log(`[Convo] ProtocolID: ${JSON.stringify(protocolID)}, keyID: ${keyID}`)
   console.log(`[Convo] Topic: ${topic}, Basket: ${basket}`)
 
+  // Deduplicate and always include the sender themselves in the recipient list.
+  // This ensures the sender can also decrypt their own messages.
   const uniqueRecipients = Array.from(new Set([...recipients, senderPublicKey]))
   console.log(`[Convo] Recipients (${uniqueRecipients.length}):`, uniqueRecipients)
 
+  // Create the actual message payload object
   const payload: MessagePayload = {
     type: 'message',
     content,
     mediaURL: undefined
   }
 
+  // Encrypt the payload with CurvePoint
   let header: number[], encryptedPayload: number[]
   try {
     console.log('[Convo] Calling encryptMessage...')
     ;({ header, encryptedPayload } = await encryptMessage(
       client,
       payload,
-      uniqueRecipients,
+      uniqueRecipients,   // <--- THIS is critical: every intended recipient must be here
       protocolID,
       keyID
     ))
@@ -81,28 +98,32 @@ export async function sendMessage({
     throw new Error('Failed to encrypt message.')
   }
 
+  // Timestamp and random unique ID for this message
   const timestamp = Date.now()
   const uniqueID = Utils.toHex(Hash.sha256(Utils.toArray(Math.random().toString(), 'utf8')))
 
   console.log(`[Convo] Timestamp: ${timestamp}`)
   console.log(`[Convo] Unique ID: ${uniqueID}`)
 
+  // Build the PushDrop fields in a fixed order
   const fields = [
-    Utils.toArray(topic, 'utf8'),                       // 0
-    Utils.toArray('tmconvo', 'utf8'),                   // 1
-    Utils.toArray(senderPublicKey, 'utf8'),             // 2
-    Utils.toArray(threadId, 'utf8'),                    // 3
-    header,                                             // 4
-    encryptedPayload,                                   // 5
-    Utils.toArray(String(timestamp), 'utf8'),           // 6
-    Utils.toArray(uniqueID, 'utf8')                     // 7
+    Utils.toArray(topic, 'utf8'),                       // 0: overlay topic
+    Utils.toArray('tmconvo', 'utf8'),                   // 1: static marker for convo messages
+    Utils.toArray(senderPublicKey, 'utf8'),             // 2: sender identity key
+    Utils.toArray(threadId, 'utf8'),                    // 3: thread ID
+    header,                                             // 4: CurvePoint header (contains recipient key slots)
+    encryptedPayload,                                   // 5: ciphertext
+    Utils.toArray(String(timestamp), 'utf8'),           // 6: message timestamp
+    Utils.toArray(uniqueID, 'utf8')                     // 7: per-message unique ID
   ]
 
+  // Optional thread name for group threads
   if (threadName) {
-    fields.push(Utils.toArray(threadName, 'utf8'))      // 8 (optional)
+    fields.push(Utils.toArray(threadName, 'utf8'))      // 8: thread name
     console.log(`[Convo] Included threadName: "${threadName}"`)
   }
 
+  // Debug log: show breakdown of fields for sanity checking
   console.log(`[Convo] PushDrop Field Breakdown:`)
   fields.forEach((field, index) => {
     let preview = Array.isArray(field)
@@ -125,9 +146,11 @@ export async function sendMessage({
     console.log(`  [${index}] ${stringValue} (${field.length} bytes): ${preview}`)
   })
 
+  // Build the locking script for the PushDrop message
   const lockingScript = await pushdrop.lock(fields, [2, basket], keyID, 'anyone', true)
   console.log('[Convo] Locking script constructed.')
 
+  // Create the transaction
   const { tx } = await client.createAction({
     outputs: [
       {
@@ -148,10 +171,12 @@ export async function sendMessage({
     throw new Error('[Convo] Failed to create transaction.')
   }
 
+  // Parse transaction and extract ID
   const transaction = Transaction.fromAtomicBEEF(tx)
   const txid = transaction.id('hex')
   console.log(`[Convo] Created transaction. txid: ${txid}`)
 
+  // Broadcast to overlay
   try {
     await broadcaster.broadcast(transaction)
     console.log(`[Convo] Broadcast to overlay succeeded. txid: ${txid}`)

@@ -3,14 +3,29 @@ import { CurvePoint } from 'curvepoint'
 import { MessagePayload } from '../types/types'
 
 /**
- * Encrypts a message for a group of recipients using CurvePoint.
+ * encryptMessage
  *
- * @param wallet - The WalletInterface (e.g., WalletClient instance)
- * @param payload - The plaintext message payload to encrypt
- * @param recipients - Array of recipient public keys (hex)
- * @param protocolID - WalletProtocol context (e.g., ['tmsg'])
- * @param keyID - Unique key identifier (e.g., '1')
- * @returns The encrypted payload and CurvePoint header
+ * Purpose:
+ *   - Take a MessagePayload (your plaintext chat object).
+ *   - Serialize it to bytes.
+ *   - Use CurvePoint to wrap the payload with a header that contains:
+ *       - The recipient list
+ *       - Encrypted symmetric keys
+ *       - Sender pubkey
+ *   - Return:
+ *       - header: used for recipient key validation and key unwrapping.
+ *       - encryptedPayload: ciphertext for the actual chat content.
+ *
+ * Inputs:
+ *   - wallet: provides the private key used to derive sender identity and
+ *             generate symmetric key wrapping for recipients.
+ *   - payload: message data (JSON).
+ *   - recipients: **critical** – every recipient’s pubkey that should be
+ *                 able to decrypt (MUST include sender too!).
+ *   - protocolID, keyID: namespace for key derivation inside wallet.
+ *
+ * Returns:
+ *   - { encryptedPayload, header }
  */
 export async function encryptMessage(
   wallet: WalletInterface,
@@ -26,17 +41,28 @@ export async function encryptMessage(
   console.log('[MessageEncryptor] Key ID:', keyID)
   console.log('[MessageEncryptor] Payload object:', payload)
 
-  // 1. Convert message to bytes
+  // --- Step 1: Convert payload object into a byte array ---
   const plaintext = JSON.stringify(payload)
   const dataBytes = Array.from(new TextEncoder().encode(plaintext))
+
   console.log('[MessageEncryptor] Plaintext (string):', plaintext)
   console.log('[MessageEncryptor] Plaintext (bytes length):', dataBytes.length)
-  console.log('[MessageEncryptor] Plaintext (hex preview):', Utils.toHex(dataBytes.slice(0, 16)), '...')
+  console.log(
+    '[MessageEncryptor] Plaintext (hex preview):',
+    Utils.toHex(dataBytes.slice(0, 16)),
+    '...'
+  )
 
-  // 2. Construct CurvePoint instance with wallet
+  // --- Step 2: Initialize CurvePoint with wallet ---
+  // This ties encryption to the wallet’s key derivation logic.
   const curvePoint = new CurvePoint(wallet)
 
-  // 3. Encrypt the message using CurvePoint
+  // --- Step 3: Perform encryption ---
+  // CurvePoint builds a header with:
+  //   - numRecipients
+  //   - each recipient’s pubkey
+  //   - encrypted symmetric key material for each recipient
+  // The same symmetric key is used for all recipients’ encryptedPayload.
   const { encryptedMessage, header } = await curvePoint.encrypt(
     dataBytes,
     protocolID,
@@ -48,8 +74,13 @@ export async function encryptMessage(
   console.log('[MessageEncryptor] Header length:', header.length)
   console.log('[MessageEncryptor] Encrypted message length:', encryptedMessage.length)
   console.log('[MessageEncryptor] Header (hex preview):', Utils.toHex(header.slice(0, 16)), '...')
-  console.log('[MessageEncryptor] Encrypted message (hex preview):', Utils.toHex(encryptedMessage.slice(0, 16)), '...')
+  console.log(
+    '[MessageEncryptor] Encrypted message (hex preview):',
+    Utils.toHex(encryptedMessage.slice(0, 16)),
+    '...'
+  )
 
+  // --- Step 4: Return header + ciphertext ---
   return {
     encryptedPayload: encryptedMessage,
     header
