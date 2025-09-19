@@ -1,8 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import { LookupResolver, Utils } from '@bsv/sdk'
 import {
-  Box,
-  Typography,
   List,
   ListItem,
   ListItemText,
@@ -175,22 +173,33 @@ const DirectMessageList = ({
   }, [identityKey, wallet, protocolID, keyID])
 
   /**
-   * Render sidebar list
+   * Render direct message list
    */
   return (
-    <Box sx={{ padding: 2, width: 300, borderRight: '1px solid #ccc' }}>
-      <Typography variant="h6" gutterBottom>
-        Direct Messages
-      </Typography>
-
+    <>
       {loading ? (
         <CircularProgress />
       ) : (
-        <List>
+        <List disablePadding>
           {threads.map((thread) => (
-            <ListItem key={thread.threadId} disablePadding>
+            <ListItem key={thread.threadId} disablePadding sx={{ mb: 0.5 }}>
               <ListItemButton
                 onClick={() => onSelectThread(thread.threadId, thread.recipientKeys)}
+                sx={(theme) => ({
+                  borderRadius: '9999px', // pill look
+                  px: 2,
+                  py: 0.75,
+                  '&:hover': {
+                    backgroundColor: theme.palette.action.hover,
+                  },
+                  '&.Mui-selected': {
+                    backgroundColor: theme.palette.primary.main,
+                    color: theme.palette.primary.contrastText,
+                    '&:hover': {
+                      backgroundColor: theme.palette.primary.dark,
+                    },
+                  },
+                })}
               >
                 <ListItemText
                   primary={
@@ -199,13 +208,22 @@ const DirectMessageList = ({
                       : 'Unnamed Thread'
                   }
                   secondary={`Last activity: ${new Date(thread.lastTimestamp).toLocaleString()}`}
+                  slotProps={{
+                    primary: {
+                      noWrap: true,
+                      sx: { fontSize: 14 },
+                    },
+                    secondary: {
+                      sx: { fontSize: 12, color: 'text.secondary' },
+                    },
+                  }}
                 />
               </ListItemButton>
             </ListItem>
           ))}
         </List>
       )}
-    </Box>
+    </>
   )
 }
 

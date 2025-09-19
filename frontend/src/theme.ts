@@ -1,39 +1,91 @@
+// src/theme.ts
 import { createTheme } from '@mui/material/styles'
 
-// Define a custom theme with a dark background
+// 🎨 Define base colors
+const primary = '#5865F2'   // Discord blurple
+const secondary = '#3BA55D' // Discord green (for invites/confirm)
+const backgroundDark = '#2B2D31' // Chat background
+const surfaceDark = '#313338'    // Message + input surfaces
+const textPrimary = '#FFFFFF'
+const textSecondary = '#B9BBBE'
 
-// Define custom spacing function compatible with Spacing type
-const customSpacing = (factor: number): string => `${8 * factor}px`
-
-// Create custom theme using createTheme
-const web3Theme = createTheme({
+const theme = createTheme({
   palette: {
     mode: 'dark',
     primary: {
-      main: '#00d1b2',
+      main: primary,
     },
     secondary: {
-      main: '#7e57c2',
+      main: secondary,
     },
     background: {
-      default: '#121212',
-      paper: '#242424',
+      default: backgroundDark,
+      paper: surfaceDark,
     },
-    error: {
-      main: '#ff3860',
+    text: {
+      primary: textPrimary,
+      secondary: textSecondary,
     },
   },
   typography: {
-    fontFamily: '"Roboto", "Helvetica", "Arial", sans-serif',
-    h4: {
-      fontWeight: 700,
+    fontFamily: `'Inter', 'Roboto', 'Helvetica', 'Arial', sans-serif`,
+    fontSize: 14,
+    body1: {
+      fontSize: '0.95rem',
     },
-    button: {
-      textTransform: 'none',
+    body2: {
+      fontSize: '0.85rem',
+      color: textSecondary,
     },
   },
-  // Override default MUI spacing with custom spacing function
-  spacing: customSpacing,
-});
+  components: {
+    // 🧾 Buttons look more Discord-like (pill style)
+    MuiButton: {
+      styleOverrides: {
+        root: {
+          borderRadius: 8,
+          textTransform: 'none',
+          fontWeight: 500,
+        },
+      },
+    },
+    // 📨 Input fields
+    MuiTextField: {
+      styleOverrides: {
+        root: {
+          '& .MuiOutlinedInput-root': {
+            borderRadius: 8,
+            backgroundColor: surfaceDark,
+          },
+        },
+      },
+    },
+    // 📑 Paper (used for cards, menus, etc.)
+    MuiPaper: {
+      styleOverrides: {
+        root: {
+          backgroundColor: surfaceDark,
+          borderRadius: 8,
+        },
+      },
+    },
+    // 📋 Lists (sidebar style)
+    MuiListItemButton: {
+      styleOverrides: {
+        root: {
+          borderRadius: 6,
+          margin: '2px 4px',
+          '&.Mui-selected': {
+            backgroundColor: primary,
+            color: '#fff',
+            '&:hover': {
+              backgroundColor: primary,
+            },
+          },
+        },
+      },
+    },
+  },
+})
 
-export default web3Theme; // Export custom theme
+export default theme

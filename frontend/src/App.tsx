@@ -4,6 +4,10 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import { WalletClient, SecurityLevel } from '@bsv/sdk'
 
+// MUI
+import { ThemeProvider, CssBaseline } from '@mui/material'
+import theme from './theme'
+
 // Components
 import Home from './components/Home'
 
@@ -48,32 +52,35 @@ const App = () => {
   const keyID = '1'
 
   return (
-    <Router>
-      <Routes>
-        <Route
-          path="/"
-          element={
-            <Home
-              identityKey={identityKey}
-              walletClient={walletClient}
-              protocolID={protocolID}
-              keyID={keyID}
-            />
-          }
-        />
-        <Route
-          path="/thread/:threadId"
-          element={
-            <Home
-              identityKey={identityKey}
-              walletClient={walletClient}
-              protocolID={protocolID}
-              keyID={keyID}
-            />
-          }
-        />
-      </Routes>
-    </Router>
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      <Router>
+        <Routes>
+          <Route
+            path="/"
+            element={
+              <Home
+                identityKey={identityKey}
+                walletClient={walletClient}
+                protocolID={protocolID}
+                keyID={keyID}
+              />
+            }
+          />
+          <Route
+            path="/thread/:threadId"
+            element={
+              <Home
+                identityKey={identityKey}
+                walletClient={walletClient}
+                protocolID={protocolID}
+                keyID={keyID}
+              />
+            }
+          />
+        </Routes>
+      </Router>
+    </ThemeProvider>
   )
 }
 

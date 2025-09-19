@@ -7,7 +7,11 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  Button
+  Button,
+  Box,
+  Typography,
+  TextField,
+  Paper,
 } from '@mui/material'
 import type { DisplayableIdentity, WalletClient, WalletProtocol } from '@bsv/sdk'
 import type { MessagePayloadWithMetadata } from '../types/types'
@@ -39,12 +43,13 @@ interface ChatProps {
  */
 function normalizeSender(sender: string): string {
   try {
-    if (sender.startsWith("02") || sender.startsWith("03")) return sender
-    const ascii = sender
-      .match(/.{1,2}/g)
-      ?.map((b) => String.fromCharCode(parseInt(b, 16)))
-      .join("") ?? sender
-    if (ascii.startsWith("02") || ascii.startsWith("03")) return ascii
+    if (sender.startsWith('02') || sender.startsWith('03')) return sender
+    const ascii =
+      sender
+        .match(/.{1,2}/g)
+        ?.map((b) => String.fromCharCode(parseInt(b, 16)))
+        .join('') ?? sender
+    if (ascii.startsWith('02') || ascii.startsWith('03')) return ascii
     return sender
   } catch {
     return sender
@@ -65,7 +70,7 @@ export const Chat: React.FC<ChatProps> = ({
   senderPublicKey,
   threadId,
   recipientPublicKeys,
-  threadName
+  threadName,
 }) => {
   // 📨 State for conversation messages
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
@@ -132,11 +137,18 @@ export const Chat: React.FC<ChatProps> = ({
         senderPublicKey,
         recipients: currentRecipients,
         content,
-        threadName
+        threadName,
       })
       setMessages((prev) => [
         ...prev,
-        { content, sender: senderPublicKey, createdAt: Date.now(), txid: 'temp', vout: 0, threadId }
+        {
+          content,
+          sender: senderPublicKey,
+          createdAt: Date.now(),
+          txid: 'temp',
+          vout: 0,
+          threadId,
+        },
       ])
       setNewMessage('')
       scrollToBottom()
@@ -164,7 +176,7 @@ export const Chat: React.FC<ChatProps> = ({
         senderPublicKey,
         recipients: updated,
         content: `🔔 Invited new participant: ${pendingInvite.name || newKey.slice(0, 12)}...`,
-        threadName
+        threadName,
       })
 
       // Update state so future messages include this new participant
@@ -179,8 +191,8 @@ export const Chat: React.FC<ChatProps> = ({
           createdAt: Date.now(),
           txid: 'temp',
           vout: 0,
-          threadId
-        }
+          threadId,
+        },
       ])
       setPendingInvite(null)
       setInviteOpen(false)
@@ -205,95 +217,109 @@ export const Chat: React.FC<ChatProps> = ({
    * Render
    */
   return (
-    <div className="flex flex-col h-full p-4">
-      <div className="flex-1 overflow-y-auto space-y-2">
+    <Box display="flex" flexDirection="column" height="100%" p={2}>
+      <Box flex={1} overflow="auto" mb={2}>
         {/* Banner for group thread name */}
         {threadName && (
-          <div className="my-4 flex justify-center">
-            <span className="px-4 py-2 rounded-full bg-gradient-to-r from-purple-500 to-blue-500 text-white text-lg font-bold shadow">
+          <Box my={2} display="flex" justifyContent="center">
+            <Paper
+              elevation={3}
+              sx={{
+                px: 2,
+                py: 1,
+                borderRadius: '16px',
+                background: (theme) => theme.palette.primary.main,
+                color: 'white',
+                fontWeight: 'bold',
+              }}
+            >
               {threadName}
-            </span>
-          </div>
+            </Paper>
+          </Box>
         )}
 
         {/* Message list */}
         {loading ? (
-          <div className="text-center text-gray-400">Loading messages...</div>
+          <Typography align="center" color="text.secondary">
+            Loading messages...
+          </Typography>
         ) : messages.length === 0 ? (
-          <div className="text-center text-gray-400">No messages yet</div>
+          <Typography align="center" color="text.secondary">
+            No messages yet
+          </Typography>
         ) : (
           messages.map((msg) => {
             const normalized = normalizeSender(msg.sender as string)
-            const displaySender =
-              nameMap.get(normalized) || normalized.slice(0, 10) + "..."
+            const displaySender = nameMap.get(normalized) || normalized.slice(0, 10) + '...'
+            const isOwn = msg.sender === senderPublicKey
+
             return (
-              <div
+              <Box
                 key={`${msg.txid}-${msg.vout}`}
-                className={`p-2 rounded-lg max-w-[75%] ${
-                  msg.sender === senderPublicKey
-                    ? "bg-blue-500 text-white self-end ml-auto"
-                    : "bg-gray-200 text-black self-start mr-auto"
-                }`}
+                sx={{
+                  p: 1,
+                  mb: 1,
+                  borderRadius: 2,
+                  maxWidth: '75%',
+                  ml: isOwn ? 'auto' : 0,
+                  backgroundColor: 'black',
+                  color: 'white',
+                }}
               >
-                <div className="text-sm whitespace-pre-wrap">{msg.content}</div>
-                <div className="text-xs text-right opacity-60 mt-1">
+                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                  {msg.content}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, textAlign: 'right' }}>
                   {new Date(msg.createdAt).toLocaleTimeString()}
                   <br />
                   {displaySender}
-                </div>
-              </div>
+                </Typography>
+              </Box>
             )
           })
         )}
         <div ref={chatEndRef} />
-      </div>
+      </Box>
 
       {/* Input + actions */}
-      <div className="mt-4 flex gap-2">
-        <textarea
-          className="flex-1 p-2 border rounded resize-none min-h-[40px] max-h-[120px]"
+      <Box display="flex" gap={1}>
+        <TextField
+          multiline
+          minRows={1}
+          maxRows={4}
+          fullWidth
           placeholder="Type a message..."
           value={newMessage}
           onChange={(e) => setNewMessage(e.target.value)}
           onKeyDown={handleKeyPress}
         />
-        <button
-          className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
-          onClick={handleSend}
+        <Button
+          variant="contained"
+          color="primary"
           disabled={!newMessage.trim()}
+          onClick={handleSend}
         >
           Send
-        </button>
-        {/* Invite button opens search dialog */}
-        <button
-          className="px-4 py-2 bg-green-600 text-white rounded"
-          onClick={() => setInviteOpen(true)}
-        >
+        </Button>
+        <Button variant="contained" color="secondary" onClick={() => setInviteOpen(true)}>
           Invite
-        </button>
-      </div>
+        </Button>
+      </Box>
 
       {/* Invite participant dialog */}
       <Dialog open={inviteOpen} onClose={() => setInviteOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Invite New Participant</DialogTitle>
         <DialogContent>
-          <IdentitySearchField
-            appName="Convo"
-            onIdentitySelected={(id) => setPendingInvite(id)}
-          />
+          <IdentitySearchField appName="Convo" onIdentitySelected={(id) => setPendingInvite(id)} />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setInviteOpen(false)}>Cancel</Button>
-          <Button
-            onClick={handleConfirmInvite}
-            disabled={!pendingInvite}
-            variant="contained"
-          >
+          <Button onClick={handleConfirmInvite} disabled={!pendingInvite} variant="contained">
             Invite
           </Button>
         </DialogActions>
       </Dialog>
-    </div>
+    </Box>
   )
 }
 
