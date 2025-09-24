@@ -1,6 +1,8 @@
+// src/components/Chat.tsx
 import React, { useEffect, useRef, useState } from 'react'
 import { loadMessages } from '../utils/loadMessages'
 import { sendMessage } from '../utils/sendMessage'
+import { uploadEncryptedFile, downloadAndDecryptFile } from '../utils/fileEncryptor'
 import { IdentitySearchField } from '@bsv/identity-react'
 import {
   Dialog,
@@ -13,19 +15,10 @@ import {
   TextField,
   Paper,
 } from '@mui/material'
+import FileUpload from './FileUpload'
 import type { DisplayableIdentity, WalletClient, WalletProtocol } from '@bsv/sdk'
 import type { MessagePayloadWithMetadata } from '../types/types'
 
-/**
- * Props passed into the Chat component.
- * - client: WalletClient instance for signing/encrypting/broadcasting
- * - protocolID: namespace (ex: [2, 'convo'])
- * - keyID: wallet key index under identity (ex: "1")
- * - senderPublicKey: current user’s pubkey (used as "from")
- * - threadId: ID that uniquely identifies the conversation
- * - recipientPublicKeys: initial participants in the thread
- * - threadName: optional human-readable name (mainly for group chats)
- */
 interface ChatProps {
   client: WalletClient
   protocolID: WalletProtocol
@@ -36,11 +29,6 @@ interface ChatProps {
   threadName?: string
 }
 
-/**
- * normalizeSender
- * Utility function that attempts to standardize a "sender" field
- * into a proper compressed pubkey format (02... or 03...).
- */
 function normalizeSender(sender: string): string {
   try {
     if (sender.startsWith('02') || sender.startsWith('03')) return sender
@@ -56,13 +44,6 @@ function normalizeSender(sender: string): string {
   }
 }
 
-/**
- * Chat component
- * Handles:
- *  - Loading past messages
- *  - Sending new messages
- *  - Inviting new participants (via identity-react search)
- */
 export const Chat: React.FC<ChatProps> = ({
   client,
   protocolID,
@@ -72,30 +53,21 @@ export const Chat: React.FC<ChatProps> = ({
   recipientPublicKeys,
   threadName,
 }) => {
-  // 📨 State for conversation messages
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
-  // ✍️ State for new message being composed
   const [newMessage, setNewMessage] = useState('')
-  // ⏳ Show spinner until messages are loaded
   const [loading, setLoading] = useState(true)
-  // 🧾 Map of pubkey → resolved display name
   const [nameMap, setNameMap] = useState<Map<string, string>>(new Map())
-  // 🔑 Current list of recipients (starts with props but grows after invites)
   const [currentRecipients, setCurrentRecipients] = useState<string[]>(recipientPublicKeys)
 
-  // 🆕 Invite dialog state
   const [inviteOpen, setInviteOpen] = useState(false)
   const [pendingInvite, setPendingInvite] = useState<DisplayableIdentity | null>(null)
 
-  // 📜 Scroll anchor for always jumping to bottom of chat
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
 
-  /**
-   * Effect: Load messages when thread changes.
-   * Uses loadMessages() to query overlay and decrypt.
-   */
   useEffect(() => {
+    let interval: NodeJS.Timeout
+
     const fetchMessages = async () => {
       try {
         const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
@@ -104,11 +76,20 @@ export const Chat: React.FC<ChatProps> = ({
         }
         const { messages: loadedMessages, nameMap: resolvedNames } = result
 
-        // Replace state only if messages changed
+        // Update messages
         setMessages((prev) =>
           JSON.stringify(prev) !== JSON.stringify(loadedMessages) ? loadedMessages : prev
         )
         setNameMap(resolvedNames)
+
+        // 🔑 Update currentRecipients from the last message
+        if (loadedMessages.length > 0) {
+          const latest = loadedMessages[loadedMessages.length - 1]
+          if (latest.recipients && latest.recipients.length > 0) {
+            setCurrentRecipients(latest.recipients)
+            console.log('[Chat] Restored recipients from last message:', latest.recipients)
+          }
+        }
       } catch (err) {
         console.error('[Chat] Failed to load messages:', err)
       } finally {
@@ -118,13 +99,12 @@ export const Chat: React.FC<ChatProps> = ({
     }
     setLoading(true)
     fetchMessages()
+
+    interval = setInterval(fetchMessages, 5000) // poll every 5s
+
+    return () => clearInterval(interval)
   }, [threadId, client, protocolID, keyID])
 
-  /**
-   * Send a normal text message.
-   * - Calls sendMessage to encrypt + broadcast
-   * - Optimistically adds message to UI
-   */
   const handleSend = async () => {
     if (!newMessage.trim()) return
     const content = newMessage.trim()
@@ -141,14 +121,7 @@ export const Chat: React.FC<ChatProps> = ({
       })
       setMessages((prev) => [
         ...prev,
-        {
-          content,
-          sender: senderPublicKey,
-          createdAt: Date.now(),
-          txid: 'temp',
-          vout: 0,
-          threadId,
-        },
+        { content, sender: senderPublicKey, createdAt: Date.now(), txid: 'temp', vout: 0, threadId },
       ])
       setNewMessage('')
       scrollToBottom()
@@ -157,17 +130,12 @@ export const Chat: React.FC<ChatProps> = ({
     }
   }
 
-  /**
-   * Confirm an invite once identity is selected from IdentitySearchField.
-   * - Appends new recipient key to local state
-   * - Sends a system-style "invited" message
-   */
   const handleConfirmInvite = async () => {
     if (!pendingInvite) return
     const newKey = pendingInvite.identityKey
-    const updated = [...new Set([...currentRecipients, newKey])] // dedupe
-
+    const updated = [...new Set([...currentRecipients, newKey])]
     try {
+      const content = `🔔 Invited new participant: ${pendingInvite.name || newKey.slice(0, 12)}...`
       await sendMessage({
         client,
         protocolID,
@@ -175,24 +143,13 @@ export const Chat: React.FC<ChatProps> = ({
         threadId,
         senderPublicKey,
         recipients: updated,
-        content: `🔔 Invited new participant: ${pendingInvite.name || newKey.slice(0, 12)}...`,
+        content,
         threadName,
       })
-
-      // Update state so future messages include this new participant
       setCurrentRecipients(updated)
-
-      // Optimistically show invite message
       setMessages((prev) => [
         ...prev,
-        {
-          content: `🔔 Invited new participant: ${pendingInvite.name || newKey.slice(0, 12)}...`,
-          sender: senderPublicKey,
-          createdAt: Date.now(),
-          txid: 'temp',
-          vout: 0,
-          threadId,
-        },
+        { content, sender: senderPublicKey, createdAt: Date.now(), txid: 'temp', vout: 0, threadId },
       ])
       setPendingInvite(null)
       setInviteOpen(false)
@@ -202,10 +159,6 @@ export const Chat: React.FC<ChatProps> = ({
     }
   }
 
-  /**
-   * Intercept Enter key → send message
-   * Shift+Enter still allows newline
-   */
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -213,13 +166,87 @@ export const Chat: React.FC<ChatProps> = ({
     }
   }
 
-  /**
-   * Render
-   */
+  /** Handle file upload */
+  const handleFileSelected = async (file: File) => {
+    console.log('[Chat] Current recipients:', currentRecipients)
+    try {
+      const { handle, header, filename, mimetype } = await uploadEncryptedFile(
+        client,
+        protocolID,
+        keyID,
+        currentRecipients,
+        file
+      )
+
+      const fileMessage = JSON.stringify({
+        type: 'file',
+        handle,
+        header,
+        filename,
+        mimetype,
+      })
+
+      await sendMessage({
+        client,
+        protocolID,
+        keyID,
+        threadId,
+        senderPublicKey,
+        recipients: currentRecipients,
+        content: fileMessage,
+        threadName,
+      })
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          content: fileMessage,
+          sender: senderPublicKey,
+          createdAt: Date.now(),
+          txid: 'temp',
+          vout: 0,
+          threadId,
+        },
+      ])
+      scrollToBottom()
+    } catch (err) {
+      console.error('[Chat] Failed to upload file:', err)
+    }
+  }
+
+  /** Handle file download */
+  const handleFileDownload = async (
+    handle: string,
+    header: number[],
+    filename: string,
+    mimetype: string
+  ) => {
+    try {
+      const blob = await downloadAndDecryptFile(
+        client,
+        protocolID,
+        keyID,
+        handle,   // pass raw handle
+        header,
+        mimetype
+      )
+
+      // Trigger browser download
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      window.URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('[Chat] Failed to download file:', err)
+    }
+  }
+
+
   return (
     <Box display="flex" flexDirection="column" height="100%" p={2}>
       <Box flex={1} overflow="auto" mb={2}>
-        {/* Banner for group thread name */}
         {threadName && (
           <Box my={2} display="flex" justifyContent="center">
             <Paper
@@ -238,7 +265,6 @@ export const Chat: React.FC<ChatProps> = ({
           </Box>
         )}
 
-        {/* Message list */}
         {loading ? (
           <Typography align="center" color="text.secondary">
             Loading messages...
@@ -253,6 +279,13 @@ export const Chat: React.FC<ChatProps> = ({
             const displaySender = nameMap.get(normalized) || normalized.slice(0, 10) + '...'
             const isOwn = msg.sender === senderPublicKey
 
+            let parsed: any
+            try {
+              parsed = JSON.parse(msg.content)
+            } catch {
+              parsed = null
+            }
+
             return (
               <Box
                 key={`${msg.txid}-${msg.vout}`}
@@ -266,10 +299,30 @@ export const Chat: React.FC<ChatProps> = ({
                   color: 'white',
                 }}
               >
-                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                  {msg.content}
-                </Typography>
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, textAlign: 'right' }}>
+                {parsed && parsed.type === 'file' ? (
+                  <>
+                    <Typography variant="body2">📎 {parsed.filename}</Typography>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      sx={{ mt: 1 }}
+                      onClick={() =>
+                        handleFileDownload(parsed.handle, parsed.header, parsed.filename, parsed.mimetype)
+                      }
+                    >
+                      Download
+                    </Button>
+                  </>
+                ) : (
+                  <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                    {msg.content}
+                  </Typography>
+                )}
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: 'block', mt: 0.5, textAlign: 'right' }}
+                >
                   {new Date(msg.createdAt).toLocaleTimeString()}
                   <br />
                   {displaySender}
@@ -293,20 +346,15 @@ export const Chat: React.FC<ChatProps> = ({
           onChange={(e) => setNewMessage(e.target.value)}
           onKeyDown={handleKeyPress}
         />
-        <Button
-          variant="contained"
-          color="primary"
-          disabled={!newMessage.trim()}
-          onClick={handleSend}
-        >
+        <Button variant="contained" color="primary" disabled={!newMessage.trim()} onClick={handleSend}>
           Send
         </Button>
         <Button variant="contained" color="secondary" onClick={() => setInviteOpen(true)}>
           Invite
         </Button>
+        <FileUpload onFileSelected={handleFileSelected} />
       </Box>
 
-      {/* Invite participant dialog */}
       <Dialog open={inviteOpen} onClose={() => setInviteOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Invite New Participant</DialogTitle>
         <DialogContent>

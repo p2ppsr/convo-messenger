@@ -72,7 +72,8 @@ export async function checkMessages({
           sender: msg.sender,
           content: decrypted.content,
           mediaURL: decrypted.mediaURL,
-          createdAt: msg.createdAt
+          createdAt: msg.createdAt,
+          recipients: decrypted.recipients || []
         })
 
         console.log(`[Convo] Message from ${msg.sender} added to thread ${msg.threadId}`)
