@@ -1,9 +1,12 @@
 // src/utils/decryptMessage.ts
 
 import { WalletInterface, WalletProtocol, Utils } from '@bsv/sdk'
-import { CurvePoint } from 'curvepoint'
+import { getCurvePoint } from './curvePointSingleton'
 import type { MessagePayload } from '../types/types'
 import type { DecodedMessage } from './decodeOutputs'
+
+import * as cp from './curvePointSingleton'
+console.log('curvePointSingleton exports:', cp)
 
 /**
  * decryptMessage
@@ -40,7 +43,7 @@ export async function decryptMessage(
 
     // --- Step 1: Initialize CurvePoint with wallet ---
     // CurvePoint manages key wrapping/unwrapping logic for recipients
-    const curvePoint = new CurvePoint(wallet)
+    const curvePoint = getCurvePoint(wallet)
 
     // Combine header + encrypted payload into one ciphertext blob
     const ciphertext = [...header, ...encryptedPayload]

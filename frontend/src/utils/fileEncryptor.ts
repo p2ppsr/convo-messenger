@@ -5,7 +5,7 @@ import {
   StorageUploader,
   StorageDownloader
 } from '@bsv/sdk'
-import { CurvePoint } from 'curvepoint'
+import { getCurvePoint } from './curvePointSingleton'
 
 const STORAGE_URL = 'https://uhrp-lite.babbage.systems'
 const GATEWAY_URL = 'https://uhrp.babbage.systems' // only used to build a friendly downloadURL
@@ -27,7 +27,7 @@ export async function uploadEncryptedFile(
   filename: string
   mimetype: string
 }> {
-  const curvePoint = new CurvePoint(wallet)
+  const curvePoint = getCurvePoint(wallet)
 
   try {
     // 1. Read file bytes
@@ -97,7 +97,7 @@ export async function downloadAndDecryptFile(
   header: number[],
   mimetype = 'application/octet-stream'
 ): Promise<Blob> {
-  const curvePoint = new CurvePoint(wallet)
+  const curvePoint = getCurvePoint(wallet)
   const downloader = new StorageDownloader({ networkPreset: 'mainnet' })
 
   console.log('[Download] Resolving + downloading from UHRP:', uhrpUrl)

@@ -103,6 +103,7 @@ export const Chat: React.FC<ChatProps> = ({
     interval = setInterval(fetchMessages, 5000) // poll every 5s
 
     return () => clearInterval(interval)
+
   }, [threadId, client, protocolID, keyID])
 
   const handleSend = async () => {

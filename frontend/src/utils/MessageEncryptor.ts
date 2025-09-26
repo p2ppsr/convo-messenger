@@ -1,5 +1,5 @@
 import { WalletInterface, WalletProtocol, Utils } from '@bsv/sdk'
-import { CurvePoint } from 'curvepoint'
+import { getCurvePoint } from './curvePointSingleton'
 import { MessagePayload } from '../types/types'
 
 /**
@@ -55,7 +55,7 @@ export async function encryptMessage(
 
   // --- Step 2: Initialize CurvePoint with wallet ---
   // This ties encryption to the wallet’s key derivation logic.
-  const curvePoint = new CurvePoint(wallet)
+  const curvePoint = getCurvePoint(wallet)
 
   // --- Step 3: Perform encryption ---
   // CurvePoint builds a header with:

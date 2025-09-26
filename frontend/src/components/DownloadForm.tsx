@@ -33,7 +33,7 @@ import { CloudDownload } from '@mui/icons-material'
 
 import constants from '../utils/constants'
 import { WalletClient, SymmetricKey, Utils } from '@bsv/sdk'
-import { CurvePoint } from 'curvepoint'
+import { getCurvePoint } from '../utils/curvePointSingleton'
 
 type DownloadFormProps = {}
 
@@ -131,7 +131,7 @@ const DownloadForm: React.FC<DownloadFormProps> = () => {
   const tryCurvePointDecrypt = async (bytes: Uint8Array): Promise<Uint8Array | null> => {
     try {
       const wallet = new WalletClient('auto', constants.walletHost)
-      const curve = new CurvePoint(wallet)
+      const curve = getCurvePoint(wallet)
       const dec = await curve.decrypt(Array.from(bytes), [1, 'ConvoAttachment'], '1')
       return new Uint8Array(dec)
     } catch {

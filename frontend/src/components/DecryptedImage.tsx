@@ -18,7 +18,7 @@
 
 import React, { useEffect, useState } from 'react'
 import { SymmetricKey, WalletClient } from '@bsv/sdk'
-import { CurvePoint } from 'curvepoint'
+import { getCurvePoint } from '../utils/curvePointSingleton'
 import constants from '../utils/constants'
 
 type DecryptedImageProps = {
@@ -108,7 +108,7 @@ const DecryptedImage: React.FC<DecryptedImageProps> = ({
         if (!plain) {
           try {
             const wallet = new WalletClient('auto', constants.walletHost)
-            const curve = new CurvePoint(wallet)
+            const curve = getCurvePoint(wallet)
             const dec = await curve.decrypt(
               Array.from(enc),
               [1, 'ConvoAttachment'], // protocol namespace for attachments
