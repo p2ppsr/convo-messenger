@@ -1,12 +1,16 @@
 import { useState } from 'react'
-import { Box, Typography } from '@mui/material'
+import { Box, Typography, IconButton } from '@mui/material'
 import { useNavigate, useParams, useLocation } from 'react-router-dom'
+import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 
 // Components
 import Sidebar from './Sidebar'
 import ComposeThread from './ComposeThread'
 import ComposeDirectMessage from './ComposeDirectMessage'
 import Chat from './Chat'
+
+// Utils
+import { useIsMobile } from '../utils/useIsMobile'
 
 // Types
 import type { WalletClient, WalletProtocol } from '@bsv/sdk'
@@ -31,6 +35,8 @@ const Home: React.FC<HomeProps> = ({
   const [showComposeThread, setShowComposeThread] = useState(false)
   const [showComposeDM, setShowComposeDM] = useState(false)
 
+  const isMobile = useIsMobile()
+
   const handleThreadSelect = (
     threadId: string,
     recipientPublicKeys: string[],
@@ -41,46 +47,129 @@ const Home: React.FC<HomeProps> = ({
     })
   }
 
-  return (
-    <Box sx={{ display: 'flex', height: '100vh' }}>
-      {/* Sidebar (threads + DMs stacked) */}
-      <Sidebar
-        onSelectThread={handleThreadSelect}
-        onNewThread={() => setShowComposeThread(true)}
-        onNewDM={() => setShowComposeDM(true)}
-        identityKey={identityKey}
-        client={walletClient}
-        protocolID={protocolID}
-        keyID={keyID}
-      />
+  const handleBack = () => {
+    navigate('/') // Go back to the list on mobile
+  }
 
-      {/* Chat view */}
-      <Box
-        sx={{
-          flex: 1,
-          backgroundColor: '#121212',
-          color: 'white',
-          display: 'flex',
-          flexDirection: 'column',
-          p: 2,
-        }}
-      >
-        {threadId ? (
-          <Chat
+  return (
+    <Box sx={{ display: 'flex', height: '100vh', bgcolor: '#121212' }}>
+      {/* Desktop: Sidebar + Chat split */}
+      {!isMobile && (
+        <>
+          <Sidebar
+            onSelectThread={handleThreadSelect}
+            onNewThread={() => setShowComposeThread(true)}
+            onNewDM={() => setShowComposeDM(true)}
+            identityKey={identityKey}
             client={walletClient}
-            senderPublicKey={identityKey}
             protocolID={protocolID}
             keyID={keyID}
-            threadId={threadId}
-            recipientPublicKeys={location.state?.recipientPublicKeys || []}
-            threadName={location.state?.threadName}
           />
-        ) : (
-          <Typography variant="h5" sx={{ color: '#888' }}>
-            Select a thread to view messages.
-          </Typography>
-        )}
-      </Box>
+
+          <Box
+            sx={{
+              flex: 1,
+              backgroundColor: '#121212',
+              color: 'white',
+              display: 'flex',
+              flexDirection: 'column',
+              p: 2,
+            }}
+          >
+            {threadId ? (
+              <Chat
+                client={walletClient}
+                senderPublicKey={identityKey}
+                protocolID={protocolID}
+                keyID={keyID}
+                threadId={threadId}
+                recipientPublicKeys={location.state?.recipientPublicKeys || []}
+                threadName={location.state?.threadName}
+              />
+            ) : (
+              <Typography variant="h5" sx={{ color: '#888' }}>
+                Select a thread to view messages.
+              </Typography>
+            )}
+          </Box>
+        </>
+      )}
+
+      {/* Mobile: show either Sidebar OR Chat */}
+      {isMobile && (
+        <>
+          {!threadId && (
+            <Sidebar
+              onSelectThread={handleThreadSelect}
+              onNewThread={() => setShowComposeThread(true)}
+              onNewDM={() => setShowComposeDM(true)}
+              identityKey={identityKey}
+              client={walletClient}
+              protocolID={protocolID}
+              keyID={keyID}
+            />
+          )}
+
+          {threadId && (
+            <Box
+              sx={{
+                flex: 1,
+                backgroundColor: '#121212',
+                color: 'white',
+                display: 'flex',
+                flexDirection: 'column',
+              }}
+            >
+              {/* Sticky header on mobile */}
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  p: 1.5,
+                  borderBottom: '1px solid #333',
+                  position: 'sticky',
+                  top: 0,
+                  zIndex: 10,
+                  backgroundColor: '#121212',
+                }}
+              >
+                <IconButton
+                  onClick={handleBack}
+                  sx={{ color: 'white', mr: 1 }}
+                  size="small"
+                >
+                  <ArrowBackIcon fontSize="small" />
+                </IconButton>
+                <Typography
+                  variant="subtitle1"
+                  sx={{
+                    color: 'white',
+                    fontWeight: 600,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {location.state?.threadName || 'Chat'}
+                </Typography>
+              </Box>
+
+              {/* Chat body scrolls under sticky header */}
+              <Box sx={{ flex: 1, overflowY: 'auto' }}>
+                <Chat
+                  client={walletClient}
+                  senderPublicKey={identityKey}
+                  protocolID={protocolID}
+                  keyID={keyID}
+                  threadId={threadId}
+                  recipientPublicKeys={location.state?.recipientPublicKeys || []}
+                  threadName={location.state?.threadName}
+                />
+              </Box>
+            </Box>
+          )}
+        </>
+      )}
 
       {/* Modals for composing new threads/DMs */}
       {showComposeThread && (
