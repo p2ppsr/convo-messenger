@@ -9,6 +9,7 @@ import { getCurvePoint } from './curvePointSingleton'
 
 const STORAGE_URL = 'https://uhrp-lite.babbage.systems'
 const GATEWAY_URL = 'https://uhrp.babbage.systems' // only used to build a friendly downloadURL
+const retentionPeriodMinutes = 60 * 24 * 7 // 7 days
 
 /**
  * Encrypts and uploads a file to UHRP.
@@ -19,7 +20,7 @@ export async function uploadEncryptedFile(
   keyID: string,
   recipients: string[],
   file: File,
-  retentionPeriod = 5
+  retentionPeriod = retentionPeriodMinutes
 ): Promise<{
   handle: string        // raw UHRP handle
   downloadURL: string   // friendly gateway URL (optional, not required for downloads)
