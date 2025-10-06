@@ -25,7 +25,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   return (
     <Box
       sx={{
-        width: 300,
+        width: { xs: '100%', md: 300 },
         height: '100%',
         display: 'flex',
         flexDirection: 'column',

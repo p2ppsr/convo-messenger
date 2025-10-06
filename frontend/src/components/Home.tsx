@@ -99,21 +99,34 @@ const Home: React.FC<HomeProps> = ({
       {isMobile && (
         <>
           {!threadId && (
-            <Sidebar
-              onSelectThread={handleThreadSelect}
-              onNewThread={() => setShowComposeThread(true)}
-              onNewDM={() => setShowComposeDM(true)}
-              identityKey={identityKey}
-              client={walletClient}
-              protocolID={protocolID}
-              keyID={keyID}
-            />
+            <Box
+              sx={{
+                flex: 1,
+                width: '100%',     // Full width on mobile
+                height: '100%',    // Full height viewport
+                display: 'flex',
+                flexDirection: 'column',
+                bgcolor: '#121212'
+              }}
+            >
+              <Sidebar
+                onSelectThread={handleThreadSelect}
+                onNewThread={() => setShowComposeThread(true)}
+                onNewDM={() => setShowComposeDM(true)}
+                identityKey={identityKey}
+                client={walletClient}
+                protocolID={protocolID}
+                keyID={keyID}
+              />
+            </Box>
           )}
 
           {threadId && (
             <Box
               sx={{
                 flex: 1,
+                width: '100%',     // Full width on mobile
+                height: '100%',    // Full height viewport
                 backgroundColor: '#121212',
                 color: 'white',
                 display: 'flex',

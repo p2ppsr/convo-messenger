@@ -1,6 +1,6 @@
 {
-  "short_name": "Mattchat",
-  "name": "Mattchat",
+  "short_name": "Convo",
+  "name": "Convo Messenger",
   "icons": [
     {
       "src": "favicon.ico",
@@ -24,7 +24,7 @@
   "background_color": "#ffffff",
   "babbage": {
     "spendingAuthorization": {
-      "description": "Allow Mattchat to create tokens that store settings, chats, and shared media",
+      "description": "Allow Convo Messenger to create tokens that store settings, chats, and shared media",
       "duration": "3888000",
       "amount": "600000"
     }

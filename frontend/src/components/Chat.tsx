@@ -14,6 +14,7 @@ import {
   Typography,
   TextField,
   Paper,
+  CircularProgress
 } from '@mui/material'
 import FileUpload from './FileUpload'
 import type { DisplayableIdentity, WalletClient, WalletProtocol } from '@bsv/sdk'
@@ -62,9 +63,15 @@ export const Chat: React.FC<ChatProps> = ({
   const [inviteOpen, setInviteOpen] = useState(false)
   const [pendingInvite, setPendingInvite] = useState<DisplayableIdentity | null>(null)
 
+  // Upload/download & preview state
+  const [uploading, setUploading] = useState(false)
+  const [downloadingFile, setDownloadingFile] = useState<string | null>(null)
+  const [imagePreviews, setImagePreviews] = useState<Record<string, string>>({})
+
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
 
+  // Load messages periodically
   useEffect(() => {
     let interval: NodeJS.Timeout
 
@@ -76,18 +83,16 @@ export const Chat: React.FC<ChatProps> = ({
         }
         const { messages: loadedMessages, nameMap: resolvedNames } = result
 
-        // Update messages
         setMessages((prev) =>
           JSON.stringify(prev) !== JSON.stringify(loadedMessages) ? loadedMessages : prev
         )
         setNameMap(resolvedNames)
 
-        // 🔑 Update currentRecipients from the last message
+        // Restore recipients from last message
         if (loadedMessages.length > 0) {
           const latest = loadedMessages[loadedMessages.length - 1]
           if (latest.recipients && latest.recipients.length > 0) {
             setCurrentRecipients(latest.recipients)
-            console.log('[Chat] Restored recipients from last message:', latest.recipients)
           }
         }
       } catch (err) {
@@ -97,14 +102,45 @@ export const Chat: React.FC<ChatProps> = ({
         scrollToBottom()
       }
     }
+
     setLoading(true)
     fetchMessages()
-
-    interval = setInterval(fetchMessages, 5000) // poll every 5s
-
+    interval = setInterval(fetchMessages, 5000)
     return () => clearInterval(interval)
-
   }, [threadId, client, protocolID, keyID])
+
+  // Auto-decrypt image previews once messages are loaded
+  useEffect(() => {
+    const loadImagePreviews = async () => {
+      for (const msg of messages) {
+        let parsed: any
+        try {
+          parsed = JSON.parse(msg.content)
+        } catch {
+          continue
+        }
+
+        if (parsed?.type === 'file' && parsed.mimetype?.startsWith('image/') && !imagePreviews[parsed.handle]) {
+          try {
+            const blob = await downloadAndDecryptFile(
+              client,
+              protocolID,
+              keyID,
+              parsed.handle,
+              parsed.header,
+              parsed.mimetype
+            )
+            const url = URL.createObjectURL(blob)
+            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: url }))
+          } catch (err) {
+            console.warn('[Chat] Failed to auto-load image preview:', err)
+          }
+        }
+      }
+    }
+
+    if (messages.length > 0) loadImagePreviews()
+  }, [messages])
 
   const handleSend = async () => {
     if (!newMessage.trim()) return
@@ -169,7 +205,7 @@ export const Chat: React.FC<ChatProps> = ({
 
   /** Handle file upload */
   const handleFileSelected = async (file: File) => {
-    console.log('[Chat] Current recipients:', currentRecipients)
+    setUploading(true)
     try {
       const { handle, header, filename, mimetype } = await uploadEncryptedFile(
         client,
@@ -212,27 +248,21 @@ export const Chat: React.FC<ChatProps> = ({
       scrollToBottom()
     } catch (err) {
       console.error('[Chat] Failed to upload file:', err)
+    } finally {
+      setUploading(false)
     }
   }
 
-  /** Handle file download */
+  /** Handle file download (manual save) */
   const handleFileDownload = async (
     handle: string,
     header: number[],
     filename: string,
     mimetype: string
   ) => {
+    setDownloadingFile(handle)
     try {
-      const blob = await downloadAndDecryptFile(
-        client,
-        protocolID,
-        keyID,
-        handle,   // pass raw handle
-        header,
-        mimetype
-      )
-
-      // Trigger browser download
+      const blob = await downloadAndDecryptFile(client, protocolID, keyID, handle, header, mimetype)
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -241,9 +271,10 @@ export const Chat: React.FC<ChatProps> = ({
       window.URL.revokeObjectURL(url)
     } catch (err) {
       console.error('[Chat] Failed to download file:', err)
+    } finally {
+      setDownloadingFile(null)
     }
   }
-
 
   return (
     <Box display="flex" flexDirection="column" height="100%" p={2}>
@@ -294,8 +325,14 @@ export const Chat: React.FC<ChatProps> = ({
                   p: 1,
                   mb: 1,
                   borderRadius: 2,
-                  maxWidth: '75%',
-                  ml: isOwn ? 'auto' : 0,
+                  width: {
+                    xs: '100%',  // full width on mobile
+                    sm: '75%',   // 75% on tablet/desktop
+                  },
+                  ml: {
+                    xs: 0,                // no margin on mobile
+                    sm: isOwn ? 'auto' : 0, // right-align own messages on desktop
+                  },
                   backgroundColor: 'black',
                   color: 'white',
                 }}
@@ -303,15 +340,43 @@ export const Chat: React.FC<ChatProps> = ({
                 {parsed && parsed.type === 'file' ? (
                   <>
                     <Typography variant="body2">📎 {parsed.filename}</Typography>
+
+                    {parsed.mimetype?.startsWith('image/') && (
+                      <>
+                        {!imagePreviews[parsed.handle] ? (
+                          <Box display="flex" alignItems="center" gap={1} mt={1}>
+                            <CircularProgress size={18} color="inherit" />
+                            <Typography variant="body2" color="text.secondary">
+                              Loading preview…
+                            </Typography>
+                          </Box>
+                        ) : (
+                          <img
+                            src={imagePreviews[parsed.handle]}
+                            alt={parsed.filename}
+                            style={{
+                              maxWidth: '240px',
+                              maxHeight: '240px',
+                              borderRadius: '8px',
+                              marginTop: '8px',
+                              objectFit: 'cover',
+                              display: 'block',
+                            }}
+                          />
+                        )}
+                      </>
+                    )}
+
                     <Button
                       size="small"
-                      variant="contained"
+                      variant="outlined"
                       sx={{ mt: 1 }}
                       onClick={() =>
                         handleFileDownload(parsed.handle, parsed.header, parsed.filename, parsed.mimetype)
                       }
+                      disabled={downloadingFile === parsed.handle}
                     >
-                      Download
+                      {downloadingFile === parsed.handle ? 'Downloading…' : 'Download'}
                     </Button>
                   </>
                 ) : (
@@ -319,6 +384,7 @@ export const Chat: React.FC<ChatProps> = ({
                     {msg.content}
                   </Typography>
                 )}
+
                 <Typography
                   variant="caption"
                   color="text.secondary"
@@ -332,6 +398,16 @@ export const Chat: React.FC<ChatProps> = ({
             )
           })
         )}
+
+        {/* Uploading indicator */}
+        {uploading && (
+          <Box textAlign="center" py={1}>
+            <Typography variant="body2" color="text.secondary">
+              Uploading file…
+            </Typography>
+          </Box>
+        )}
+
         <div ref={chatEndRef} />
       </Box>
 
