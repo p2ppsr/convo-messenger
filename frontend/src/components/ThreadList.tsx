@@ -105,7 +105,7 @@ const ThreadList = ({
       }))
 
       // Decode envelope(s) then decrypt with wallet
-      const decoded = await decodeOutputs(toDecode)
+      const decoded = await decodeOutputs(toDecode, wallet, protocolID, keyID)
       const decrypted = await decryptMessageBatch(wallet, decoded, protocolID, keyID)
 
       // Group by threadId

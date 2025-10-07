@@ -18,10 +18,10 @@ export interface DecryptedMessage {
  * This is what you pass into CurvePoint.encrypt before broadcast.
  */
 export interface MessagePayload {
-  type?: 'message' | 'thread-init' | 'custom' // message type
+  type?: 'message' | 'thread-init' | 'custom' | 'thread-name' // message type
   content: string                             // plaintext content
   mediaURL?: string                           // optional attachment
-  contentType?: 'text' | 'image' | 'video' | 'file' | 'custom' // MIME category
+  contentType?: 'text' | 'image' | 'video' | 'file' | 'custom' | 'thread-name' // MIME category
   recipients?: string[]                       // public keys of participants
   name?: string                               // optional: group thread name
 }

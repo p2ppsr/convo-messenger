@@ -98,6 +98,31 @@ export async function sendMessage({
     throw new Error('Failed to encrypt message.')
   }
 
+  // Optional: Encrypt thread name if provided
+let threadNameHeader: number[] | undefined
+let threadNameCiphertext: number[] | undefined
+
+if (threadName) {
+  console.log('[Convo] Encrypting thread name...')
+  try {
+    ;({ header: threadNameHeader, encryptedPayload: threadNameCiphertext } =
+      await encryptMessage(
+        client,
+        { type: 'thread-name', content: threadName },
+        uniqueRecipients,
+        protocolID,
+        keyID
+      ))
+
+    console.log('[Convo] Thread name encrypted successfully.')
+    console.log('[Convo] threadNameHeader length:', threadNameHeader.length)
+    console.log('[Convo] threadNameCiphertext length:', threadNameCiphertext.length)
+  } catch (err) {
+    console.error('[Convo] Failed to encrypt thread name:', err)
+    throw new Error('Failed to encrypt thread name.')
+  }
+}
+
   // Timestamp and random unique ID for this message
   const timestamp = Date.now()
   const uniqueID = Utils.toHex(Hash.sha256(Utils.toArray(Math.random().toString(), 'utf8')))
@@ -118,9 +143,10 @@ export async function sendMessage({
   ]
 
   // Optional thread name for group threads
-  if (threadName) {
-    fields.push(Utils.toArray(threadName, 'utf8'))      // 8: thread name
-    console.log(`[Convo] Included threadName: "${threadName}"`)
+  if (threadName && threadNameHeader && threadNameCiphertext) {
+    fields.push(threadNameHeader)        // 8: encrypted threadName header
+    fields.push(threadNameCiphertext)    // 9: encrypted threadName ciphertext
+    console.log(`[Convo] Encrypted threadName included (${threadNameCiphertext.length} bytes)`)
   }
 
   // Debug log: show breakdown of fields for sanity checking

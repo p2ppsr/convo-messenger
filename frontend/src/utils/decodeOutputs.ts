@@ -1,6 +1,7 @@
 // src/utils/decodeOutputs.ts
 
-import { Transaction, PushDrop, Utils } from '@bsv/sdk'
+import { Transaction, PushDrop, Utils, WalletInterface, WalletProtocol } from '@bsv/sdk'
+import { decryptMessage } from './MessageDecryptor'
 
 /**
  * DecodedMessage
@@ -41,7 +42,10 @@ export interface DecodedMessage {
 export async function decodeOutput(
   beef: number[],
   outputIndex: number,
-  timestamp: number
+  timestamp: number,
+  wallet?: WalletInterface,
+  protocolID?: WalletProtocol,
+  keyID?: string
 ): Promise<DecodedMessage> {
   const decodedTx = Transaction.fromBEEF(beef)
   const output = decodedTx.outputs[outputIndex]
@@ -78,14 +82,38 @@ export async function decodeOutput(
 
   // Field 8 (optional): thread name (UTF8 string)
   let threadName: string | undefined
-  if (fields.length > 9) {
+  if (fields.length > 10) {
+    const nameHeader = fields[8] as unknown as Uint8Array
+    const nameCiphertext = fields[9] as unknown as Uint8Array
+    console.log('[decodeOutput] Found encrypted thread name:')
+
+    if (wallet && protocolID && keyID) {
+      const decryptedName = await decryptMessage(
+        wallet,
+        Array.from(nameHeader),
+        Array.from(nameCiphertext),
+        protocolID,
+        keyID
+      )
+
+      // decryptedName is a MessagePayload object
+      if (decryptedName?.content) {
+        threadName = decryptedName.content.trim()
+        console.log('[decodeOutput] Found thread name:', threadName)
+      }
+    } else {
+      console.log('[decodeOutput] Encrypted thread name detected but no wallet/protocol provided')
+    }
+  } else if (fields.length === 10) {
+    // Legacy plaintext thread name for older messages
     try {
       threadName = Utils.toUTF8(fields[8])
-      console.log('[decodeOutput] Found thread name:', threadName)
+      console.log('[decodeOutput] Legacy plaintext thread name:', threadName)
     } catch (err) {
-      console.warn('[decodeOutput] Failed to decode thread name:', err)
+      console.warn('[decodeOutput] Failed to decode legacy plaintext thread name:', err)
     }
   }
+ 
 
   console.log('[decodeOutput] Thread ID:', threadId)
   console.log('[decodeOutput] Sender:', sender)
@@ -113,14 +141,18 @@ export async function decodeOutput(
  * - Skips and logs any failures instead of crashing the whole batch.
  */
 export async function decodeOutputs(
-  outputs: Array<{ beef: number[]; outputIndex: number; timestamp: number }>
+  outputs: Array<{ beef: number[]; outputIndex: number; timestamp: number }>,
+  wallet?: WalletInterface,
+  protocolID?: WalletProtocol,
+  keyID?: string
 ): Promise<DecodedMessage[]> {
   return Promise.all(
     outputs.map(({ beef, outputIndex, timestamp }) =>
-      decodeOutput(beef, outputIndex, timestamp).catch((err) => {
+      decodeOutput(beef, outputIndex, timestamp, wallet, protocolID, keyID).catch((err) => {
         console.warn(`[decodeOutputs] Skipping invalid output at vout ${outputIndex}:`, err)
         return null
       })
     )
   ).then((results) => results.filter((m): m is DecodedMessage => m !== null))
 }
+
