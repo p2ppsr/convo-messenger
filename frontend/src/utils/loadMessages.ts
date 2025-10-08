@@ -117,11 +117,25 @@ export async function loadMessages({
     lookupResults
   })
 
-  console.log('[LoadMessages] Decrypted messages:', messages)
+   console.log('[LoadMessages] Decrypted messages (raw):', messages)
+
+  // Step 3.5: Filter only messages belonging to this thread
+  const filtered = messages.filter(m => m.threadId === topic)
+
+  console.log(`[LoadMessages] Filtered down to ${filtered.length} messages for thread ${topic}`)
+
+  // Step 3.6: Deduplicate by uniqueID or txid-vout
+  const deduped = Array.from(
+    new Map(
+      filtered.map(m => [m.uniqueID ?? `${m.txid}-${m.vout}`, m])
+    ).values()
+  )
+
+  console.log(`[LoadMessages] Deduped to ${deduped.length} unique messages`)
 
   // --- Step 4: Collect unique senders for display name lookup ---
   const allSenders = [...new Set(
-    messages
+    deduped
       .map(m => {
         try {
           if (typeof m.sender === 'string') return m.sender
@@ -144,7 +158,7 @@ export async function loadMessages({
   console.log('[LoadMessages] Resolved nameMap:', Object.fromEntries(nameMap))
 
   // --- Step 6: Sort chronologically and return ---
-  const sorted = messages.sort((a, b) => a.createdAt - b.createdAt)
+  const sorted = deduped.sort((a, b) => a.createdAt - b.createdAt)
   console.log(`[LoadMessages] Returning ${sorted.length} sorted messages.`)
   return {
     messages: sorted,

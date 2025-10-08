@@ -20,6 +20,7 @@ export interface DecodedMessage {
   beef: number[]              // raw BEEF encoding of tx for reference
   recipients: string[]        // all recipient keys extracted from PushDrop
   threadName?: string         // optional group thread name
+  uniqueID?: string           // optional unique ID for deduplication
 }
 
 /**
@@ -80,6 +81,15 @@ export async function decodeOutput(
         .filter((r) => r.length > 0)
     : []
 
+    // Field 7: per-message unique ID
+    let uniqueID: string | undefined
+    try {
+      uniqueID = Utils.toUTF8(fields[7])
+      console.log('[decodeOutput] Unique ID:', uniqueID)
+    } catch (err) {
+      console.warn('[decodeOutput] Failed to decode uniqueID field:', err)
+    }
+
   // Field 8 (optional): thread name (UTF8 string)
   let threadName: string | undefined
   if (fields.length > 10) {
@@ -129,7 +139,8 @@ export async function decodeOutput(
     vout: outputIndex,
     beef,
     recipients,
-    threadName
+    threadName,
+    uniqueID
   }
 }
 

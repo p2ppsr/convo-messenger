@@ -36,6 +36,7 @@ export interface MessagePayloadWithMetadata extends MessagePayload {
   sender: string          // sender's pubkey
   threadId: string        // unique thread ID (hash of participants or explicit ID)
   createdAt: number       // timestamp of message (ms or s depending on source)
+  uniqueID?: string       // optional unique ID for deduplication
 }
 
 /**
