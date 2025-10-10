@@ -134,8 +134,8 @@ export async function decryptMessageBatch(
 
       const payload = await decryptMessage(
         wallet,
-        msg.header,
-        msg.encryptedPayload,
+        msg.header!,
+        msg.encryptedPayload!,
         protocolID,
         keyID
       )

@@ -10,17 +10,21 @@ import { decryptMessage } from './MessageDecryptor'
  * - Contains sender, recipients, threadId, and raw header/payload.
  */
 export interface DecodedMessage {
+  type?: 'message' | 'reaction'
   threadId: string            // unique thread ID (set by sender)
   sender: string              // pubkey of message sender
-  header: number[]            // encrypted header (contains key wrapping)
-  encryptedPayload: number[]  // ciphertext of the actual message payload
+  header?: number[]            // encrypted header (contains key wrapping)
+  encryptedPayload?: number[]  // ciphertext of the actual message payload
   createdAt: number           // timestamp (provided by overlay context)
   txid: string                // blockchain txid
   vout: number                // output index inside the tx
   beef: number[]              // raw BEEF encoding of tx for reference
-  recipients: string[]        // all recipient keys extracted from PushDrop
+  recipients?: string[]        // all recipient keys extracted from PushDrop
   threadName?: string         // optional group thread name
   uniqueID?: string           // optional unique ID for deduplication
+  messageTxid?: string
+  messageVout?: number
+  reaction?: string
 }
 
 /**
@@ -55,6 +59,40 @@ export async function decodeOutput(
 
   console.log(`[decodeOutput] Decoding vout ${outputIndex} at timestamp ${timestamp}`)
   console.log('[decodeOutput] PushDrop fields length:', fields.length)
+
+  // --- Detect record type from field[0] marker ---
+  const marker = Utils.toUTF8(fields[0])
+  console.log('[decodeOutput] Marker:', marker)
+
+  // REACTION RECORD
+  if (marker === 'tmconvo_reaction') {
+    if (fields.length < 8) throw new Error('Invalid reaction PushDrop: missing fields')
+
+    const threadId = Utils.toUTF8(fields[1])
+    const messageTxid = Utils.toUTF8(fields[2])
+    const messageVout = parseInt(Utils.toUTF8(fields[3]), 10)
+    const reaction = Utils.toUTF8(fields[4])
+    const sender = Utils.toUTF8(fields[5])
+    const uniqueID = Utils.toUTF8(fields[7])
+
+    console.log(`[decodeOutput] Parsed reaction: ${reaction} from ${sender} on ${messageTxid}:${messageVout}`)
+
+    return {
+      type: 'reaction',
+      threadId,
+      messageTxid,
+      messageVout,
+      reaction,
+      sender,
+      createdAt: timestamp,
+      txid: decodedTx.id('hex'),
+      vout: outputIndex,
+      beef,
+      uniqueID
+    }
+  }
+
+
 
   // Expecting at least 7 fields in our schema
   if (fields.length < 7) {
@@ -130,6 +168,7 @@ export async function decodeOutput(
   console.log('[decodeOutput] Recipients:', recipients)
 
   return {
+    type: 'message',
     threadId,
     sender,
     header: fields[4],             // encrypted symmetric key header

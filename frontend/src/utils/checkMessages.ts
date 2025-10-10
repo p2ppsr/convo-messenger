@@ -36,6 +36,7 @@ export async function checkMessages({
 }) {
   // Final container for decrypted messages
   const messages: any[] = []
+  const reactions: any[] = []
 
   console.log(`[Convo] Starting checkMessages with ${lookupResults.length} lookup results`)
   console.log(`[Convo] Using protocolID: ${JSON.stringify(protocolID)} | keyID: ${keyID}`)
@@ -44,9 +45,26 @@ export async function checkMessages({
   const parsed = await decodeOutputs(lookupResults)
   console.log(`[Convo] Decoded ${parsed.length} outputs successfully`)
 
+  if (!parsed || parsed.length === 0) {
+    console.warn('[Convo] No valid decoded outputs found.')
+    return { messages: [], reactions: [] }
+  }
+
+  const reactionRecords = parsed.filter(p => p.type === 'reaction')
+  const messageRecords = parsed.filter(p => !p.type || p.type === 'message')
+
+  // Narrow to only entries that actually have header & encryptedPayload
+  function hasEncFields(m: any): m is { header: number[]; encryptedPayload: number[] } {
+    return Array.isArray(m.header) && Array.isArray(m.encryptedPayload)
+  }
+
   // Step 2: Try to decrypt each decoded message
-  for (const msg of parsed) {
+  for (const msg of messageRecords) {
     try {
+      if (!hasEncFields(msg)) {
+      console.warn(`[Convo] Missing header/payload for ${msg.txid}:${msg.vout}; skipping.`)
+      continue
+    }
       console.log(`[Convo] Attempting to decrypt tx ${msg.txid}, vout ${msg.vout}`)
       console.log(`[Convo] From: ${msg.sender}, Thread: ${msg.threadId}, Timestamp: ${msg.createdAt}`)
       console.log(`[Convo] Header:`, msg.header)
@@ -87,7 +105,22 @@ export async function checkMessages({
     }
   }
 
+  // --- Step 4: Collect reactions directly (no decryption needed) ---
+  for (const r of reactionRecords) {
+    reactions.push({
+      txid: r.txid,
+      vout: r.vout,
+      threadId: r.threadId,
+      messageTxid: r.messageTxid,
+      messageVout: r.messageVout,
+      reaction: r.reaction,
+      sender: r.sender,
+      createdAt: r.createdAt,
+      uniqueID: r.uniqueID
+    })
+  }
+
   console.log(`[Convo] Finished processing. Total decrypted messages: ${messages.length}`)
 
-  return messages
+  return { messages, reactions }
 }

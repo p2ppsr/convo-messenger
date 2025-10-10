@@ -14,11 +14,16 @@ import {
   Typography,
   TextField,
   Paper,
-  CircularProgress
+  CircularProgress,
+  IconButton
 } from '@mui/material'
 import FileUpload from './FileUpload'
 import type { DisplayableIdentity, WalletClient, WalletProtocol } from '@bsv/sdk'
 import type { MessagePayloadWithMetadata } from '../types/types'
+import { sendReaction } from '../utils/sendReaction'
+import EmojiPicker from './EmojiPicker'
+import { Popover } from '@mui/material'
+import AddReactionIcon from '@mui/icons-material/AddReaction'
 
 interface ChatProps {
   client: WalletClient
@@ -59,6 +64,9 @@ export const Chat: React.FC<ChatProps> = ({
   const [loading, setLoading] = useState(true)
   const [nameMap, setNameMap] = useState<Map<string, string>>(new Map())
   const [currentRecipients, setCurrentRecipients] = useState<string[]>(recipientPublicKeys)
+  const [reactions, setReactions] = useState<Record<string, { reaction: string; sender: string }[]>>({})
+  const [emojiAnchor, setEmojiAnchor] = useState<null | HTMLElement>(null)
+  const [targetMessage, setTargetMessage] = useState<MessagePayloadWithMetadata | null>(null)
 
   const [inviteOpen, setInviteOpen] = useState(false)
   const [pendingInvite, setPendingInvite] = useState<DisplayableIdentity | null>(null)
@@ -81,11 +89,12 @@ export const Chat: React.FC<ChatProps> = ({
         if (!('messages' in result) || !('nameMap' in result)) {
           throw new Error('[Chat] loadMessages returned unexpected structure')
         }
-        const { messages: loadedMessages, nameMap: resolvedNames } = result
+        const { messages: loadedMessages, reactions: loadedReactions, nameMap: resolvedNames } = result
 
         setMessages((prev) =>
           JSON.stringify(prev) !== JSON.stringify(loadedMessages) ? loadedMessages : prev
         )
+        setReactions(loadedReactions)
         setNameMap(resolvedNames)
 
         // Restore recipients from last message
@@ -122,6 +131,12 @@ export const Chat: React.FC<ChatProps> = ({
 
         if (parsed?.type === 'file' && parsed.mimetype?.startsWith('image/') && !imagePreviews[parsed.handle]) {
           try {
+            // Check if still hosted (HEAD or short fetch)
+            const check = await fetch(parsed.handle, { method: 'HEAD' })
+            if (!check.ok) {
+              throw new Error(`File no longer hosted (status ${check.status})`)
+            }
+
             const blob = await downloadAndDecryptFile(
               client,
               protocolID,
@@ -131,9 +146,10 @@ export const Chat: React.FC<ChatProps> = ({
               parsed.mimetype
             )
             const url = URL.createObjectURL(blob)
-            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: url }))
+            setImagePreviews(prev => ({ ...prev, [parsed.handle]: url }))
           } catch (err) {
             console.warn('[Chat] Failed to auto-load image preview:', err)
+            setImagePreviews(prev => ({ ...prev, [parsed.handle]: 'EXPIRED' }))
           }
         }
       }
@@ -194,6 +210,45 @@ export const Chat: React.FC<ChatProps> = ({
     } catch (err) {
       console.error('[Chat] Failed to invite new participant:', err)
     }
+  }
+
+  const handleReact = async (msg: MessagePayloadWithMetadata, emoji: string) => {
+    try {
+      await sendReaction({
+        client,
+        senderPublicKey,
+        threadId,
+        reaction: emoji,
+        messageTxid: msg.txid,
+        messageVout: msg.vout,
+      })
+
+      const key = `${msg.txid}:${msg.vout}`
+      setReactions(prev => {
+        const existing = prev[key] || []
+        const updated = [...existing, { reaction: emoji, sender: senderPublicKey }]
+        return { ...prev, [key]: updated }
+      })
+    } catch (err) {
+      console.error('[Chat] Failed to send reaction:', err)
+    }
+  }
+
+  const handleOpenPicker = (event: React.MouseEvent, msg: MessagePayloadWithMetadata) => {
+    setEmojiAnchor(event.currentTarget as HTMLElement)
+    setTargetMessage(msg)
+  }
+
+  const handleClosePicker = () => {
+    setEmojiAnchor(null)
+    setTargetMessage(null)
+  }
+
+  const handleSelectEmoji = async (emoji: string) => {
+    if (targetMessage) {
+      await handleReact(targetMessage, emoji)
+    }
+    handleClosePicker()
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -326,11 +381,11 @@ export const Chat: React.FC<ChatProps> = ({
                   mb: 1,
                   borderRadius: 2,
                   width: {
-                    xs: '100%',  // full width on mobile
-                    sm: '75%',   // 75% on tablet/desktop
+                    xs: '100%', // full width on mobile
+                    sm: '75%', // 75% on tablet/desktop
                   },
                   ml: {
-                    xs: 0,                // no margin on mobile
+                    xs: 0, // no margin on mobile
                     sm: isOwn ? 'auto' : 0, // right-align own messages on desktop
                   },
                   backgroundColor: 'black',
@@ -350,10 +405,38 @@ export const Chat: React.FC<ChatProps> = ({
                               Loading preview…
                             </Typography>
                           </Box>
+                        ) : imagePreviews[parsed.handle] === 'EXPIRED' ? (
+                          <Box
+                            display="flex"
+                            flexDirection="column"
+                            alignItems="flex-start"
+                            gap={0.5}
+                            mt={1}
+                            sx={{
+                              backgroundColor: 'rgba(255, 165, 0, 0.1)',
+                              border: '1px solid rgba(255, 165, 0, 0.4)',
+                              borderRadius: '8px',
+                              padding: '8px',
+                              maxWidth: '240px',
+                            }}
+                          >
+                            <Typography
+                              variant="body2"
+                              sx={{ color: 'orange', fontStyle: 'italic' }}
+                            >
+                              ⚠️ File preview unavailable — no longer hosted.
+                            </Typography>
+                          </Box>
                         ) : (
                           <img
                             src={imagePreviews[parsed.handle]}
                             alt={parsed.filename}
+                            onError={() =>
+                              setImagePreviews((prev) => ({
+                                ...prev,
+                                [parsed.handle]: 'EXPIRED',
+                              }))
+                            }
                             style={{
                               maxWidth: '240px',
                               maxHeight: '240px',
@@ -367,23 +450,88 @@ export const Chat: React.FC<ChatProps> = ({
                       </>
                     )}
 
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      sx={{ mt: 1 }}
-                      onClick={() =>
-                        handleFileDownload(parsed.handle, parsed.header, parsed.filename, parsed.mimetype)
-                      }
-                      disabled={downloadingFile === parsed.handle}
-                    >
-                      {downloadingFile === parsed.handle ? 'Downloading…' : 'Download'}
-                    </Button>
+                    {/* Hide Download Button if expired */}
+                    {imagePreviews[parsed.handle] !== 'EXPIRED' && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        sx={{ mt: 1 }}
+                        onClick={() =>
+                          handleFileDownload(
+                            parsed.handle,
+                            parsed.header,
+                            parsed.filename,
+                            parsed.mimetype
+                          )
+                        }
+                        disabled={downloadingFile === parsed.handle}
+                      >
+                        {downloadingFile === parsed.handle
+                          ? 'Downloading…'
+                          : 'Download'}
+                      </Button>
+                    )}
                   </>
                 ) : (
                   <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
                     {msg.content}
                   </Typography>
                 )}
+
+                {/* Reactions section */}
+                {(() => {
+                  const key = `${msg.txid}:${msg.vout}`
+                  const msgReactions = reactions[key] || []
+                  if (msgReactions.length === 0) return null
+
+                  const reactionCounts = msgReactions.reduce<Record<string, number>>(
+                    (acc, r) => {
+                      acc[r.reaction] = (acc[r.reaction] || 0) + 1
+                      return acc
+                    },
+                    {}
+                  )
+
+                  return (
+                    <Box display="flex" gap={1} mt={1}>
+                      {Object.entries(reactionCounts).map(([emoji, count]) => (
+                        <Paper
+                          key={emoji}
+                          sx={{
+                            px: 1,
+                            py: 0.2,
+                            borderRadius: '12px',
+                            backgroundColor: 'rgba(255,255,255,0.1)',
+                            color: 'white',
+                            fontSize: '0.9rem',
+                          }}
+                        >
+                          {emoji} {count > 1 && count}
+                        </Paper>
+                      ))}
+                    </Box>
+                  )
+                })()}
+
+                <IconButton
+                  size="small"
+                  onClick={(e) => handleOpenPicker(e, msg)}
+                  sx={{
+                    color: 'rgba(255,255,255,0.7)',
+                    backgroundColor: 'rgba(255,255,255,0.08)',
+                    borderRadius: '16px',
+                    px: 1.2,
+                    py: 0.4,
+                    mt: 0.5,
+                    '&:hover': {
+                      backgroundColor: 'rgba(255,255,255,0.15)',
+                      color: '#fff',
+                    },
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  <AddReactionIcon fontSize="small" />
+                </IconButton>
 
                 <Typography
                   variant="caption"
@@ -423,7 +571,12 @@ export const Chat: React.FC<ChatProps> = ({
           onChange={(e) => setNewMessage(e.target.value)}
           onKeyDown={handleKeyPress}
         />
-        <Button variant="contained" color="primary" disabled={!newMessage.trim()} onClick={handleSend}>
+        <Button
+          variant="contained"
+          color="primary"
+          disabled={!newMessage.trim()}
+          onClick={handleSend}
+        >
           Send
         </Button>
         <Button variant="contained" color="secondary" onClick={() => setInviteOpen(true)}>
@@ -444,6 +597,17 @@ export const Chat: React.FC<ChatProps> = ({
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Emoji picker popover (shared by all messages) */}
+      <Popover
+        open={Boolean(emojiAnchor)}
+        anchorEl={emojiAnchor}
+        onClose={handleClosePicker}
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+        transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <EmojiPicker onSelect={handleSelectEmoji} />
+      </Popover>
     </Box>
   )
 }

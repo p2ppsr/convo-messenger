@@ -3,6 +3,18 @@
 import { Collection, Db } from "mongodb"
 import { EncryptedMessage, Thread, ParticipantChangeLog } from "../types"
 
+export interface ReactionRecord {
+  txid: string
+  threadId: string
+  outputIndex: number
+  messageTxid: string
+  messageVout: number
+  reaction: string
+  sender: string
+  createdAt: number
+  uniqueId?: string
+}
+
 export interface UTXOReference {
   txid: string
   outputIndex: number
@@ -11,15 +23,18 @@ export interface UTXOReference {
 export class ConvoStorage {
   private threads: Collection<Thread>
   private messages: Collection<EncryptedMessage>
+  private reactions: Collection<ReactionRecord>
   private logs: Collection<ParticipantChangeLog>
 
   constructor(private db: Db) {
     this.threads = db.collection<Thread>("convoThreads")
     this.messages = db.collection<EncryptedMessage>("convoMessages")
+    this.reactions = db.collection<ReactionRecord>("convoReactions")
     this.logs = db.collection<ParticipantChangeLog>("convoChangeLogs")
 
     this.threads.createIndex({ threadId: 1 }, { unique: true })
     this.messages.createIndex({ threadId: 1 })
+    this.reactions.createIndex({ threadId: 1 })
     this.logs.createIndex({ threadId: 1 })
   }
 
@@ -56,6 +71,19 @@ export class ConvoStorage {
 
   async getMessageByTxid(txid: string): Promise<EncryptedMessage | null> {
     return await this.messages.findOne({ txid })
+  }
+
+  // ========== REACTIONS ==========
+  async storeReaction(reaction: ReactionRecord): Promise<void> {
+    await this.reactions.insertOne(reaction)
+  }
+
+  async getReactionsByThread(threadId: string): Promise<ReactionRecord[]> {
+    return await this.reactions.find({ threadId }).sort({ createdAt: 1 }).toArray()
+  }
+
+  async getReactionsByMessage(txid: string, vout: number): Promise<ReactionRecord[]> {
+    return await this.reactions.find({ messageTxid: txid, messageVout: vout }).toArray()
   }
 
   // ========== PARTICIPANT CHANGE LOGS ==========
