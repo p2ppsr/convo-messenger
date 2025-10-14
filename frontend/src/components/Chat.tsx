@@ -75,6 +75,7 @@ export const Chat: React.FC<ChatProps> = ({
   const [uploading, setUploading] = useState(false)
   const [downloadingFile, setDownloadingFile] = useState<string | null>(null)
   const [imagePreviews, setImagePreviews] = useState<Record<string, string>>({})
+  const [sending, setSending] = useState(false)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -118,9 +119,9 @@ export const Chat: React.FC<ChatProps> = ({
     return () => clearInterval(interval)
   }, [threadId, client, protocolID, keyID])
 
-  // Auto-decrypt image previews once messages are loaded
+  // Auto-decrypt file previews once messages are loaded
   useEffect(() => {
-    const loadImagePreviews = async () => {
+    const loadFilePreviews = async () => {
       for (const msg of messages) {
         let parsed: any
         try {
@@ -129,37 +130,55 @@ export const Chat: React.FC<ChatProps> = ({
           continue
         }
 
-        if (parsed?.type === 'file' && parsed.mimetype?.startsWith('image/') && !imagePreviews[parsed.handle]) {
-          try {
-            // Check if still hosted (HEAD or short fetch)
-            const check = await fetch(parsed.handle, { method: 'HEAD' })
-            if (!check.ok) {
-              throw new Error(`File no longer hosted (status ${check.status})`)
-            }
+        if (parsed?.type !== 'file' || imagePreviews[parsed.handle]) continue
 
-            const blob = await downloadAndDecryptFile(
-              client,
-              protocolID,
-              keyID,
-              parsed.handle,
-              parsed.header,
-              parsed.mimetype
-            )
+        try {
+          const blob = await downloadAndDecryptFile(
+            client,
+            protocolID,
+            keyID,
+            parsed.handle,
+            parsed.header,
+            parsed.mimetype
+          )
+
+          if (parsed.mimetype.startsWith('image/')) {
+            // 🔹 Existing image preview logic
             const url = URL.createObjectURL(blob)
-            setImagePreviews(prev => ({ ...prev, [parsed.handle]: url }))
-          } catch (err) {
-            console.warn('[Chat] Failed to auto-load image preview:', err)
-            setImagePreviews(prev => ({ ...prev, [parsed.handle]: 'EXPIRED' }))
+            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: url }))
           }
+
+          else if (parsed.mimetype === 'application/pdf') {
+            // 🔹 Generate PDF preview
+            const url = URL.createObjectURL(blob)
+            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: url }))
+          }
+
+          else if (parsed.mimetype.startsWith('text/')) {
+            // 🔹 Read first ~500 characters of text
+            const text = await blob.text()
+            const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
+            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: snippet }))
+          }
+
+          else {
+            // 🔹 For unsupported file types, mark with null (so we know it exists but no preview)
+            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: null }))
+          }
+
+        } catch (err) {
+          console.warn('[Chat] Failed to auto-load file preview:', err)
+          setImagePreviews((prev) => ({ ...prev, [parsed.handle]: 'EXPIRED' }))
         }
       }
     }
 
-    if (messages.length > 0) loadImagePreviews()
+    if (messages.length > 0) loadFilePreviews()
   }, [messages])
 
   const handleSend = async () => {
-    if (!newMessage.trim()) return
+    if (!newMessage.trim() || sending) return
+    setSending(true)
     const content = newMessage.trim()
     try {
       await sendMessage({
@@ -180,6 +199,8 @@ export const Chat: React.FC<ChatProps> = ({
       scrollToBottom()
     } catch (err) {
       console.error('[Chat] Failed to send message:', err)
+    } finally {
+      setSending(false)
     }
   }
 
@@ -252,7 +273,7 @@ export const Chat: React.FC<ChatProps> = ({
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !sending) {
       e.preventDefault()
       handleSend()
     }
@@ -324,8 +345,21 @@ export const Chat: React.FC<ChatProps> = ({
       a.download = filename
       a.click()
       window.URL.revokeObjectURL(url)
-    } catch (err) {
-      console.error('[Chat] Failed to download file:', err)
+    } catch (err: any) {
+    console.error('[Chat] Failed to download file:', err)
+
+    // Show an inline alert for expired/missing files
+    let message = 'File could not be downloaded.'
+    const errMsg = (err?.message || '').toLowerCase()
+
+    if (errMsg.includes('no data returned') || errMsg.includes('404') || errMsg.includes('not found')) {
+      message = '⚠️ This file is no longer hosted or has expired.'
+    } else if (errMsg.includes('failed to fetch') || errMsg.includes('network')) {
+      message = '⚠️ Unable to reach file host.'
+    }
+
+    // Use a simple alert for now, can be swapped for Snackbar later
+    alert(message)
     } finally {
       setDownloadingFile(null)
     }
@@ -396,47 +430,22 @@ export const Chat: React.FC<ChatProps> = ({
                   <>
                     <Typography variant="body2">📎 {parsed.filename}</Typography>
 
-                    {parsed.mimetype?.startsWith('image/') && (
-                      <>
-                        {!imagePreviews[parsed.handle] ? (
-                          <Box display="flex" alignItems="center" gap={1} mt={1}>
-                            <CircularProgress size={18} color="inherit" />
-                            <Typography variant="body2" color="text.secondary">
-                              Loading preview…
-                            </Typography>
-                          </Box>
-                        ) : imagePreviews[parsed.handle] === 'EXPIRED' ? (
-                          <Box
-                            display="flex"
-                            flexDirection="column"
-                            alignItems="flex-start"
-                            gap={0.5}
-                            mt={1}
-                            sx={{
-                              backgroundColor: 'rgba(255, 165, 0, 0.1)',
-                              border: '1px solid rgba(255, 165, 0, 0.4)',
-                              borderRadius: '8px',
-                              padding: '8px',
-                              maxWidth: '240px',
-                            }}
-                          >
-                            <Typography
-                              variant="body2"
-                              sx={{ color: 'orange', fontStyle: 'italic' }}
-                            >
-                              ⚠️ File preview unavailable — no longer hosted.
-                            </Typography>
-                          </Box>
-                        ) : (
+                    {(() => {
+                      const preview = imagePreviews[parsed.handle]
+
+                      if (preview === 'EXPIRED') {
+                        return (
+                          <Typography variant="body2" color="error" mt={1}>
+                            File no longer hosted or expired.
+                          </Typography>
+                        )
+                      }
+
+                      if (parsed.mimetype.startsWith('image/') && preview) {
+                        return (
                           <img
-                            src={imagePreviews[parsed.handle]}
+                            src={preview}
                             alt={parsed.filename}
-                            onError={() =>
-                              setImagePreviews((prev) => ({
-                                ...prev,
-                                [parsed.handle]: 'EXPIRED',
-                              }))
-                            }
                             style={{
                               maxWidth: '240px',
                               maxHeight: '240px',
@@ -446,9 +455,56 @@ export const Chat: React.FC<ChatProps> = ({
                               display: 'block',
                             }}
                           />
-                        )}
-                      </>
-                    )}
+                        )
+                      }
+
+                      if (parsed.mimetype === 'application/pdf' && preview) {
+                        return (
+                          <Box mt={1}>
+                            <embed
+                              src={preview}
+                              type="application/pdf"
+                              width="240px"
+                              height="240px"
+                              style={{ borderRadius: '8px', background: '#111' }}
+                            />
+                          </Box>
+                        )
+                      }
+
+                      if (parsed.mimetype.startsWith('text/') && typeof preview === 'string') {
+                        return (
+                          <Box mt={1} sx={{
+                            backgroundColor: 'rgba(255,255,255,0.05)',
+                            borderRadius: '8px',
+                            padding: '8px',
+                            fontFamily: 'monospace',
+                            whiteSpace: 'pre-wrap',
+                            maxHeight: '240px',
+                            overflowY: 'auto',
+                          }}>
+                            {preview}
+                          </Box>
+                        )
+                      }
+
+                      if (preview === null) {
+                        return (
+                          <Typography variant="body2" color="text.secondary" mt={1}>
+                            Preview unavailable for this file type.
+                          </Typography>
+                        )
+                      }
+
+                      return (
+                        <Box display="flex" alignItems="center" gap={1} mt={1}>
+                          <CircularProgress size={18} color="inherit" />
+                          <Typography variant="body2" color="text.secondary">
+                            Loading preview…
+                          </Typography>
+                        </Box>
+                      )
+                    })()}
 
                     {/* Hide Download Button if expired */}
                     {imagePreviews[parsed.handle] !== 'EXPIRED' && (
@@ -574,10 +630,10 @@ export const Chat: React.FC<ChatProps> = ({
         <Button
           variant="contained"
           color="primary"
-          disabled={!newMessage.trim()}
+          disabled={!newMessage.trim() || sending}
           onClick={handleSend}
         >
-          Send
+          {sending ? 'Sending...' : 'Send'}
         </Button>
         <Button variant="contained" color="secondary" onClick={() => setInviteOpen(true)}>
           Invite

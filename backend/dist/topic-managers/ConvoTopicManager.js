@@ -11,18 +11,18 @@ export default class ConvoTopicManager {
                 try {
                     const decoded = PushDrop.decode(output.lockingScript);
                     const fields = decoded.fields;
-                    if (fields.length < 8) {
-                        console.log(`[ConvoTopicManager] Output #${index} – Too few fields: ${fields.length}`);
+                    if (fields.length < 2)
+                        continue;
+                    const marker = Utils.toUTF8(fields[0]);
+                    const protocol = Utils.toUTF8(fields[1] ?? []);
+                    // Accept either normal messages or reactions
+                    const isMessage = marker === 'convo' && protocol === 'tmconvo';
+                    const isReaction = marker === 'tmconvo_reaction';
+                    if (!isMessage && !isReaction) {
+                        console.log(`[ConvoTopicManager] Output #${index} – Not a convo message or reaction: ${marker}, ${protocol}`);
                         continue;
                     }
-                    const topic = Utils.toUTF8(fields[0]);
-                    const protocol = Utils.toUTF8(fields[1]);
-                    if (protocol !== 'tmconvo' || topic !== 'convo') {
-                        console.log(`[ConvoTopicManager] Output #${index} – Invalid topic or protocol: ${topic}, ${protocol}`);
-                        continue;
-                    }
-                    // Passed all checks
-                    console.log(`[ConvoTopicManager] Output #${index} – Valid Convo message`);
+                    console.log(`[ConvoTopicManager] Output #${index} – Valid Convo ${isReaction ? 'reaction' : 'message'}`);
                     admissibleOutputs.push(index);
                 }
                 catch (err) {

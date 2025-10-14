@@ -33,7 +33,7 @@ export async function uploadEncryptedFile(
   try {
     // 1. Read file bytes
     const buffer = await file.arrayBuffer()
-    const fileBytes = Array.from(new Uint8Array(buffer))
+    let fileBytes = Array.from(new Uint8Array(buffer))
     console.log('[Upload] File:', {
       name: file.name,
       size: fileBytes.length,
@@ -59,13 +59,22 @@ export async function uploadEncryptedFile(
     const storageUploader = new StorageUploader({ storageURL: STORAGE_URL, wallet })
     console.log('[Upload] Starting publishFile to', STORAGE_URL)
 
+    // ensure minimum file size to avoid UHRP-Lite rejection
+    if (fileBytes.length < 1024) {
+      console.warn(`[Upload] File too small (${fileBytes.length} bytes) — padding to 1024`)
+      fileBytes = [...fileBytes, ...new Array(1024 - fileBytes.length).fill(0)]
+    }
+
+    const mime = file.type || 'text/plain'
+
     const uploaded = await storageUploader.publishFile({
       file: {
-        data: encryptedMessage,
-        type: 'application/octet-stream'
+        data: Uint8Array.from(encryptedMessage),
+        type: mime
       },
       retentionPeriod
     })
+
     console.log('[Upload] publishFile response:', uploaded)
 
     if (!uploaded || !uploaded.uhrpURL) {

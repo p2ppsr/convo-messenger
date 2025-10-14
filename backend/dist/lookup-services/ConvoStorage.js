@@ -3,14 +3,17 @@ export class ConvoStorage {
     db;
     threads;
     messages;
+    reactions;
     logs;
     constructor(db) {
         this.db = db;
         this.threads = db.collection("convoThreads");
         this.messages = db.collection("convoMessages");
+        this.reactions = db.collection("convoReactions");
         this.logs = db.collection("convoChangeLogs");
         this.threads.createIndex({ threadId: 1 }, { unique: true });
         this.messages.createIndex({ threadId: 1 });
+        this.reactions.createIndex({ threadId: 1 });
         this.logs.createIndex({ threadId: 1 });
     }
     // ========== THREADS ==========
@@ -35,6 +38,16 @@ export class ConvoStorage {
     }
     async getMessageByTxid(txid) {
         return await this.messages.findOne({ txid });
+    }
+    // ========== REACTIONS ==========
+    async storeReaction(reaction) {
+        await this.reactions.insertOne(reaction);
+    }
+    async getReactionsByThread(threadId) {
+        return await this.reactions.find({ threadId }).sort({ createdAt: 1 }).toArray();
+    }
+    async getReactionsByMessage(txid, vout) {
+        return await this.reactions.find({ messageTxid: txid, messageVout: vout }).toArray();
     }
     // ========== PARTICIPANT CHANGE LOGS ==========
     async storeChangeLog(entry) {

@@ -20,42 +20,64 @@ export class ConvoLookupService {
         try {
             const decoded = PushDrop.decode(lockingScript);
             const fields = decoded.fields;
-            console.log(`[ConvoLookupService] Decoded ${fields.length} fields from lockingScript`);
-            if (fields.length < 7) {
-                console.warn('[ConvoLookupService] Not enough fields to store a message');
+            if (fields.length < 2)
                 return;
+            const marker = Utils.toUTF8(fields[0]);
+            const protocol = Utils.toUTF8(fields[1] ?? []);
+            // Handle message or reaction separately
+            if (marker === 'convo' && protocol === 'tmconvo') {
+                // 🔹 Normal message (same as before)
+                const [_topicBuf, _protocolBuf, senderBuf, threadIdBuf, headerBuf, payloadBuf, timestampBuf, uniqueIdBuf, threadNameBuf] = fields;
+                const sender = Utils.toHex(senderBuf);
+                const threadId = Utils.toUTF8(threadIdBuf);
+                const header = Array.from(headerBuf);
+                const encryptedPayload = Array.from(payloadBuf);
+                const createdAt = timestampBuf ? parseInt(Utils.toUTF8(timestampBuf)) : Date.now();
+                const uniqueId = uniqueIdBuf ? Utils.toUTF8(uniqueIdBuf) : undefined;
+                const threadName = threadNameBuf ? Utils.toUTF8(threadNameBuf) : undefined;
+                const record = {
+                    txid,
+                    threadId,
+                    outputIndex,
+                    sender,
+                    encryptedPayload,
+                    header,
+                    createdAt,
+                    ...(uniqueId ? { uniqueId } : {}),
+                    ...(threadName ? { threadName } : {})
+                };
+                console.log('[ConvoLookupService] Storing message record:', record);
+                await this.storage.storeMessage(record);
             }
-            const [topicBuf, protocolBuf, senderBuf, threadIdBuf, headerBuf, payloadBuf, timestampBuf, uniqueIdBuf, threadNameBuf // optional
-            ] = fields;
-            const topicVal = Utils.toUTF8(topicBuf);
-            const protocolVal = Utils.toUTF8(protocolBuf);
-            if (topicVal !== 'convo' || protocolVal !== 'tmconvo') {
-                console.warn(`[ConvoLookupService] Invalid topic/protocol values in script: ${topicVal}, ${protocolVal}`);
-                return;
+            else if (marker === 'tmconvo_reaction') {
+                // Reaction record
+                const threadId = Utils.toUTF8(fields[1]);
+                const messageTxid = Utils.toUTF8(fields[2]);
+                const messageVout = parseInt(Utils.toUTF8(fields[3]), 10);
+                const reaction = Utils.toUTF8(fields[4]);
+                const sender = Utils.toUTF8(fields[5]);
+                const createdAt = Date.now();
+                const uniqueId = fields[7] ? Utils.toUTF8(fields[7]) : undefined;
+                const record = {
+                    txid,
+                    threadId,
+                    outputIndex,
+                    messageTxid,
+                    messageVout,
+                    reaction,
+                    sender,
+                    createdAt,
+                    ...(uniqueId ? { uniqueId } : {}),
+                };
+                console.log('[ConvoLookupService] Storing reaction record:', record);
+                await this.storage.storeReaction(record);
             }
-            const sender = Utils.toHex(senderBuf);
-            const threadId = Utils.toUTF8(threadIdBuf);
-            const header = Array.from(headerBuf);
-            const encryptedPayload = Array.from(payloadBuf);
-            const createdAt = timestampBuf ? parseInt(Utils.toUTF8(timestampBuf)) : Date.now();
-            const uniqueId = uniqueIdBuf ? Utils.toUTF8(uniqueIdBuf) : undefined;
-            const threadName = threadNameBuf ? Utils.toUTF8(threadNameBuf) : undefined;
-            const record = {
-                txid,
-                threadId,
-                outputIndex,
-                sender,
-                encryptedPayload,
-                header,
-                createdAt,
-                ...(uniqueId ? { uniqueId } : {}),
-                ...(threadName ? { threadName } : {})
-            };
-            console.log('[ConvoLookupService] Storing message record:', record);
-            await this.storage.storeMessage(record);
+            else {
+                console.warn(`[ConvoLookupService] Ignoring non-convo output: marker=${marker}, protocol=${protocol}`);
+            }
         }
         catch (err) {
-            console.error('[ConvoLookupService] Failed to decode/store message:', err);
+            console.error('[ConvoLookupService] Failed to decode/store output:', err);
         }
     }
     async outputSpent(payload) {
@@ -83,9 +105,14 @@ export class ConvoLookupService {
         const query = question.query;
         console.log(`[ConvoLookupService] Performing lookup with query type: "${query.type}"`, query);
         if (query.type === 'findByThreadId') {
-            const messages = await this.storage.getMessagesByThread(query.value.threadId);
-            console.log(`[ConvoLookupService] Found ${messages.length} message(s) for threadId: ${query.value.threadId}`);
-            return this.formatAsLookupAnswers(messages);
+            const [messages, reactions] = await Promise.all([
+                this.storage.getMessagesByThread(query.value.threadId),
+                this.storage.getReactionsByThread(query.value.threadId)
+            ]);
+            console.log(`[ConvoLookupService] Found ${messages.length} messages and ${reactions.length} reactions for threadId: ${query.value.threadId}`);
+            // Combine both so frontend sees them together
+            const all = [...messages, ...reactions];
+            return this.formatAsLookupAnswers(all);
         }
         if (query.type === 'getMessage') {
             const message = await this.storage.getMessageByTxid(query.value.txid);
