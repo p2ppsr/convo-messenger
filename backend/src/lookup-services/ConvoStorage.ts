@@ -32,8 +32,10 @@ export class ConvoStorage {
     this.reactions = db.collection<ReactionRecord>("convoReactions")
     this.logs = db.collection<ParticipantChangeLog>("convoChangeLogs")
 
+    // --- Indexes ---
     this.threads.createIndex({ threadId: 1 }, { unique: true })
     this.messages.createIndex({ threadId: 1 })
+    this.messages.createIndex({ parentMessageId: 1 })
     this.reactions.createIndex({ threadId: 1 })
     this.logs.createIndex({ threadId: 1 })
   }
@@ -62,7 +64,10 @@ export class ConvoStorage {
   // ========== MESSAGES ==========
 
   async storeMessage(message: EncryptedMessage): Promise<void> {
-    await this.messages.insertOne(message)
+    await this.messages.insertOne({
+      ...message,
+      parentMessageId: message.parentMessageId || undefined
+    })
   }
 
   async getMessagesByThread(threadId: string): Promise<EncryptedMessage[]> {
@@ -73,7 +78,12 @@ export class ConvoStorage {
     return await this.messages.findOne({ txid })
   }
 
+  async getRepliesByParent(parentMessageId: string): Promise<EncryptedMessage[]> {
+    return await this.messages.find({ parentMessageId }).sort({ createdAt: 1 }).toArray()
+  }
+
   // ========== REACTIONS ==========
+
   async storeReaction(reaction: ReactionRecord): Promise<void> {
     await this.reactions.insertOne(reaction)
   }
@@ -111,4 +121,12 @@ export class ConvoStorage {
     await this.messages.deleteMany({ threadId })
     await this.logs.deleteMany({ threadId })
   }
+
+  async getReactionsByMessages(txids: string[]): Promise<ReactionRecord[]> {
+  if (txids.length === 0) return []
+  return await this.reactions
+    .find({ messageTxid: { $in: txids } })
+    .sort({ createdAt: 1 })
+    .toArray()
+}
 }

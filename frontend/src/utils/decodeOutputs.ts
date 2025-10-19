@@ -25,6 +25,7 @@ export interface DecodedMessage {
   messageTxid?: string
   messageVout?: number
   reaction?: string
+  parentMessageId?: string    // optional: txid of message being replied to
 }
 
 /**
@@ -57,12 +58,25 @@ export async function decodeOutput(
   const decoded = PushDrop.decode(output.lockingScript)
   const fields = decoded.fields
 
-  console.log(`[decodeOutput] Decoding vout ${outputIndex} at timestamp ${timestamp}`)
-  console.log('[decodeOutput] PushDrop fields length:', fields.length)
+  // console.log(`[decodeOutput] ▼ Decoding TX ${decodedTx.id('hex')} @vout ${outputIndex}`)
+  // console.log(`[decodeOutput] Decoding vout ${outputIndex} at timestamp ${timestamp}`)
+  // console.log('[decodeOutput] PushDrop fields length:', fields.length)
+
+//     fields.forEach((f, i) => {
+    //   const hex = Utils.toHex(f)
+    //   let utf8: string
+    //   try {
+    //     utf8 = Utils.toUTF8(f)
+    //   } catch {
+    //     utf8 = '(non-UTF8 binary)'
+    //   }
+    //   console.log(`Field[${i}] → HEX: ${hex}`)
+    //   console.log(`Field[${i}] → UTF8: ${utf8}`)
+    // })
 
   // --- Detect record type from field[0] marker ---
   const marker = Utils.toUTF8(fields[0])
-  console.log('[decodeOutput] Marker:', marker)
+  // console.log('[decodeOutput] Marker:', marker)
 
   // REACTION RECORD
   if (marker === 'tmconvo_reaction') {
@@ -75,7 +89,7 @@ export async function decodeOutput(
     const sender = Utils.toUTF8(fields[5])
     const uniqueID = Utils.toUTF8(fields[7])
 
-    console.log(`[decodeOutput] Parsed reaction: ${reaction} from ${sender} on ${messageTxid}:${messageVout}`)
+    // console.log(`[decodeOutput] Parsed reaction: ${reaction} from ${sender} on ${messageTxid}:${messageVout}`)
 
     return {
       type: 'reaction',
@@ -88,11 +102,10 @@ export async function decodeOutput(
       txid: decodedTx.id('hex'),
       vout: outputIndex,
       beef,
-      uniqueID
+      uniqueID,
+      parentMessageId: undefined
     }
   }
-
-
 
   // Expecting at least 7 fields in our schema
   if (fields.length < 7) {
@@ -104,6 +117,9 @@ export async function decodeOutput(
 
   // Field 2: sender public key (hex)
   const sender = Utils.toHex(Array.from(fields[2] as unknown as Uint8Array))
+
+  // console.log('Thread ID:', threadId)
+  // console.log('Sender pubkey:', sender)
 
   // Field 6: recipients array (each an identity key)
   const recipients = Array.isArray(fields[6])
@@ -123,17 +139,19 @@ export async function decodeOutput(
     let uniqueID: string | undefined
     try {
       uniqueID = Utils.toUTF8(fields[7])
-      console.log('[decodeOutput] Unique ID:', uniqueID)
+      // console.log('[decodeOutput] Unique ID:', uniqueID)
     } catch (err) {
       console.warn('[decodeOutput] Failed to decode uniqueID field:', err)
     }
 
+    let parentMessageId: string | undefined
+
   // Field 8 (optional): thread name (UTF8 string)
   let threadName: string | undefined
-  if (fields.length > 10) {
+  if (fields.length === 11) {
     const nameHeader = fields[8] as unknown as Uint8Array
     const nameCiphertext = fields[9] as unknown as Uint8Array
-    console.log('[decodeOutput] Found encrypted thread name:')
+    // console.log('[decodeOutput] Found encrypted thread name:')
 
     if (wallet && protocolID && keyID) {
       const decryptedName = await decryptMessage(
@@ -147,25 +165,35 @@ export async function decodeOutput(
       // decryptedName is a MessagePayload object
       if (decryptedName?.content) {
         threadName = decryptedName.content.trim()
-        console.log('[decodeOutput] Found thread name:', threadName)
+        // console.log('[decodeOutput] Found thread name:', threadName)
       }
     } else {
-      console.log('[decodeOutput] Encrypted thread name detected but no wallet/protocol provided')
+      // console.log('[decodeOutput] Encrypted thread name detected but no wallet/protocol provided')
     }
   } else if (fields.length === 10) {
-    // Legacy plaintext thread name for older messages
-    try {
-      threadName = Utils.toUTF8(fields[8])
-      console.log('[decodeOutput] Legacy plaintext thread name:', threadName)
-    } catch (err) {
-      console.warn('[decodeOutput] Failed to decode legacy plaintext thread name:', err)
-    }
+  const possibleValue = Utils.toUTF8(fields[8]).trim()
+  // A TXID is always 64 hex chars (0–9, a–f)
+  if (/^[0-9a-f]{64}$/i.test(possibleValue)) {
+    parentMessageId = possibleValue
+    // console.log('[decodeOutput] ParentMessageId detected (10-field schema):', parentMessageId)
+  } else {
+    threadName = possibleValue
+    // console.log('[decodeOutput] Legacy plaintext thread name:', threadName)
   }
- 
+}else if (fields.length === 12)
+  {
+    try {
+      parentMessageId = Utils.toUTF8(fields[8]).trim()
+      // console.log('[decodeOutput] ParentMessageId detected:', parentMessageId)
+    } catch (err) {
+      console.warn('[decodeOutput] Failed to decode parentMessageId field:', err)
+  }
+}
 
-  console.log('[decodeOutput] Thread ID:', threadId)
-  console.log('[decodeOutput] Sender:', sender)
-  console.log('[decodeOutput] Recipients:', recipients)
+  // console.log('[decodeOutput] Thread ID:', threadId)
+  // console.log('[decodeOutput] Sender:', sender)
+  // console.log('[decodeOutput] Recipients:', recipients)
+  // if (parentMessageId) console.log('[decodeOutput] This message is a reply to:', parentMessageId)
 
   return {
     type: 'message',
@@ -179,7 +207,8 @@ export async function decodeOutput(
     beef,
     recipients,
     threadName,
-    uniqueID
+    uniqueID,
+    parentMessageId
   }
 }
 

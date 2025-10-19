@@ -38,7 +38,7 @@ try {
     for (const [k, v] of Object.entries(parsed)) {
       displayNameCache.set(k, v)
     }
-    console.log('[resolveDisplayNames] Restored cache from localStorage:', parsed)
+    // console.log('[resolveDisplayNames] Restored cache from localStorage:', parsed)
   }
 } catch (err) {
   console.warn('[resolveDisplayNames] Failed to load persistent cache', err)
@@ -119,25 +119,25 @@ export async function resolveDisplayNames(
   pubkeys: string[],
   excludeKey?: string
 ): Promise<Map<string, string>> {
-  console.log('[resolveDisplayNames] Raw input pubkeys:', pubkeys)
+  // console.log('[resolveDisplayNames] Raw input pubkeys:', pubkeys)
 
   // Step 1: filter out blanks and excluded key
   const filtered = pubkeys
     .filter((key) => key && key.length > 0 && key !== excludeKey)
     .map(sanitizeKey)
 
-  console.log('[resolveDisplayNames] Filtered & sanitized keys:', filtered)
+  // console.log('[resolveDisplayNames] Filtered & sanitized keys:', filtered)
 
   // Step 2: Resolve each pubkey asynchronously (with caching)
   const results = await Promise.all(
     filtered.map(async (key) => {
-      // ✅ Use cached name if present
+      // Use cached name if present
       if (displayNameCache.has(key)) {
         return [key, displayNameCache.get(key)!] as const
       }
 
       try {
-        console.log(`[resolveDisplayNames] Resolving via IdentityClient: ${key}`)
+        // console.log(`[resolveDisplayNames] Resolving via IdentityClient: ${key}`)
         const identities = await identityClient.resolveByIdentityKey({ identityKey: key })
 
         const name =
@@ -161,7 +161,7 @@ export async function resolveDisplayNames(
   // Step 3: Convert array of tuples into a Map
   const nameMap = new Map(results)
 
-  console.log('[resolveDisplayNames] Final name map:', Object.fromEntries(nameMap))
+  // console.log('[resolveDisplayNames] Final name map:', Object.fromEntries(nameMap))
 
   return nameMap
 }

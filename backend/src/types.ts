@@ -24,6 +24,7 @@ export interface EncryptedMessage {
   mediaURL?: string           // Optional pointer to uploaded media
   uniqueId?: string           // Optional unique identifier for the message
   threadName?: string         // Optional thread name at time of sending
+  parentMessageId?: string    // Optional: txid of message being replied to
 }
 
 export interface ParticipantChangeLog {

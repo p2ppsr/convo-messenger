@@ -37,6 +37,8 @@ export interface MessagePayloadWithMetadata extends MessagePayload {
   threadId: string        // unique thread ID (hash of participants or explicit ID)
   createdAt: number       // timestamp of message (ms or s depending on source)
   uniqueID?: string       // optional unique ID for deduplication
+  parentMessageId?: string // optional: txid of message being replied to
+  latestReplyTime?: number // optional: latest reply timestamp
 }
 
 /**

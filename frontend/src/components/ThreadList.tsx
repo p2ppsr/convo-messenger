@@ -15,6 +15,7 @@ import { decodeOutputs } from '../utils/decodeOutputs'
 import { decryptMessageBatch } from '../utils/MessageDecryptor'
 import { resolveDisplayNames } from '../utils/resolveDisplayNames'
 import type { WalletInterface, WalletProtocol } from '@bsv/sdk'
+import { POLLING_ENABLED } from '../utils/constants'
 
 /**
  * Summary of a group thread
@@ -80,7 +81,7 @@ const ThreadList = ({
    * Load all threads from overlay
    */
   const loadThreads = async () => {
-    console.log('[ThreadList] loadThreads called with protocolID:', protocolID, 'keyID:', keyID)
+    // console.log('[ThreadList] loadThreads called with protocolID:', protocolID, 'keyID:', keyID)
     try {
       // Use LookupResolver to query the overlay
       const resolver = new LookupResolver({
@@ -157,7 +158,9 @@ const ThreadList = ({
    */
   useEffect(() => {
     loadThreads()
-    pollingRef.current = setInterval(loadThreads, POLLING_INTERVAL_MS)
+    if (POLLING_ENABLED) {
+      pollingRef.current = setInterval(loadThreads, POLLING_INTERVAL_MS)
+    }
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current)
     }

@@ -34,11 +34,11 @@ export async function uploadEncryptedFile(
     // 1. Read file bytes
     const buffer = await file.arrayBuffer()
     let fileBytes = Array.from(new Uint8Array(buffer))
-    console.log('[Upload] File:', {
-      name: file.name,
-      size: fileBytes.length,
-      type: file.type
-    })
+    // console.log('[Upload] File:', {
+    //   name: file.name,
+    //   size: fileBytes.length,
+    //   type: file.type
+    // })
 
     // 2. Encrypt with CurvePoint
     const { encryptedMessage, header } = await curvePoint.encrypt(
@@ -47,17 +47,17 @@ export async function uploadEncryptedFile(
       keyID,
       recipients
     )
-    console.log('[Upload] Encryption complete:', {
-      headerLength: header.length,
-      encryptedLength: encryptedMessage.length,
-      headerPreview: header.slice(0, 16),
-      encryptedPreview: encryptedMessage.slice(0, 16),
-      recipients
-    })
+    // console.log('[Upload] Encryption complete:', {
+    //   headerLength: header.length,
+    //   encryptedLength: encryptedMessage.length,
+    //   headerPreview: header.slice(0, 16),
+    //   encryptedPreview: encryptedMessage.slice(0, 16),
+    //   recipients
+    // })
 
     // 3. Upload ciphertext
     const storageUploader = new StorageUploader({ storageURL: STORAGE_URL, wallet })
-    console.log('[Upload] Starting publishFile to', STORAGE_URL)
+    // console.log('[Upload] Starting publishFile to', STORAGE_URL)
 
     // ensure minimum file size to avoid UHRP-Lite rejection
     if (fileBytes.length < 1024) {
@@ -75,13 +75,13 @@ export async function uploadEncryptedFile(
       retentionPeriod
     })
 
-    console.log('[Upload] publishFile response:', uploaded)
+    // console.log('[Upload] publishFile response:', uploaded)
 
     if (!uploaded || !uploaded.uhrpURL) {
       throw new Error('[Upload] Failed: no uhrpURL in response')
     }
 
-    console.log('[Upload] Success! Handle:', uploaded.uhrpURL)
+    // console.log('[Upload] Success! Handle:', uploaded.uhrpURL)
 
     return {
       handle: uploaded.uhrpURL,
@@ -110,7 +110,7 @@ export async function downloadAndDecryptFile(
   const curvePoint = getCurvePoint(wallet)
   const downloader = new StorageDownloader({ networkPreset: 'mainnet' })
 
-  console.log('[Download] Resolving + downloading from UHRP:', uhrpUrl)
+  // console.log('[Download] Resolving + downloading from UHRP:', uhrpUrl)
 
   const result = await downloader.download(uhrpUrl)
   if (!result || !result.data) {

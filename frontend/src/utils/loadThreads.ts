@@ -19,7 +19,7 @@ export function loadThreads(
 ): ThreadSummary[] {
   const threadMap = new Map<string, MessagePayloadWithMetadata[]>()
 
-  console.log(`[Convo] Grouping ${messages.length} messages by thread`)
+  // console.log(`[Convo] Grouping ${messages.length} messages by thread`)
 
   // Group messages by threadId
   for (const msg of messages) {
@@ -44,7 +44,7 @@ export function loadThreads(
       messageCount: msgs.length
     })
 
-    console.log(`[Convo] Thread ${threadId}: ${msgs.length} messages. Latest: "${latest.content}"`)
+    // console.log(`[Convo] Thread ${threadId}: ${msgs.length} messages. Latest: "${latest.content}"`)
   }
 
   // Sort threads by latest message timestamp

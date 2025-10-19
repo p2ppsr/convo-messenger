@@ -24,6 +24,7 @@ export interface SendMessageOptions {
   topic?: string
   basket?: string
   threadName?: string
+  parentMessageId?: string
 }
 
 /**
@@ -48,7 +49,8 @@ export async function sendMessage({
   keyID = '1',                   // Default key slot
   topic = 'convo',               // Overlay topic tag
   basket = 'convo',              // Basket for wallet bookkeeping
-  threadName
+  threadName,
+  parentMessageId
 }: SendMessageOptions): Promise<string> {
   // Setup helpers
   const pushdrop = new PushDrop(client)
@@ -99,29 +101,29 @@ export async function sendMessage({
   }
 
   // Optional: Encrypt thread name if provided
-let threadNameHeader: number[] | undefined
-let threadNameCiphertext: number[] | undefined
+  let threadNameHeader: number[] | undefined
+  let threadNameCiphertext: number[] | undefined
 
-if (threadName) {
-  console.log('[Convo] Encrypting thread name...')
-  try {
-    ;({ header: threadNameHeader, encryptedPayload: threadNameCiphertext } =
-      await encryptMessage(
-        client,
-        { type: 'thread-name', content: threadName },
-        uniqueRecipients,
-        protocolID,
-        keyID
-      ))
+  if (threadName) {
+    console.log('[Convo] Encrypting thread name...')
+    try {
+      ;({ header: threadNameHeader, encryptedPayload: threadNameCiphertext } =
+        await encryptMessage(
+          client,
+          { type: 'thread-name', content: threadName },
+          uniqueRecipients,
+          protocolID,
+          keyID
+        ))
 
-    console.log('[Convo] Thread name encrypted successfully.')
-    console.log('[Convo] threadNameHeader length:', threadNameHeader.length)
-    console.log('[Convo] threadNameCiphertext length:', threadNameCiphertext.length)
-  } catch (err) {
-    console.error('[Convo] Failed to encrypt thread name:', err)
-    throw new Error('Failed to encrypt thread name.')
+      console.log('[Convo] Thread name encrypted successfully.')
+      console.log('[Convo] threadNameHeader length:', threadNameHeader.length)
+      console.log('[Convo] threadNameCiphertext length:', threadNameCiphertext.length)
+    } catch (err) {
+      console.error('[Convo] Failed to encrypt thread name:', err)
+      throw new Error('Failed to encrypt thread name.')
+    }
   }
-}
 
   // Timestamp and random unique ID for this message
   const timestamp = Date.now()
@@ -142,10 +144,15 @@ if (threadName) {
     Utils.toArray(uniqueID, 'utf8')                     // 7: per-message unique ID
   ]
 
+    if (parentMessageId) {
+    fields.push(Utils.toArray(parentMessageId, 'utf8')) // 8: parentMessageId
+    console.log(`[Convo] Appended parentMessageId: ${parentMessageId}`)
+  }
+
   // Optional thread name for group threads
   if (threadName && threadNameHeader && threadNameCiphertext) {
-    fields.push(threadNameHeader)        // 8: encrypted threadName header
-    fields.push(threadNameCiphertext)    // 9: encrypted threadName ciphertext
+    fields.push(threadNameHeader)        // 9: encrypted threadName header
+    fields.push(threadNameCiphertext)    // 10: encrypted threadName ciphertext
     console.log(`[Convo] Encrypted threadName included (${threadNameCiphertext.length} bytes)`)
   }
 

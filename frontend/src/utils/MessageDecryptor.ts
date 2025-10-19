@@ -6,7 +6,7 @@ import type { MessagePayload } from '../types/types'
 import type { DecodedMessage } from './decodeOutputs'
 
 import * as cp from './curvePointSingleton'
-console.log('curvePointSingleton exports:', cp)
+// console.log('curvePointSingleton exports:', cp)
 
 /**
  * decryptMessage
@@ -34,12 +34,12 @@ export async function decryptMessage(
   keyID: string
 ): Promise<(MessagePayload & { recipients?: string[] }) | null> {
   try {
-    console.log('\n[MessageDecryptor] --------------------------------------')
-    console.log('[MessageDecryptor] Decryption Attempt Starting')
-    console.log('[MessageDecryptor] Header length:', header.length)
-    console.log('[MessageDecryptor] Encrypted payload length:', encryptedPayload.length)
-    console.log('[MessageDecryptor] Protocol ID:', protocolID)
-    console.log('[MessageDecryptor] Key ID:', keyID)
+    // console.log('\n[MessageDecryptor] --------------------------------------')
+    // console.log('[MessageDecryptor] Decryption Attempt Starting')
+    // console.log('[MessageDecryptor] Header length:', header.length)
+    // console.log('[MessageDecryptor] Encrypted payload length:', encryptedPayload.length)
+    // console.log('[MessageDecryptor] Protocol ID:', protocolID)
+    // console.log('[MessageDecryptor] Key ID:', keyID)
 
     // --- Step 1: Initialize CurvePoint with wallet ---
     // CurvePoint manages key wrapping/unwrapping logic for recipients
@@ -47,12 +47,12 @@ export async function decryptMessage(
 
     // Combine header + encrypted payload into one ciphertext blob
     const ciphertext = [...header, ...encryptedPayload]
-    console.log('[MessageDecryptor] Total ciphertext length:', ciphertext.length)
-    console.log(
-      '[MessageDecryptor] Ciphertext (hex preview):',
-      Utils.toHex(ciphertext.slice(0, 32)),
-      '...'
-    )
+    // console.log('[MessageDecryptor] Total ciphertext length:', ciphertext.length)
+    // console.log(
+    //   '[MessageDecryptor] Ciphertext (hex preview):',
+    //   Utils.toHex(ciphertext.slice(0, 32)),
+    //   '...'
+    // )
 
     // --- Step 2: Attempt decryption ---
     // CurvePoint.decrypt() tries to unwrap the symmetric key for this wallet
@@ -74,7 +74,7 @@ export async function decryptMessage(
     const version = reader.readUInt32LE()
     const numRecipients = reader.readVarIntNum()
 
-    console.log('[MessageDecryptor] Header version:', version)
+    // console.log('[MessageDecryptor] Header version:', version)
 
     const recipients: string[] = []
 
@@ -87,9 +87,9 @@ export async function decryptMessage(
       const recipientKey = reader.read(33)
       const recipientHex = Utils.toHex(recipientKey)
 
-      console.log(`[MessageDecryptor] Recipient #${i}:`)
-      console.log(`  Raw Bytes:`, recipientKey)
-      console.log(`  Hex: ${recipientHex}`)
+      // console.log(`[MessageDecryptor] Recipient #${i}:`)
+      // console.log(`  Raw Bytes:`, recipientKey)
+      // console.log(`  Hex: ${recipientHex}`)
 
       recipients.push(recipientHex)
 
@@ -126,11 +126,11 @@ export async function decryptMessageBatch(
   protocolID: WalletProtocol,
   keyID: string
 ): Promise<Array<DecodedMessage & { payload: MessagePayload | null; recipients?: string[] }>> {
-  console.log('\n[MessageDecryptor] Starting batch decryption for', messages.length, 'messages')
+  // console.log('\n[MessageDecryptor] Starting batch decryption for', messages.length, 'messages')
 
   const results = await Promise.all(
     messages.map(async (msg, index) => {
-      console.log(`\n[MessageDecryptor] >>> Decrypting message #${index + 1} of ${messages.length}`)
+      // console.log(`\n[MessageDecryptor] >>> Decrypting message #${index + 1} of ${messages.length}`)
 
       const payload = await decryptMessage(
         wallet,
@@ -153,6 +153,6 @@ export async function decryptMessageBatch(
     })
   )
 
-  console.log('[MessageDecryptor] Batch decryption complete.')
+  // console.log('[MessageDecryptor] Batch decryption complete.')
   return results
 }

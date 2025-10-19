@@ -38,20 +38,23 @@ export async function checkMessages({
   const messages: any[] = []
   const reactions: any[] = []
 
-  console.log(`[Convo] Starting checkMessages with ${lookupResults.length} lookup results`)
-  console.log(`[Convo] Using protocolID: ${JSON.stringify(protocolID)} | keyID: ${keyID}`)
+  // console.log(`[checkMessages] ---------------------------------------------`)
+  // console.log(`[checkMessages] Starting with ${lookupResults.length} lookup results`)
+  // console.log(`[checkMessages] protocolID: ${JSON.stringify(protocolID)}, keyID: ${keyID}`)
 
   // Step 1: Decode outputs (from BEEF into structured envelope parts)
   const parsed = await decodeOutputs(lookupResults)
-  console.log(`[Convo] Decoded ${parsed.length} outputs successfully`)
+  // console.log(`[checkMessages] Decoded ${parsed.length} outputs successfully`)
 
   if (!parsed || parsed.length === 0) {
-    console.warn('[Convo] No valid decoded outputs found.')
+    console.warn('[checkMessages] No valid decoded outputs found.')
     return { messages: [], reactions: [] }
   }
 
   const reactionRecords = parsed.filter(p => p.type === 'reaction')
   const messageRecords = parsed.filter(p => !p.type || p.type === 'message')
+
+  // console.log(`[checkMessages] ${messageRecords.length} messages, ${reactionRecords.length} reactions found`)
 
   // Narrow to only entries that actually have header & encryptedPayload
   function hasEncFields(m: any): m is { header: number[]; encryptedPayload: number[] } {
@@ -65,10 +68,10 @@ export async function checkMessages({
       console.warn(`[Convo] Missing header/payload for ${msg.txid}:${msg.vout}; skipping.`)
       continue
     }
-      console.log(`[Convo] Attempting to decrypt tx ${msg.txid}, vout ${msg.vout}`)
-      console.log(`[Convo] From: ${msg.sender}, Thread: ${msg.threadId}, Timestamp: ${msg.createdAt}`)
-      console.log(`[Convo] Header:`, msg.header)
-      console.log(`[Convo] Encrypted Payload:`, msg.encryptedPayload)
+      // console.log(`[Convo] Attempting to decrypt tx ${msg.txid}, vout ${msg.vout}`)
+      // console.log(`[Convo] From: ${msg.sender}, Thread: ${msg.threadId}, Timestamp: ${msg.createdAt}`)
+      // console.log(`[Convo] Header:`, msg.header)
+      // console.log(`[Convo] Encrypted Payload:`, msg.encryptedPayload)
 
       // Call decryptMessage util (wraps CurvePoint.decrypt under the hood)
       const decrypted = await decryptMessage(
@@ -80,7 +83,7 @@ export async function checkMessages({
       )
 
       if (decrypted) {
-        console.log(`[Convo] Successfully decrypted message:`, decrypted)
+        //console.log(`[Convo] Successfully decrypted message:`, decrypted)
 
         // Push a normalized object into results
         messages.push({
@@ -91,17 +94,24 @@ export async function checkMessages({
           content: decrypted.content,
           mediaURL: decrypted.mediaURL,
           createdAt: msg.createdAt,
-          recipients: decrypted.recipients || []
+          recipients: decrypted.recipients || [],
+          threadName: msg.threadName || undefined,
+          uniqueID: msg.uniqueID || undefined,
+          parentMessageId: msg.parentMessageId || undefined
         })
 
-        console.log(`[Convo] Message from ${msg.sender} added to thread ${msg.threadId}`)
+        // console.log(`[checkMessages] Added message ${msg.txid}`)
+        // console.log(`     threadId=${msg.threadId}`)
+        // console.log(`     parentMessageId=${msg.parentMessageId || '(none)'}`)
+        // console.log(`     threadName=${msg.threadName || '(none)'}`)
+        // console.log(`     uniqueID=${msg.uniqueID || '(none)'}`)
       } else {
         // decryptMessage returned null = no matching key in header
-        console.warn(`[Convo] Decryption returned null for tx ${msg.txid}`)
+        console.warn(`[checkMessages] Decryption returned null for tx ${msg.txid}`)
       }
     } catch (err) {
       // If any error occurs (bad header, corrupt ciphertext, wrong key)
-      console.error(`[Convo] Failed to decrypt or parse message in tx ${msg.txid}:`, err)
+      console.error(`[checkMessages] Failed to decrypt or parse message in tx ${msg.txid}:`, err)
     }
   }
 
@@ -116,11 +126,12 @@ export async function checkMessages({
       reaction: r.reaction,
       sender: r.sender,
       createdAt: r.createdAt,
-      uniqueID: r.uniqueID
+      uniqueID: r.uniqueID,
+      parentMessageId: r.parentMessageId || undefined
     })
   }
 
-  console.log(`[Convo] Finished processing. Total decrypted messages: ${messages.length}`)
+  // console.log(`[checkMessages] Finished processing. Total decrypted messages: ${messages.length}`)
 
   return { messages, reactions }
 }

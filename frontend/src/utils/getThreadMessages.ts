@@ -13,13 +13,13 @@ export function getThreadMessages(
 ): MessagePayloadWithMetadata[] {
   const filtered = allMessages.filter(msg => msg.threadId === threadId)
 
-  console.log(`[Convo] Found ${filtered.length} messages for thread ${threadId}`)
+  // console.log(`[Convo] Found ${filtered.length} messages for thread ${threadId}`)
 
   const sorted = filtered.sort((a, b) => a.createdAt - b.createdAt)
 
-  for (const msg of sorted) {
-    console.log(`[Convo] [${new Date(msg.createdAt).toLocaleString()}] ${msg.sender}: ${msg.content}`)
-  }
+  // for (const msg of sorted) {
+  //   console.log(`[Convo] [${new Date(msg.createdAt).toLocaleString()}] ${msg.sender}: ${msg.content}`)
+  // }
 
   return sorted
 }

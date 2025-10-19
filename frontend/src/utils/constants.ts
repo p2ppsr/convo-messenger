@@ -35,7 +35,9 @@ const constants: ConvoConstants = {
   protocolID: [1, 'ConvoMessenger'],
   uhrpGateway: uhrpFromEnv ?? (isLocal
     ? 'http://localhost:3301'
-    : 'https://uhrp-lite.babbage.systems')
+    : 'https://uhrp-lite.babbage.systems'),
 }
+
+export const POLLING_ENABLED = true
 
 export default constants

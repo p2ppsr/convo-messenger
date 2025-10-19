@@ -40,28 +40,33 @@ export class ConvoLookupService implements LookupService {
       const marker = Utils.toUTF8(fields[0])
       const protocol = Utils.toUTF8(fields[1] ?? [])
 
-      // Handle message or reaction separately
+      // 🔹 Normal encrypted message
       if (marker === 'convo' && protocol === 'tmconvo') {
-        // 🔹 Normal message (same as before)
-        const [
-          _topicBuf,
-          _protocolBuf,
-          senderBuf,
-          threadIdBuf,
-          headerBuf,
-          payloadBuf,
-          timestampBuf,
-          uniqueIdBuf,
-          threadNameBuf
-        ] = fields
+        const sender = Utils.toHex(fields[2])
+        const threadId = Utils.toUTF8(fields[3])
+        const header = Array.from(fields[4])
+        const encryptedPayload = Array.from(fields[5])
+        const createdAt = fields[6] ? parseInt(Utils.toUTF8(fields[6])) : Date.now()
+        const uniqueId = fields[7] ? Utils.toUTF8(fields[7]) : undefined
 
-        const sender = Utils.toHex(senderBuf)
-        const threadId = Utils.toUTF8(threadIdBuf)
-        const header = Array.from(headerBuf)
-        const encryptedPayload = Array.from(payloadBuf)
-        const createdAt = timestampBuf ? parseInt(Utils.toUTF8(timestampBuf)) : Date.now()
-        const uniqueId = uniqueIdBuf ? Utils.toUTF8(uniqueIdBuf) : undefined
-        const threadName = threadNameBuf ? Utils.toUTF8(threadNameBuf) : undefined
+        // Optional parentMessageId (used for replies)
+        let parentMessageId: string | undefined
+        if (fields.length > 8) {
+          try {
+            const possibleParent = Utils.toUTF8(fields[8])
+            if (/^[0-9a-f]{64}$/i.test(possibleParent)) {
+              parentMessageId = possibleParent
+              console.log(`[ConvoLookupService] Parsed parentMessageId: ${parentMessageId}`)
+            }
+          } catch {}
+        }
+
+        // Optional plaintext thread name for group threads
+        let threadName: string | undefined
+        try {
+          const idx = parentMessageId ? 9 : 8
+          if (fields.length > idx) threadName = Utils.toUTF8(fields[idx])
+        } catch {}
 
         const record: EncryptedMessage = {
           txid,
@@ -72,15 +77,16 @@ export class ConvoLookupService implements LookupService {
           header,
           createdAt,
           ...(uniqueId ? { uniqueId } : {}),
-          ...(threadName ? { threadName } : {})
+          ...(threadName ? { threadName } : {}),
+          ...(parentMessageId ? { parentMessageId } : {})
         }
 
         console.log('[ConvoLookupService] Storing message record:', record)
         await this.storage.storeMessage(record)
       }
 
+      // Reaction record
       else if (marker === 'tmconvo_reaction') {
-        // Reaction record
         const threadId = Utils.toUTF8(fields[1])
         const messageTxid = Utils.toUTF8(fields[2])
         const messageVout = parseInt(Utils.toUTF8(fields[3]), 10)
@@ -89,7 +95,7 @@ export class ConvoLookupService implements LookupService {
         const createdAt = Date.now()
         const uniqueId = fields[7] ? Utils.toUTF8(fields[7]) : undefined
 
-        const record = {
+        const record: ReactionRecord = {
           txid,
           threadId,
           outputIndex,
@@ -98,21 +104,17 @@ export class ConvoLookupService implements LookupService {
           reaction,
           sender,
           createdAt,
-          ...(uniqueId ? { uniqueId } : {}),
+          ...(uniqueId ? { uniqueId } : {})
         }
 
         console.log('[ConvoLookupService] Storing reaction record:', record)
         await this.storage.storeReaction(record)
-      }
-
-      else {
+      } else {
         console.warn(`[ConvoLookupService] Ignoring non-convo output: marker=${marker}, protocol=${protocol}`)
       }
-
     } catch (err) {
       console.error('[ConvoLookupService] Failed to decode/store output:', err)
     }
-
   }
 
   async outputSpent(payload: OutputSpent): Promise<void> {
@@ -135,14 +137,9 @@ export class ConvoLookupService implements LookupService {
 
   async lookup(question: LookupQuestion): Promise<LookupFormula> {
     if (!question.query) throw new Error('Query required.')
-
-    if (question.service !== 'ls_convo') {
-      console.warn(`[ConvoLookupService] Unknown service: "${question.service}"`)
-      throw new Error('Unsupported lookup service.')
-    }
+    if (question.service !== 'ls_convo') throw new Error('Unsupported lookup service.')
 
     const query = question.query as any
-
     console.log(`[ConvoLookupService] Performing lookup with query type: "${query.type}"`, query)
 
     if (query.type === 'findByThreadId') {
@@ -150,42 +147,50 @@ export class ConvoLookupService implements LookupService {
         this.storage.getMessagesByThread(query.value.threadId),
         this.storage.getReactionsByThread(query.value.threadId)
       ])
-
-      console.log(
-        `[ConvoLookupService] Found ${messages.length} messages and ${reactions.length} reactions for threadId: ${query.value.threadId}`
-      )
-
-      // Combine both so frontend sees them together
       const all = [...messages, ...reactions]
       return this.formatAsLookupAnswers(all)
     }
 
-
     if (query.type === 'getMessage') {
       const message = await this.storage.getMessageByTxid(query.value.txid)
-      console.log(`[ConvoLookupService] Found message for txid: ${query.value.txid}`, message)
       return message ? this.formatAsLookupAnswers([message]) : []
     }
 
     if (query.type === 'findAll') {
       const messages = await this.storage.findAllMessages()
-      console.log(`[ConvoLookupService] Returning all ${messages.length} stored messages`)
       return this.formatAsLookupAnswers(messages)
     }
 
-    console.warn('[ConvoLookupService] Unsupported query type:', query)
-    throw new Error('Unknown or unsupported query type.')
+    // Lookup replies for a given parent message
+    if (query.type === 'findRepliesByParent') {
+      const parentId = query.value.parentMessageId
+
+      // Fetch reply messages
+      const replies = await this.storage.getRepliesByParent(parentId)
+      console.log(`[ConvoLookupService] Found ${replies.length} replies for parent: ${parentId}`)
+
+      // Get all reply txids
+      const replyTxids = replies.map(r => r.txid)
+
+      // Fetch reactions that target any of those replies
+      let reactions: ReactionRecord[] = []
+      if (replyTxids.length > 0) {
+        reactions = await this.storage.getReactionsByMessages(replyTxids)
+        console.log(`[ConvoLookupService] Found ${reactions.length} reactions for replies under parent: ${parentId}`)
+      }
+
+      // Combine and return
+      const all = [...replies, ...reactions]
+      return this.formatAsLookupAnswers(all)
+    }
+    throw new Error(`Unsupported query type: "${query.type}"`)
   }
 
   private formatAsLookupAnswers(messages: (EncryptedMessage | ReactionRecord)[]): LookupFormula {
-    console.log(`[ConvoLookupService] Formatting ${messages.length} message(s) into LookupFormula`)
     return messages.map(msg => ({
       txid: msg.txid,
       outputIndex: msg.outputIndex,
-      context: [
-        ...[], // placeholder for future metadata
-        ...Utils.toArray(msg.createdAt.toString(), 'utf8')
-      ]
+      context: Utils.toArray(msg.createdAt.toString(), 'utf8')
     }))
   }
 

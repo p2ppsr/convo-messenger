@@ -57,14 +57,14 @@ export async function createThread({
   const threadSeed = allParticipants.join('|') + '|' + Date.now()
   const threadId = Utils.toHex(Hash.sha256(Utils.toArray(threadSeed, 'utf8')))
 
-  console.log('[Convo] Creating new thread:')
-  console.log('  ID:', threadId)
-  console.log('  Participants:', allParticipants)
-  console.log('  Thread name:', threadName)
+  // console.log('[Convo] Creating new thread:')
+  // console.log('  ID:', threadId)
+  // console.log('  Participants:', allParticipants)
+  // console.log('  Thread name:', threadName)
 
   // --- Step 3: Send initial "thread-init" message ---
   // This is a system message to anchor the new thread in the overlay.
-  // ⚠️ NOTE: Currently only recipientPublicKeys (not allParticipants)
+  // NOTE: Currently only recipientPublicKeys (not allParticipants)
   // are included in the `recipients` array sent to sendMessage().
   // This is likely why new participants sometimes can’t decrypt:
   // if their key isn’t added here, it won’t be included in the header.
@@ -74,11 +74,11 @@ export async function createThread({
     protocolID,
     keyID,
     senderPublicKey,
-    recipients: recipientPublicKeys, // 🔴 should probably include sender too
+    recipients: recipientPublicKeys,
     content: `🟢 Thread started: ${threadName}`,
     threadName
   })
 
-  console.log('[Convo] Thread created successfully.')
+  // console.log('[Convo] Thread created successfully.')
   return threadId
 }
