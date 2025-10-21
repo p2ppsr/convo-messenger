@@ -10,7 +10,8 @@ import {
   Paper,
   CircularProgress,
   IconButton,
-  Popover
+  Popover,
+  Dialog
 } from '@mui/material'
 import FileUpload from './FileUpload'
 import type { WalletClient, WalletProtocol } from '@bsv/sdk'
@@ -19,6 +20,7 @@ import { sendReaction } from '../utils/sendReaction'
 import AddReactionIcon from '@mui/icons-material/AddReaction'
 import EmojiPicker from './EmojiPicker'
 import { POLLING_ENABLED } from '../utils/constants'
+import { useGesture } from '@use-gesture/react'
 
 interface ThreadPanelProps {
   open: boolean
@@ -30,6 +32,8 @@ interface ThreadPanelProps {
   senderPublicKey: string
   recipientPublicKeys: string[]
   threadName?: string
+  nameMap?: Map<string, string>
+  setNameMap?: React.Dispatch<React.SetStateAction<Map<string, string>>>
 }
 
 function normalizeSender(sender: string): string {
@@ -55,12 +59,13 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
   keyID,
   senderPublicKey,
   recipientPublicKeys,
-  threadName
+  threadName,
+  nameMap = new Map(),
+  setNameMap = () => {}
 }) => {
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
   const [newMessage, setNewMessage] = useState('')
   const [loading, setLoading] = useState(true)
-  const [nameMap, setNameMap] = useState<Map<string, string>>(new Map())
   const [currentRecipients, setCurrentRecipients] = useState<string[]>(recipientPublicKeys)
   const [reactions, setReactions] = useState<Record<string, { reaction: string; sender: string }[]>>({})
   const [emojiAnchor, setEmojiAnchor] = useState<null | HTMLElement>(null)
@@ -69,118 +74,128 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
   const [downloadingFile, setDownloadingFile] = useState<string | null>(null)
   const [imagePreviews, setImagePreviews] = useState<Record<string, string>>({})
   const [sending, setSending] = useState(false)
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [openImage, setOpenImage] = useState<string | null>(null)
+  const [openImageFilename, setOpenImageFilename] = useState<string | null>(null)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
 
   // ============================= LOAD REPLIES =============================
   useEffect(() => {
-    if (!parentMessage) {
-      console.warn('[ThreadPanel] ⚠️ No parentMessage provided. Skipping fetchReplies.')
-      return
-    }
+  if (!parentMessage) {
+    console.warn('[ThreadPanel] ⚠️ No parentMessage provided. Skipping fetchReplies.')
+    return
+  }
 
-    let interval: NodeJS.Timeout | undefined
-    console.log(`[ThreadPanel] ▼ useEffect triggered for parentMessage.txid = ${parentMessage.txid}`)
-    console.log('Client:', client)
-    console.log('ProtocolID:', protocolID)
-    console.log('KeyID:', keyID)
-    console.log('Polling enabled:', POLLING_ENABLED)
+  let interval: NodeJS.Timeout | undefined
+  console.log(`[ThreadPanel] ▼ useEffect triggered for parentMessage.txid = ${parentMessage.txid}`)
+  console.log('Client:', client)
+  console.log('ProtocolID:', protocolID)
+  console.log('KeyID:', keyID)
+  console.log('Polling enabled:', POLLING_ENABLED)
 
-    setLoading(true)
+  setLoading(true)
 
-    const fetchReplies = async () => {
-      console.log(`[ThreadPanel] ▶ FetchReplies start for parentMessageId: ${parentMessage.txid}`)
-      try {
-        const result = await loadReplies({
-          client,
-          protocolID,
-          keyID,
-          parentMessageId: parentMessage.txid
-        })
+  const fetchReplies = async () => {
+    console.log(`[ThreadPanel] ▶ FetchReplies start for parentMessageId: ${parentMessage.txid}`)
+    try {
+      const result = await loadReplies({
+        client,
+        protocolID,
+        keyID,
+        parentMessageId: parentMessage.txid
+      })
 
-        console.log('[ThreadPanel] loadReplies() returned:', {
-          messageCount: result.messages?.length ?? 0,
-          reactionGroups: Object.keys(result.reactions ?? {}).length,
-          nameMapEntries: result.nameMap?.size ?? 0
-        })
+      console.log('[ThreadPanel] loadReplies() returned:', {
+        messageCount: result.messages?.length ?? 0,
+        reactionGroups: Object.keys(result.reactions ?? {}).length,
+        nameMapEntries: result.nameMap?.size ?? 0
+      })
 
-        if (!result || !('messages' in result)) {
-          throw new Error('Invalid loadReplies result structure')
-        }
+      if (!result || !('messages' in result)) {
+        throw new Error('Invalid loadReplies result structure')
+      }
 
-        const {
-          messages: loadedMessages,
-          reactions: loadedReactions,
-          nameMap: resolvedNames
-        } = result
+      const {
+        messages: loadedMessages,
+        reactions: loadedReactions,
+        nameMap: resolvedNames
+      } = result
 
-        // --- Inspect first few replies ---
-        if (loadedMessages.length) {
-          console.log('[ThreadPanel] Loaded messages preview:')
-          loadedMessages.slice(0, 5).forEach((m, i) => {
-            console.log(`  Reply[${i}]`, {
-              txid: m.txid,
-              parentMessageId: m.parentMessageId,
-              threadId: m.threadId,
-              sender: m.sender,
-              contentPreview: m.content?.slice?.(0, 60)
-            })
+      // --- Inspect first few replies ---
+      if (loadedMessages.length) {
+        console.log('[ThreadPanel] Loaded messages preview:')
+        loadedMessages.slice(0, 5).forEach((m, i) => {
+          console.log(`  Reply[${i}]`, {
+            txid: m.txid,
+            parentMessageId: m.parentMessageId,
+            threadId: m.threadId,
+            sender: m.sender,
+            contentPreview: m.content?.slice?.(0, 60)
           })
-        } else {
-          console.warn('[ThreadPanel] No replies returned by loadReplies.')
-        }
-
-        // --- Shallow diff check ---
-        setMessages((prev) => {
-          if (prev.length !== loadedMessages.length) {
-            console.log(`[ThreadPanel] Message count changed: ${prev.length} → ${loadedMessages.length}`)
-            return loadedMessages
-          }
-          const changed = prev.some((m, i) => m.txid !== loadedMessages[i]?.txid)
-          if (changed) console.log('[ThreadPanel] Message order or IDs changed. Updating state.')
-          else console.log('[ThreadPanel] No message diff detected. Skipping update.')
-          return changed ? loadedMessages : prev
         })
+      } else {
+        console.warn('[ThreadPanel] No replies returned by loadReplies.')
+      }
 
-        setReactions(loadedReactions)
-        setNameMap(resolvedNames)
-
-        // --- Auto-restore recipients ---
-        if (loadedMessages.length > 0) {
-          const latest = loadedMessages[loadedMessages.length - 1]
-          if (latest.recipients?.length) {
-            console.log('[ThreadPanel] 👥 Restoring recipients from latest message:', latest.recipients)
-            setCurrentRecipients(latest.recipients)
-          } else {
-            console.log('[ThreadPanel] No recipients found in latest message.')
-          }
+      // --- Shallow diff check ---
+      setMessages((prev) => {
+        if (prev.length !== loadedMessages.length) {
+          console.log(`[ThreadPanel] Message count changed: ${prev.length} → ${loadedMessages.length}`)
+          return loadedMessages
         }
-      } catch (err) {
-        console.error('[ThreadPanel] Failed to load replies:', err)
-      } finally {
-        setLoading(false)
-        scrollToBottom()
-        console.log('[ThreadPanel] fetchReplies complete. Scrolled to bottom.')
+        const changed = prev.some((m, i) => m.txid !== loadedMessages[i]?.txid)
+        if (changed) console.log('[ThreadPanel] Message order or IDs changed. Updating state.')
+        else console.log('[ThreadPanel] No message diff detected. Skipping update.')
+        return changed ? loadedMessages : prev
+      })
+
+      setReactions(loadedReactions)
+
+      // --- Merge resolved names into existing nameMap (don’t overwrite) ---
+      setNameMap((prev) => {
+        const merged = new Map(prev)
+        for (const [k, v] of resolvedNames.entries()) merged.set(k, v)
+        return merged
+      })
+
+      // --- Auto-restore recipients ---
+      if (loadedMessages.length > 0) {
+        const latest = loadedMessages[loadedMessages.length - 1]
+        if (latest.recipients?.length) {
+          console.log('[ThreadPanel] 👥 Restoring recipients from latest message:', latest.recipients)
+          setCurrentRecipients(latest.recipients)
+        } else {
+          console.log('[ThreadPanel] No recipients found in latest message.')
+        }
       }
+    } catch (err) {
+      console.error('[ThreadPanel] Failed to load replies:', err)
+    } finally {
+      setLoading(false)
+      scrollToBottom()
+      console.log('[ThreadPanel] fetchReplies complete. Scrolled to bottom.')
     }
+  }
 
-    // --- Initial load ---
-    fetchReplies()
+  // --- Initial load ---
+  fetchReplies()
 
-    // --- Polling (if enabled) ---
-    if (POLLING_ENABLED) {
-      console.log('[ThreadPanel] Starting polling interval (5000ms)')
-      interval = setInterval(fetchReplies, 5000)
+  // --- Polling (if enabled) ---
+  if (POLLING_ENABLED) {
+    console.log('[ThreadPanel] Starting polling interval (5000ms)')
+    interval = setInterval(fetchReplies, 5000)
+  }
+
+  return () => {
+    if (interval) {
+      clearInterval(interval)
+      console.log('[ThreadPanel] Cleared polling interval on unmount.')
     }
+  }
+}, [parentMessage?.txid, client, protocolID, keyID])
 
-    return () => {
-      if (interval) {
-        clearInterval(interval)
-        console.log('[ThreadPanel] Cleared polling interval on unmount.')
-      }
-    }
-  }, [parentMessage?.txid, client, protocolID, keyID])
 
   // ============================= FILE PREVIEWS =============================
   useEffect(() => {
@@ -193,31 +208,41 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
           continue
         }
 
-        if (parsed?.type !== 'file' || imagePreviews[parsed.handle]) continue
+        // ---- Support both single files and bundles ----
+        const filesToProcess =
+          parsed?.type === 'file'
+            ? [parsed]
+            : parsed?.type === 'bundle' && Array.isArray(parsed.files)
+            ? parsed.files
+            : []
 
-        try {
-          const blob = await downloadAndDecryptFile(
-            client,
-            protocolID,
-            keyID,
-            parsed.handle,
-            parsed.header,
-            parsed.mimetype
-          )
+        for (const file of filesToProcess) {
+          if (!file?.handle || imagePreviews[file.handle]) continue
 
-          if (parsed.mimetype.startsWith('image/') || parsed.mimetype === 'application/pdf') {
-            const url = URL.createObjectURL(blob)
-            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: url }))
-          } else if (parsed.mimetype.startsWith('text/')) {
-            const text = await blob.text()
-            const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
-            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: snippet }))
-          } else {
-            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: null }))
+          try {
+            const blob = await downloadAndDecryptFile(
+              client,
+              protocolID,
+              keyID,
+              file.handle,
+              file.header,
+              file.mimetype
+            )
+
+            if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+              const url = URL.createObjectURL(blob)
+              setImagePreviews((prev) => ({ ...prev, [file.handle]: url }))
+            } else if (file.mimetype.startsWith('text/')) {
+              const text = await blob.text()
+              const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
+              setImagePreviews((prev) => ({ ...prev, [file.handle]: snippet }))
+            } else {
+              setImagePreviews((prev) => ({ ...prev, [file.handle]: null }))
+            }
+          } catch (err) {
+            console.warn('[Chat] Failed to load preview for', file.filename, err)
+            setImagePreviews((prev) => ({ ...prev, [file.handle]: 'EXPIRED' }))
           }
-        } catch (err) {
-          console.warn('[Chat] Failed to auto-load file preview:', err)
-          setImagePreviews((prev) => ({ ...prev, [parsed.handle]: 'EXPIRED' }))
         }
       }
     }
@@ -225,13 +250,137 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
     if (messages.length > 0) loadFilePreviews()
   }, [messages])
 
+  // ============================= PARENT MESSAGE PREVIEWS =============================
+  useEffect(() => {
+    if (!parentMessage) return
+
+    const loadParentPreviews = async () => {
+      let parsed: any
+      try {
+        parsed = JSON.parse(parentMessage.content)
+      } catch {
+        return
+      }
+
+      const filesToProcess =
+        parsed?.type === 'file'
+          ? [parsed]
+          : parsed?.type === 'bundle' && Array.isArray(parsed.files)
+          ? parsed.files
+          : []
+
+      for (const file of filesToProcess) {
+        if (!file?.handle || imagePreviews[file.handle]) continue
+
+        try {
+          const blob = await downloadAndDecryptFile(
+            client,
+            protocolID,
+            keyID,
+            file.handle,
+            file.header,
+            file.mimetype
+          )
+
+          if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+            const url = URL.createObjectURL(blob)
+            setImagePreviews((prev) => ({ ...prev, [file.handle]: url }))
+          } else if (file.mimetype.startsWith('text/')) {
+            const text = await blob.text()
+            const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
+            setImagePreviews((prev) => ({ ...prev, [file.handle]: snippet }))
+          } else {
+            setImagePreviews((prev) => ({ ...prev, [file.handle]: null }))
+          }
+        } catch (err) {
+          console.warn('[ThreadPanel] Failed to load parent preview for', file.filename, err)
+          setImagePreviews((prev) => ({ ...prev, [file.handle]: 'EXPIRED' }))
+        }
+      }
+    }
+
+    loadParentPreviews()
+  }, [parentMessage, client, protocolID, keyID])
+
+  // Ensure parent sender is inserted once parentMessage becomes available
+useEffect(() => {
+  if (parentMessage?.sender) {
+    const normalized = normalizeSender(parentMessage.sender as string)
+    setNameMap(prev => {
+      if (!prev.has(normalized)) {
+        const updated = new Map(prev)
+        updated.set(normalized, normalized.slice(0, 10) + '…')
+        console.log('[ThreadPanel] Added parent sender to nameMap after mount.')
+        return updated
+      }
+      return prev
+    })
+  }
+}, [parentMessage?.sender])
+
+
+  // Fullscreen image viewer with gallery support
+  const [openGallery, setOpenGallery] = useState<{
+    images: { url: string; filename: string }[]
+    index: number
+  } | null>(null)
+
+  useEffect(() => {
+    if (openGallery && document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur()
+    }
+  }, [openGallery])
+
+  const bindGallerySwipe = useGesture({
+    onDragEnd: ({ swipe: [swipeX] }) => {
+      if (!openGallery || openGallery.images.length <= 1) return
+      if (swipeX === 1) {
+        // Swipe right → previous
+        setOpenGallery(prev =>
+          prev
+            ? { ...prev, index: (prev.index - 1 + prev.images.length) % prev.images.length }
+            : null
+        )
+      } else if (swipeX === -1) {
+        // Swipe left → next
+        setOpenGallery(prev =>
+          prev
+            ? { ...prev, index: (prev.index + 1) % prev.images.length }
+            : null
+        )
+      }
+    }
+  })
+
   // ============================= MESSAGE SEND =============================
   const handleSend = async () => {
-    if (!newMessage.trim() || sending) return
+    // Don't send if nothing to send or already sending
+    if ((!newMessage.trim() && pendingFiles.length === 0) || sending) return
     setSending(true)
-    const content = newMessage.trim()
 
     try {
+      const fileMessages = []
+
+      // Upload all pending images first
+      for (const file of pendingFiles) {
+        const { handle, header, filename, mimetype } = await uploadEncryptedFile(
+          client,
+          protocolID,
+          keyID,
+          currentRecipients,
+          file
+        )
+        fileMessages.push({ type: 'file', handle, header, filename, mimetype })
+      }
+
+      // Create combined message payload
+      const payload = {
+        type: 'bundle',
+        text: newMessage.trim(),
+        files: fileMessages
+      }
+
+      // Send single unified message (text + attachments)
       await sendMessage({
         client,
         protocolID,
@@ -239,14 +388,16 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
         threadId: parentMessage.threadId,
         senderPublicKey,
         recipients: currentRecipients,
-        content,
+        content: JSON.stringify(payload),
         threadName,
         parentMessageId: parentMessage.txid
       })
+
+      // Add it to local UI immediately
       setMessages((prev) => [
         ...prev,
         {
-          content,
+          content: JSON.stringify(payload),
           sender: senderPublicKey,
           createdAt: Date.now(),
           txid: 'temp',
@@ -254,10 +405,14 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
           threadId: parentMessage.threadId
         }
       ])
+
+      // Reset inputs
       setNewMessage('')
+      setPendingFiles([])
       scrollToBottom()
     } catch (err) {
-      console.error('[Chat] Failed to send message:', err)
+      console.error('[ThreadPanel] Failed to send combined message:', err)
+      alert('⚠️ Failed to send message.')
     } finally {
       setSending(false)
     }
@@ -440,7 +595,11 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
             {(() => {
               const parentNormalized = normalizeSender(parentMessage.sender as string)
               const parentDisplaySender =
-                nameMap.get(parentNormalized) || parentNormalized.slice(0, 10) + '...'
+                nameMap.get(parentNormalized) ??
+                (parentMessage.sender === senderPublicKey
+                  ? 'You'
+                  : parentNormalized.slice(0, 10) + '...'
+                )
 
               return (
                 <Box
@@ -455,9 +614,180 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
                   <Typography variant="subtitle2" color="text.secondary">
                     Original Message
                   </Typography>
-                  <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', mt: 0.5 }}>
-                    {parentMessage.content}
-                  </Typography>
+
+                  {(() => {
+                    let parsed: any
+                    try {
+                      parsed = JSON.parse(parentMessage.content)
+                    } catch {
+                      parsed = null
+                    }
+
+                    if (parsed && parsed.type === 'bundle') {
+                      return (
+                        <>
+                          {parsed.text && (
+                            <Typography
+                              variant="body1"
+                              sx={{ whiteSpace: 'pre-wrap', mt: 0.5 }}
+                            >
+                              {parsed.text}
+                            </Typography>
+                          )}
+
+                          {parsed.files?.length > 0 && (
+                            <Box
+                              sx={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                gap: 1,
+                                mt: 1
+                              }}
+                            >
+                              {parsed.files.map((f: any, i: number) => {
+                                const preview = imagePreviews[f.handle]
+                                const isImage = f.mimetype?.startsWith('image/')
+                                return (
+                                  <Box
+                                    key={i}
+                                    sx={{
+                                      p: 1,
+                                      borderRadius: '8px',
+                                      backgroundColor: 'rgba(255,255,255,0.08)',
+                                      display: 'flex',
+                                      flexDirection: 'column',
+                                      alignItems: 'center',
+                                      width: '160px'
+                                    }}
+                                  >
+                                    <Typography
+                                      variant="body2"
+                                      sx={{ color: '#ccc', mb: 0.5, textAlign: 'center' }}
+                                    >
+                                      📎 {f.filename}
+                                    </Typography>
+
+                                    {preview && isImage ? (
+                                      <img
+                                        src={preview}
+                                        alt={f.filename}
+                                        style={{
+                                          maxWidth: '140px',
+                                          maxHeight: '120px',
+                                          borderRadius: '6px',
+                                          objectFit: 'cover',
+                                          cursor: 'pointer'
+                                        }}
+                                        onClick={() =>
+                                          setOpenGallery({
+                                            images: parsed.files
+                                              .filter((file: any) =>
+                                                file.mimetype?.startsWith('image/')
+                                              )
+                                              .map((file: any) => ({
+                                                url: imagePreviews[file.handle],
+                                                filename: file.filename
+                                              }))
+                                              .filter((img: any) => img.url),
+                                            index: i
+                                          })
+                                        }
+                                      />
+                                    ) : (
+                                      <Typography color="text.secondary" fontSize="0.8rem">
+                                        (No preview)
+                                      </Typography>
+                                    )}
+
+                                    {imagePreviews[f.handle] !== 'EXPIRED' && (
+                                      <Button
+                                        size="small"
+                                        variant="outlined"
+                                        sx={{ mt: 1 }}
+                                        onClick={() =>
+                                          handleFileDownload(
+                                            f.handle,
+                                            f.header,
+                                            f.filename,
+                                            f.mimetype
+                                          )
+                                        }
+                                      >
+                                        Download
+                                      </Button>
+                                    )}
+                                  </Box>
+                                )
+                              })}
+                            </Box>
+                          )}
+                        </>
+                      )
+                    } else if (parsed && parsed.type === 'file') {
+                      const preview = imagePreviews[parsed.handle]
+                      const isImage = parsed.mimetype?.startsWith('image/')
+                      return (
+                        <>
+                          <Typography variant="body2" sx={{ mt: 0.5 }}>
+                            📎 {parsed.filename}
+                          </Typography>
+                          {isImage && preview && (
+                            <img
+                              src={preview}
+                              alt={parsed.filename}
+                              style={{
+                                maxWidth: '240px',
+                                borderRadius: '8px',
+                                marginTop: '8px',
+                                cursor: 'pointer'
+                              }}
+                              onClick={() =>
+                                setOpenGallery({
+                                  images: [{ url: preview, filename: parsed.filename }],
+                                  index: 0
+                                })
+                              }
+                            />
+                          )}
+                          {parsed.mimetype === 'application/pdf' && preview && (
+                            <Box mt={1}>
+                              <embed
+                                src={preview}
+                                type="application/pdf"
+                                width="240px"
+                                height="240px"
+                              />
+                            </Box>
+                          )}
+                          {preview === 'EXPIRED' && (
+                            <Typography color="error">File no longer hosted.</Typography>
+                          )}
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            sx={{ mt: 1 }}
+                            onClick={() =>
+                              handleFileDownload(
+                                parsed.handle,
+                                parsed.header,
+                                parsed.filename,
+                                parsed.mimetype
+                              )
+                            }
+                          >
+                            Download
+                          </Button>
+                        </>
+                      )
+                    } else {
+                      return (
+                        <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', mt: 0.5 }}>
+                          {parentMessage.content}
+                        </Typography>
+                      )
+                    }
+                  })()}
+
                   <Typography
                     variant="caption"
                     color="text.secondary"
@@ -475,6 +805,7 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
                   </Typography>
                 </Box>
               )
+
             })()}
 
             {/* --- Replies list --- */}
@@ -510,7 +841,115 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
                     }}
                   >
                     {/* File / Text Content */}
-                    {parsed && parsed.type === 'file' ? (
+                    {parsed && parsed.type === 'bundle' ? (
+                      <>
+                        {/* Text content */}
+                        {parsed.text && (
+                          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', mb: 1 }}>
+                            {parsed.text}
+                          </Typography>
+                        )}
+                    
+                        {/* Image/file previews */}
+                        {parsed.files?.length > 0 && (
+                          <Box
+                            sx={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: 1,
+                              alignItems: 'flex-start'
+                            }}
+                          >
+                            {parsed.files.map((f: any, i: number) => {
+                              const preview = imagePreviews[f.handle]
+                    
+                              // --- File container
+                              return (
+                                <Box
+                                  key={i}
+                                  sx={{
+                                    p: 1,
+                                    borderRadius: '8px',
+                                    backgroundColor: 'rgba(255,255,255,0.05)',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignItems: 'center',
+                                    maxWidth: '160px'
+                                  }}
+                                >
+                                  <Typography
+                                    variant="body2"
+                                    sx={{ color: '#ccc', mb: 0.5, textAlign: 'center' }}
+                                  >
+                                    📎 {f.filename}
+                                  </Typography>
+                    
+                                  {/* Image preview */}
+                                  {preview && f.mimetype.startsWith('image/') ? (
+                                    <img
+                                      src={preview}
+                                      alt={f.filename}
+                                      style={{
+                                        maxWidth: '140px',
+                                        maxHeight: '120px',
+                                        borderRadius: '6px',
+                                        objectFit: 'cover',
+                                        cursor: 'pointer',
+                                        transition: 'transform 0.2s ease'
+                                      }}
+                                      onClick={() => {
+                                        // Gather all image files in this message bundle for navigation
+                                        const imagesInMessage =
+                                          parsed?.type === 'bundle'
+                                            ? parsed.files
+                                                .filter((f: any) => f.mimetype.startsWith('image/') && imagePreviews[f.handle])
+                                                .map((f: any) => ({
+                                                  url: imagePreviews[f.handle],
+                                                  filename: f.filename
+                                                }))
+                                            : parsed?.type === 'file' && parsed.mimetype.startsWith('image/')
+                                            ? [{ url: imagePreviews[parsed.handle], filename: parsed.filename }]
+                                            : []
+
+                                        const currentIndex =
+                                          imagesInMessage.findIndex((img: any) => img.url === imagePreviews[f.handle]) ?? 0
+
+                                        setOpenGallery({ images: imagesInMessage, index: currentIndex })
+                                      }}
+                                      onMouseOver={(e) => {       
+                                        e.currentTarget.style.transform = 'scale(1.02)'
+                                      }}
+                                      onMouseOut={(e) => {
+                                        e.currentTarget.style.transform = 'scale(1.0)'
+                                      }}
+                                    />
+                                  ) : (
+                                    <Typography color="text.secondary" fontSize="0.8rem">
+                                      (No preview)
+                                    </Typography>
+                                  )}
+                    
+                                  {/* Download button */}
+                                  {imagePreviews[f.handle] !== 'EXPIRED' && (
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      sx={{ mt: 0.5 }}
+                                      onClick={() =>
+                                        handleFileDownload(f.handle, f.header, f.filename, f.mimetype)
+                                      }
+                                      disabled={downloadingFile === f.handle}
+                                    >
+                                      {downloadingFile === f.handle ? 'Downloading…' : 'Download'}
+                                    </Button>
+                                  )}
+                                </Box>
+                              )
+                            })}
+                          </Box>
+                        )}
+                      </>
+                    ) : parsed && parsed.type === 'file' ? (
                       <>
                         <Typography variant="body2">📎 {parsed.filename}</Typography>
                         {(() => {
@@ -527,7 +966,22 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
                                 style={{
                                   maxWidth: '240px',
                                   borderRadius: '8px',
-                                  marginTop: '8px'
+                                  marginTop: '8px',
+                                  cursor: 'pointer',
+                                  transition: 'transform 0.2s ease'
+                                }}
+                                onClick={() => {
+                                  // Open single image in gallery format
+                                  setOpenGallery({
+                                    images: [{ url: preview, filename: parsed.filename }],
+                                    index: 0
+                                  })
+                                }}
+                                onMouseOver={(e) => {
+                                  e.currentTarget.style.transform = 'scale(1.02)'
+                                }}
+                                onMouseOut={(e) => {
+                                  e.currentTarget.style.transform = 'scale(1.0)'
                                 }}
                               />
                             )
@@ -687,6 +1141,49 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
       <div ref={chatEndRef} />
 
       {/* Input + actions */}
+      {pendingFiles.length > 0 && (
+        <Box
+          sx={{
+            mb: 1,
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 1,
+            backgroundColor: 'rgba(255,255,255,0.05)',
+            borderRadius: '12px',
+            p: 1
+          }}
+        >
+          {pendingFiles.map((file, i) => (
+            <Box key={i} position="relative">
+              <img
+                src={URL.createObjectURL(file)}
+                alt={`Preview ${i}`}
+                style={{
+                  maxHeight: '80px',
+                  borderRadius: '8px'
+                }}
+              />
+              <IconButton
+                size="small"
+                color="error"
+                onClick={() =>
+                  setPendingFiles((prev) => prev.filter((_, idx) => idx !== i))
+                }
+                sx={{
+                  position: 'absolute',
+                  top: 0,
+                  right: 0,
+                  backgroundColor: 'rgba(0,0,0,0.4)',
+                  '&:hover': { backgroundColor: 'rgba(0,0,0,0.7)' }
+                }}
+              >
+                ✕
+              </IconButton>
+            </Box>
+          ))}
+        </Box>
+      )}
+
       <Box
         display="flex"
         gap={1}
@@ -701,11 +1198,34 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
           minRows={1}
           maxRows={4}
           fullWidth
-          placeholder="Write a reply..."
+          placeholder={uploading ? 'Uploading file...' : 'Write a reply...'}
           value={newMessage}
           onChange={(e) => setNewMessage(e.target.value)}
           onKeyDown={handleKeyPress}
+          onPaste={(e) => {
+            const items = e.clipboardData?.items
+            if (!items) return
+
+            for (const item of items) {
+              if (item.type.startsWith('image/')) {
+                e.preventDefault()
+                const file = item.getAsFile()
+                if (file) {
+                  // ➤ Add pasted image(s) to pendingFiles state for preview & batch upload
+                  setPendingFiles((prev) => [...prev, file])
+                }
+              }
+            }
+          }}
+          slotProps={{
+            input: {
+              endAdornment: uploading ? (
+                <CircularProgress size={18} sx={{ color: 'text.secondary', mr: 1 }} />
+              ) : null
+            }
+          }}
         />
+
         <Button
           variant="contained"
           color="primary"
@@ -727,6 +1247,162 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
       >
         <EmojiPicker onSelect={handleSelectEmoji} />
       </Popover>
+      {/* Fullscreen Image Viewer */}
+      <Dialog
+        open={!!openImage}
+        onClose={() => setOpenImage(null)}
+        fullWidth
+        maxWidth="xl"
+        PaperProps={{
+          sx: {
+            backgroundColor: 'rgba(0,0,0,0.9)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            p: 0
+          }
+        }}
+      >
+        {openImage && (
+          <Box sx={{ position: 'relative', width: '100%', textAlign: 'center' }}>
+            <img
+              src={openImage}
+              alt={openImageFilename || ''}
+              style={{
+                maxWidth: '100%',
+                maxHeight: '90vh',
+                objectFit: 'contain'
+              }}
+            />
+            <Typography
+              variant="caption"
+              sx={{
+                color: 'white',
+                position: 'absolute',
+                bottom: 8,
+                right: 16,
+                opacity: 0.7
+              }}
+            >
+              {openImageFilename}
+            </Typography>
+          </Box>
+        )}
+      </Dialog>
+
+      {/* Fullscreen Image Gallery Viewer */}
+      <Dialog
+        open={!!openGallery}
+        onClose={() => setOpenGallery(null)}
+        fullWidth
+        maxWidth="xl"
+        PaperProps={{
+          sx: {
+            backgroundColor: 'rgba(0,0,0,0.95)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            p: 0,
+            overflow: 'hidden'
+          }
+        }}
+      >
+        {openGallery && (
+          <Box
+            {...bindGallerySwipe()}
+            sx={{
+              width: '100%',
+              height: '100%',
+              position: 'relative',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              touchAction: 'pan-y' // allow horizontal swipes
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowLeft') {
+                setOpenGallery(prev =>
+                  prev
+                    ? { ...prev, index: (prev.index - 1 + prev.images.length) % prev.images.length }
+                    : null
+                )
+              } else if (e.key === 'ArrowRight') {
+                setOpenGallery(prev =>
+                  prev ? { ...prev, index: (prev.index + 1) % prev.images.length } : null
+                )
+              }
+            }}
+            tabIndex={0}
+          >
+            {/* Image display */}
+            <img
+              src={openGallery.images[openGallery.index].url}
+              alt={openGallery.images[openGallery.index].filename}
+              style={{
+                maxWidth: '100%',
+                maxHeight: '90vh',
+                objectFit: 'contain',
+                borderRadius: '8px'
+              }}
+            />
+
+            {/* Left/Right controls */}
+            {openGallery.images.length > 1 && (
+              <>
+                <IconButton
+                  onClick={() =>
+                    setOpenGallery((prev) =>
+                      prev
+                        ? { ...prev, index: (prev.index - 1 + prev.images.length) % prev.images.length }
+                        : null
+                    )
+                  }
+                  sx={{
+                    position: 'absolute',
+                    left: 16,
+                    color: 'white',
+                    backgroundColor: 'rgba(0,0,0,0.4)',
+                    '&:hover': { backgroundColor: 'rgba(0,0,0,0.6)' }
+                  }}
+                >
+                  ◀
+                </IconButton>
+                <IconButton
+                  onClick={() =>
+                    setOpenGallery((prev) =>
+                      prev ? { ...prev, index: (prev.index + 1) % prev.images.length } : null
+                    )
+                  }
+                  sx={{
+                    position: 'absolute',
+                    right: 16,
+                    color: 'white',
+                    backgroundColor: 'rgba(0,0,0,0.4)',
+                    '&:hover': { backgroundColor: 'rgba(0,0,0,0.6)' }
+                  }}
+                >
+                  ▶
+                </IconButton>
+              </>
+            )}
+
+            {/* Filename */}
+            <Typography
+              variant="caption"
+              sx={{
+                position: 'absolute',
+                bottom: 8,
+                right: 16,
+                color: 'white',
+                opacity: 0.7
+              }}
+            >
+              {openGallery.images[openGallery.index].filename}
+            </Typography>
+          </Box>
+        )}
+      </Dialog>
+
     </Box>
   )
 }

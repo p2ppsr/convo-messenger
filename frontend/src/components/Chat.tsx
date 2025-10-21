@@ -27,6 +27,7 @@ import EmojiPicker from './EmojiPicker'
 import { POLLING_ENABLED } from '../utils/constants'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useIsMobile } from '../utils/useIsMobile'
+import { useGesture } from '@use-gesture/react'
 
 interface ChatProps {
   client: WalletClient
@@ -80,6 +81,10 @@ export const Chat: React.FC<ChatProps> = ({
   const [threadOpen, setThreadOpen] = useState(false)
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({})
   const [latestReplyTimes, setLatestReplyTimes] = useState<Record<string, number>>({})
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [openImage, setOpenImage] = useState<string | null>(null)
+  const [openImageFilename, setOpenImageFilename] = useState<string | null>(null)
+
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -150,35 +155,108 @@ export const Chat: React.FC<ChatProps> = ({
           continue
         }
 
-        if (parsed?.type !== 'file' || imagePreviews[parsed.handle]) continue
+        // ---- Support both single files and bundles ----
+        const filesToProcess =
+          parsed?.type === 'file'
+            ? [parsed]
+            : parsed?.type === 'bundle' && Array.isArray(parsed.files)
+            ? parsed.files
+            : []
 
-        try {
-          const blob = await downloadAndDecryptFile(client, protocolID, keyID, parsed.handle, parsed.header, parsed.mimetype)
-          if (parsed.mimetype.startsWith('image/') || parsed.mimetype === 'application/pdf') {
-            const url = URL.createObjectURL(blob)
-            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: url }))
-          } else if (parsed.mimetype.startsWith('text/')) {
-            const text = await blob.text()
-            const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
-            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: snippet }))
-          } else {
-            setImagePreviews((prev) => ({ ...prev, [parsed.handle]: null }))
+        for (const file of filesToProcess) {
+          if (!file?.handle || imagePreviews[file.handle]) continue
+
+          try {
+            const blob = await downloadAndDecryptFile(
+              client,
+              protocolID,
+              keyID,
+              file.handle,
+              file.header,
+              file.mimetype
+            )
+
+            if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+              const url = URL.createObjectURL(blob)
+              setImagePreviews((prev) => ({ ...prev, [file.handle]: url }))
+            } else if (file.mimetype.startsWith('text/')) {
+              const text = await blob.text()
+              const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
+              setImagePreviews((prev) => ({ ...prev, [file.handle]: snippet }))
+            } else {
+              setImagePreviews((prev) => ({ ...prev, [file.handle]: null }))
+            }
+          } catch (err) {
+            console.warn('[Chat] Failed to load preview for', file.filename, err)
+            setImagePreviews((prev) => ({ ...prev, [file.handle]: 'EXPIRED' }))
           }
-        } catch (err) {
-          console.warn('[Chat] Failed to auto-load file preview:', err)
-          setImagePreviews((prev) => ({ ...prev, [parsed.handle]: 'EXPIRED' }))
         }
       }
     }
+
     if (messages.length > 0) loadFilePreviews()
   }, [messages])
 
+  // Fullscreen image viewer with gallery support
+  const [openGallery, setOpenGallery] = useState<{
+    images: { url: string; filename: string }[]
+    index: number
+  } | null>(null)
+
+    useEffect(() => {
+    if (openGallery && document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur()
+    }
+  }, [openGallery])
+
+  const bindGallerySwipe = useGesture({
+    onDragEnd: ({ swipe: [swipeX] }) => {
+      if (!openGallery || openGallery.images.length <= 1) return
+      if (swipeX === 1) {
+        // Swipe right → previous
+        setOpenGallery(prev =>
+          prev
+            ? { ...prev, index: (prev.index - 1 + prev.images.length) % prev.images.length }
+            : null
+        )
+      } else if (swipeX === -1) {
+        // Swipe left → next
+        setOpenGallery(prev =>
+          prev
+            ? { ...prev, index: (prev.index + 1) % prev.images.length }
+            : null
+        )
+      }
+    }
+  })
+
   // Message send
   const handleSend = async () => {
-    if (!newMessage.trim() || sending) return
+    if ((!newMessage.trim() && pendingFiles.length === 0) || sending) return
     setSending(true)
-    const content = newMessage.trim()
+
     try {
+      const fileMessages = []
+
+      // Upload all pending files first
+      for (const file of pendingFiles) {
+        const { handle, header, filename, mimetype } = await uploadEncryptedFile(
+          client,
+          protocolID,
+          keyID,
+          currentRecipients,
+          file
+        )
+        fileMessages.push({ type: 'file', handle, header, filename, mimetype })
+      }
+
+      // Prepare main message object
+      const payload = {
+        type: 'bundle',
+        text: newMessage.trim(),
+        files: fileMessages
+      }
+
       await sendMessage({
         client,
         protocolID,
@@ -186,17 +264,27 @@ export const Chat: React.FC<ChatProps> = ({
         threadId,
         senderPublicKey,
         recipients: currentRecipients,
-        content,
+        content: JSON.stringify(payload),
         threadName
       })
+
       setMessages((prev) => [
         ...prev,
-        { content, sender: senderPublicKey, createdAt: Date.now(), txid: 'temp', vout: 0, threadId }
+        {
+          content: JSON.stringify(payload),
+          sender: senderPublicKey,
+          createdAt: Date.now(),
+          txid: 'temp',
+          vout: 0,
+          threadId
+        }
       ])
+
       setNewMessage('')
+      setPendingFiles([])
       scrollToBottom()
     } catch (err) {
-      console.error('[Chat] Failed to send message:', err)
+      console.error('[Chat] Failed to send combined message:', err)
     } finally {
       setSending(false)
     }
@@ -373,14 +461,148 @@ export const Chat: React.FC<ChatProps> = ({
                 backgroundColor: 'black', color: 'white'
               }}>
                 {/* File / Text Content */}
-                {parsed && parsed.type === 'file' ? (
+                {parsed && parsed.type === 'bundle' ? (
+                    <>
+                      {/* Text content */}
+                      {parsed.text && (
+                        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', mb: 1 }}>
+                          {parsed.text}
+                        </Typography>
+                      )}
+
+                      {/* Image/file previews */}
+                      {parsed.files?.length > 0 && (
+                        <Box
+                          sx={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: 1,
+                            alignItems: 'flex-start'
+                          }}
+                        >
+                          {parsed.files.map((f: any, i: number) => {
+                            const preview = imagePreviews[f.handle]
+
+                            // --- File container
+                            return (
+                              <Box
+                                key={i}
+                                sx={{
+                                  p: 1,
+                                  borderRadius: '8px',
+                                  backgroundColor: 'rgba(255,255,255,0.05)',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  alignItems: 'center',
+                                  maxWidth: '160px'
+                                }}
+                              >
+                                <Typography
+                                  variant="body2"
+                                  sx={{ color: '#ccc', mb: 0.5, textAlign: 'center' }}
+                                >
+                                  📎 {f.filename}
+                                </Typography>
+
+                                {/* Image preview */}
+                                {preview && f.mimetype.startsWith('image/') ? (
+                                  <img
+                                  src={preview}
+                                  alt={f.filename}
+                                  style={{
+                                    maxWidth: '140px',
+                                    maxHeight: '120px',
+                                    borderRadius: '6px',
+                                    objectFit: 'cover',
+                                    cursor: 'pointer',
+                                    transition: 'transform 0.2s ease'
+                                  }}
+                                  onClick={() => {
+                                        // Gather all image files in this message bundle for navigation
+                                        const imagesInMessage =
+                                          parsed?.type === 'bundle'
+                                            ? parsed.files
+                                                .filter((f: any) => f.mimetype.startsWith('image/') && imagePreviews[f.handle])
+                                                .map((f: any) => ({
+                                                  url: imagePreviews[f.handle],
+                                                  filename: f.filename
+                                                }))
+                                            : parsed?.type === 'file' && parsed.mimetype.startsWith('image/')
+                                            ? [{ url: imagePreviews[parsed.handle], filename: parsed.filename }]
+                                            : []
+
+                                        const currentIndex =
+                                          imagesInMessage.findIndex((img: any) => img.url === imagePreviews[f.handle]) ?? 0
+
+                                        setOpenGallery({ images: imagesInMessage, index: currentIndex })
+                                      }}
+                                      onMouseOver={(e) => {       
+                                        e.currentTarget.style.transform = 'scale(1.02)'
+                                      }}
+                                      onMouseOut={(e) => {
+                                        e.currentTarget.style.transform = 'scale(1.0)'
+                                      }}
+                                    />
+                                  ) : (
+                                  <Typography color="text.secondary" fontSize="0.8rem">
+                                    (No preview)
+                                  </Typography>
+                                )}
+
+                                {/* Download button */}
+                                {imagePreviews[f.handle] !== 'EXPIRED' && (
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    sx={{ mt: 0.5 }}
+                                    onClick={() =>
+                                      handleFileDownload(f.handle, f.header, f.filename, f.mimetype)
+                                    }
+                                    disabled={downloadingFile === f.handle}
+                                  >
+                                    {downloadingFile === f.handle ? 'Downloading…' : 'Download'}
+                                  </Button>
+                                )}
+                              </Box>
+                            )
+                          })}
+                        </Box>
+                      )}
+                    </>
+                  ) : parsed && parsed.type === 'file' ? (
+
                   <>
                     <Typography variant="body2">📎 {parsed.filename}</Typography>
                     {(() => {
                       const preview = imagePreviews[parsed.handle]
                       if (preview === 'EXPIRED') return <Typography color="error">File no longer hosted.</Typography>
                       if (parsed.mimetype.startsWith('image/') && preview)
-                        return <img src={preview} alt={parsed.filename} style={{ maxWidth: '240px', borderRadius: '8px', marginTop: '8px' }} />
+                        return (
+                          <img
+                            src={preview}
+                            alt={parsed.filename}
+                            style={{
+                              maxWidth: '240px',
+                              borderRadius: '8px',
+                              marginTop: '8px',
+                              cursor: 'pointer',
+                              transition: 'transform 0.2s ease'
+                            }}
+                            onClick={() => {
+                              // Open single image in gallery format
+                              setOpenGallery({
+                                images: [{ url: preview, filename: parsed.filename }],
+                                index: 0
+                              })
+                            }}
+                            onMouseOver={(e) => {
+                              e.currentTarget.style.transform = 'scale(1.02)'
+                            }}
+                            onMouseOut={(e) => {
+                              e.currentTarget.style.transform = 'scale(1.0)'
+                            }}
+                          />
+                        )
                       if (parsed.mimetype === 'application/pdf' && preview)
                         return <Box mt={1}><embed src={preview} type="application/pdf" width="240px" height="240px" /></Box>
                       if (parsed.mimetype.startsWith('text/') && typeof preview === 'string')
@@ -515,9 +737,83 @@ export const Chat: React.FC<ChatProps> = ({
       </Box>
 
       {/* Input + actions */}
+      {pendingFiles.length > 0 && (
+        <Box
+          sx={{
+            mb: 1,
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 1,
+            backgroundColor: 'rgba(255,255,255,0.05)',
+            borderRadius: '12px',
+            p: 1
+          }}
+        >
+          {pendingFiles.map((file, i) => (
+            <Box key={i} position="relative">
+              <img
+                src={URL.createObjectURL(file)}
+                alt={`Preview ${i}`}
+                style={{
+                  maxHeight: '80px',
+                  borderRadius: '8px'
+                }}
+              />
+              <IconButton
+                size="small"
+                color="error"
+                onClick={() =>
+                  setPendingFiles((prev) => prev.filter((_, idx) => idx !== i))
+                }
+                sx={{
+                  position: 'absolute',
+                  top: 0,
+                  right: 0,
+                  backgroundColor: 'rgba(0,0,0,0.4)',
+                  '&:hover': { backgroundColor: 'rgba(0,0,0,0.7)' }
+                }}
+              >
+                ✕
+              </IconButton>
+            </Box>
+          ))}
+        </Box>
+      )}
+
       <Box display="flex" gap={1}>
-        <TextField multiline minRows={1} maxRows={4} fullWidth placeholder="Type a message..."
-          value={newMessage} onChange={(e) => setNewMessage(e.target.value)} onKeyDown={handleKeyPress} />
+        <TextField
+          multiline
+          minRows={1}
+          maxRows={4}
+          fullWidth
+          placeholder={uploading ? 'Uploading file...' : 'Write a message...'}
+          value={newMessage}
+          onChange={(e) => setNewMessage(e.target.value)}
+          onKeyDown={handleKeyPress}
+          onPaste={(e) => {
+            const items = e.clipboardData?.items
+            if (!items) return
+
+            for (const item of items) {
+              if (item.type.startsWith('image/')) {
+                e.preventDefault()
+                const file = item.getAsFile()
+                if (file) {
+                  // ➤ Add pasted image(s) to pendingFiles state for preview & batch upload
+                  setPendingFiles((prev) => [...prev, file])
+                }
+              }
+            }
+          }}
+          slotProps={{
+            input: {
+              endAdornment: uploading ? (
+                <CircularProgress size={18} sx={{ color: 'text.secondary', mr: 1 }} />
+              ) : null
+            }
+          }}
+        />
+
         <Button variant="contained" color="primary" disabled={!newMessage.trim() || sending} onClick={handleSend}>
           {sending ? 'Sending...' : 'Send'}
         </Button>
@@ -578,6 +874,8 @@ export const Chat: React.FC<ChatProps> = ({
                 senderPublicKey={senderPublicKey}
                 threadName={threadName}
                 recipientPublicKeys={currentRecipients}
+                nameMap={nameMap}
+                setNameMap={setNameMap}
               />
             </motion.div>
           ) : (
@@ -612,11 +910,169 @@ export const Chat: React.FC<ChatProps> = ({
                 senderPublicKey={senderPublicKey}
                 threadName={threadName}
                 recipientPublicKeys={currentRecipients}
+                nameMap={nameMap}
+                setNameMap={setNameMap}
               />
             </motion.div>
           )
         )}
       </AnimatePresence>
+      {/* Fullscreen Image Viewer */}
+      <Dialog
+        open={!!openImage}
+        onClose={() => setOpenImage(null)}
+        fullWidth
+        maxWidth="xl"
+        PaperProps={{
+          sx: {
+            backgroundColor: 'rgba(0,0,0,0.9)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            p: 0
+          }
+        }}
+      >
+        {openImage && (
+          <Box sx={{ position: 'relative', width: '100%', textAlign: 'center' }}>
+            <img
+              src={openImage}
+              alt={openImageFilename || ''}
+              style={{
+                maxWidth: '100%',
+                maxHeight: '90vh',
+                objectFit: 'contain'
+              }}
+            />
+            <Typography
+              variant="caption"
+              sx={{
+                color: 'white',
+                position: 'absolute',
+                bottom: 8,
+                right: 16,
+                opacity: 0.7
+              }}
+            >
+              {openImageFilename}
+            </Typography>
+          </Box>
+        )}
+      </Dialog>
+
+      {/* Fullscreen Image Gallery Viewer */}
+      <Dialog
+        open={!!openGallery}
+        onClose={() => setOpenGallery(null)}
+        fullWidth
+        maxWidth="xl"
+        PaperProps={{
+          sx: {
+            backgroundColor: 'rgba(0,0,0,0.95)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            p: 0,
+            overflow: 'hidden'
+          }
+        }}
+      >
+        {openGallery && (
+          <Box
+            {...bindGallerySwipe()}
+            sx={{
+              width: '100%',
+              height: '100%',
+              position: 'relative',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              touchAction: 'pan-y' // allow horizontal swipes
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowLeft') {
+                setOpenGallery(prev =>
+                  prev
+                    ? { ...prev, index: (prev.index - 1 + prev.images.length) % prev.images.length }
+                    : null
+                )
+              } else if (e.key === 'ArrowRight') {
+                setOpenGallery(prev =>
+                  prev ? { ...prev, index: (prev.index + 1) % prev.images.length } : null
+                )
+              }
+            }}
+            tabIndex={0}
+          >
+            {/* Image display */}
+            <img
+              src={openGallery.images[openGallery.index].url}
+              alt={openGallery.images[openGallery.index].filename}
+              style={{
+                maxWidth: '100%',
+                maxHeight: '90vh',
+                objectFit: 'contain',
+                borderRadius: '8px'
+              }}
+            />
+
+            {/* Left/Right controls */}
+            {openGallery.images.length > 1 && (
+              <>
+                <IconButton
+                  onClick={() =>
+                    setOpenGallery((prev) =>
+                      prev
+                        ? { ...prev, index: (prev.index - 1 + prev.images.length) % prev.images.length }
+                        : null
+                    )
+                  }
+                  sx={{
+                    position: 'absolute',
+                    left: 16,
+                    color: 'white',
+                    backgroundColor: 'rgba(0,0,0,0.4)',
+                    '&:hover': { backgroundColor: 'rgba(0,0,0,0.6)' }
+                  }}
+                >
+                  ◀
+                </IconButton>
+                <IconButton
+                  onClick={() =>
+                    setOpenGallery((prev) =>
+                      prev ? { ...prev, index: (prev.index + 1) % prev.images.length } : null
+                    )
+                  }
+                  sx={{
+                    position: 'absolute',
+                    right: 16,
+                    color: 'white',
+                    backgroundColor: 'rgba(0,0,0,0.4)',
+                    '&:hover': { backgroundColor: 'rgba(0,0,0,0.6)' }
+                  }}
+                >
+                  ▶
+                </IconButton>
+              </>
+            )}
+
+            {/* Filename */}
+            <Typography
+              variant="caption"
+              sx={{
+                position: 'absolute',
+                bottom: 8,
+                right: 16,
+                color: 'white',
+                opacity: 0.7
+              }}
+            >
+              {openGallery.images[openGallery.index].filename}
+            </Typography>
+          </Box>
+        )}
+      </Dialog>
+
     </Box>
   )
 }

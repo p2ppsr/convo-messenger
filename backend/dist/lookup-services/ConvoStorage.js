@@ -11,8 +11,10 @@ export class ConvoStorage {
         this.messages = db.collection("convoMessages");
         this.reactions = db.collection("convoReactions");
         this.logs = db.collection("convoChangeLogs");
+        // --- Indexes ---
         this.threads.createIndex({ threadId: 1 }, { unique: true });
         this.messages.createIndex({ threadId: 1 });
+        this.messages.createIndex({ parentMessageId: 1 });
         this.reactions.createIndex({ threadId: 1 });
         this.logs.createIndex({ threadId: 1 });
     }
@@ -31,13 +33,19 @@ export class ConvoStorage {
     }
     // ========== MESSAGES ==========
     async storeMessage(message) {
-        await this.messages.insertOne(message);
+        await this.messages.insertOne({
+            ...message,
+            parentMessageId: message.parentMessageId || undefined
+        });
     }
     async getMessagesByThread(threadId) {
         return await this.messages.find({ threadId }).sort({ createdAt: 1 }).toArray();
     }
     async getMessageByTxid(txid) {
         return await this.messages.findOne({ txid });
+    }
+    async getRepliesByParent(parentMessageId) {
+        return await this.messages.find({ parentMessageId }).sort({ createdAt: 1 }).toArray();
     }
     // ========== REACTIONS ==========
     async storeReaction(reaction) {
@@ -67,5 +75,13 @@ export class ConvoStorage {
         await this.threads.deleteOne({ threadId });
         await this.messages.deleteMany({ threadId });
         await this.logs.deleteMany({ threadId });
+    }
+    async getReactionsByMessages(txids) {
+        if (txids.length === 0)
+            return [];
+        return await this.reactions
+            .find({ messageTxid: { $in: txids } })
+            .sort({ createdAt: 1 })
+            .toArray();
     }
 }
