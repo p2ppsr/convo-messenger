@@ -7,7 +7,8 @@ import {
 } from '@bsv/sdk'
 import { getCurvePoint } from './curvePointSingleton'
 
-const STORAGE_URL = 'https://uhrp-lite.babbage.systems'
+// const STORAGE_URL = 'https://uhrp-lite.babbage.systems'
+const STORAGE_URL = 'https://nanostore.babbage.systems'
 const GATEWAY_URL = 'https://uhrp.babbage.systems' // only used to build a friendly downloadURL
 const retentionPeriodMinutes = 60 * 24 * 7 // 7 days
 
@@ -127,3 +128,54 @@ export async function downloadAndDecryptFile(
 
   return new Blob([Uint8Array.from(decryptedBytes)], { type: mimetype })
 }
+
+/**
+ * Looks up expiry information for a hosted file.
+ */
+export async function getFileExpiry(
+  wallet: WalletInterface,
+  uhrpUrl: string
+): Promise<{ expiryTime?: number; expiresInMs?: number } | null> {
+  try {
+    const storageUploader = new StorageUploader({
+      storageURL: STORAGE_URL,
+      wallet
+    })
+
+    // @ts-ignore - method exists at runtime
+    const result = await storageUploader.findFile(uhrpUrl)
+
+    if (result?.expiryTime) {
+      const expiresInMs = Math.max(0, result.expiryTime * 1000 - Date.now())
+      return { expiryTime: result.expiryTime, expiresInMs }
+    }
+
+    return null
+  } catch (err) {
+    console.warn('[fileEncryptor] Failed to get file expiry:', err)
+    return null
+  }
+}
+
+/**
+ * Renews a hosted file for additional minutes.
+ */
+export async function renewFileHosting(
+  wallet: WalletInterface,
+  uhrpUrl: string,
+  additionalMinutes: number
+): Promise<any> {
+  try {
+    const storageUploader = new StorageUploader({
+      storageURL: STORAGE_URL,
+      wallet
+    })
+    // @ts-ignore - method exists at runtime
+    const result = await storageUploader.renewFile(uhrpUrl, additionalMinutes)
+    return result
+  } catch (err) {
+    console.error('[fileEncryptor] Failed to renew file:', err)
+    throw err
+  }
+}
+

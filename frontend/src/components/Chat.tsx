@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { loadMessages } from '../utils/loadMessages'
 import { sendMessage } from '../utils/sendMessage'
-import { uploadEncryptedFile, downloadAndDecryptFile } from '../utils/fileEncryptor'
+import { uploadEncryptedFile, downloadAndDecryptFile, getFileExpiry, renewFileHosting } from '../utils/fileEncryptor'
 import { IdentitySearchField } from '@bsv/identity-react'
 import {
   Dialog,
@@ -84,7 +84,11 @@ export const Chat: React.FC<ChatProps> = ({
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [openImage, setOpenImage] = useState<string | null>(null)
   const [openImageFilename, setOpenImageFilename] = useState<string | null>(null)
-
+  const [reactingMsg, setReactingMsg] = useState<string | null>(null)
+  const [fileExpirations, setFileExpirations] = useState<
+  Record<string, { text: string; expiryTime: number }>
+    >({})
+  const [renewingFile, setRenewingFile] = useState<string | null>(null)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -164,31 +168,61 @@ export const Chat: React.FC<ChatProps> = ({
             : []
 
         for (const file of filesToProcess) {
-          if (!file?.handle || imagePreviews[file.handle]) continue
+          if (!file?.handle) continue
 
           try {
-            const blob = await downloadAndDecryptFile(
-              client,
-              protocolID,
-              keyID,
-              file.handle,
-              file.header,
-              file.mimetype
-            )
+            // --- Fetch expiry info first ---
+            try {
+              const info = await getFileExpiry(client, file.handle)
+              const expires =
+                typeof info?.expiresInMs === 'number' && info.expiresInMs > 0
+                  ? info.expiresInMs
+                  : undefined
+              if (expires !== undefined) {
+                const hrs = Math.floor(expires / 3600000)
+                const mins = Math.floor((expires % 3600000) / 60000)
+                setFileExpirations(prev => ({
+                  ...prev,
+                  [file.handle]: {
+                    text: `${hrs}h ${mins}m remaining`,
+                    expiryTime: Date.now() + expires
+                  }
+                }))
+              }
+            } catch (err) {
+              console.warn('[Chat] Could not get expiry for', file.filename, err)
+            }
 
-            if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
-              const url = URL.createObjectURL(blob)
-              setImagePreviews((prev) => ({ ...prev, [file.handle]: url }))
-            } else if (file.mimetype.startsWith('text/')) {
-              const text = await blob.text()
-              const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
-              setImagePreviews((prev) => ({ ...prev, [file.handle]: snippet }))
-            } else {
-              setImagePreviews((prev) => ({ ...prev, [file.handle]: null }))
+            // --- Skip preview if already loaded ---
+            if (imagePreviews[file.handle]) continue
+
+            // --- Download & decrypt preview ---
+            try {
+              const blob = await downloadAndDecryptFile(
+                client,
+                protocolID,
+                keyID,
+                file.handle,
+                file.header,
+                file.mimetype
+              )
+
+              if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+                const url = URL.createObjectURL(blob)
+                setImagePreviews(prev => ({ ...prev, [file.handle]: url }))
+              } else if (file.mimetype.startsWith('text/')) {
+                const text = await blob.text()
+                const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
+                setImagePreviews(prev => ({ ...prev, [file.handle]: snippet }))
+              } else {
+                setImagePreviews(prev => ({ ...prev, [file.handle]: null }))
+              }
+            } catch (err) {
+              console.warn('[Chat] Failed to load preview for', file.filename, err)
+              setImagePreviews(prev => ({ ...prev, [file.handle]: 'EXPIRED' }))
             }
           } catch (err) {
-            console.warn('[Chat] Failed to load preview for', file.filename, err)
-            setImagePreviews((prev) => ({ ...prev, [file.handle]: 'EXPIRED' }))
+            console.error('[Chat] Unexpected error in file loop:', err)
           }
         }
       }
@@ -229,6 +263,33 @@ export const Chat: React.FC<ChatProps> = ({
       }
     }
   })
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setFileExpirations(prev => {
+        const updated: typeof prev = {}
+        const now = Date.now()
+
+        for (const [handle, data] of Object.entries(prev)) {
+          const remaining = data.expiryTime - now
+          if (remaining <= 0) {
+            updated[handle] = { text: 'Expired', expiryTime: data.expiryTime }
+          } else {
+            const hrs = Math.floor(remaining / 3600000)
+            const mins = Math.floor((remaining % 3600000) / 60000)
+            updated[handle] = {
+              text: `${hrs}h ${mins}m remaining`,
+              expiryTime: data.expiryTime
+            }
+          }
+        }
+
+        return updated
+      })
+    }, 60000)
+
+    return () => clearInterval(timer)
+  }, [])
 
   // Message send
   const handleSend = async () => {
@@ -323,6 +384,8 @@ export const Chat: React.FC<ChatProps> = ({
   // Reactions
   const handleReact = async (msg: MessagePayloadWithMetadata, emoji: string) => {
     try {
+      const key = `${msg.txid}:${msg.vout}`
+      setReactingMsg(key)
       await sendReaction({
         client,
         senderPublicKey,
@@ -331,7 +394,6 @@ export const Chat: React.FC<ChatProps> = ({
         messageTxid: msg.txid,
         messageVout: msg.vout
       })
-      const key = `${msg.txid}:${msg.vout}`
       setReactions((prev) => {
         const existing = prev[key] || []
         const updated = [...existing, { reaction: emoji, sender: senderPublicKey }]
@@ -339,6 +401,8 @@ export const Chat: React.FC<ChatProps> = ({
       })
     } catch (err) {
       console.error('[Chat] Failed to send reaction:', err)
+    } finally {
+      setReactingMsg(null)
     }
   }
 
@@ -348,8 +412,8 @@ export const Chat: React.FC<ChatProps> = ({
   }
   const handleClosePicker = () => { setEmojiAnchor(null); setTargetMessage(null) }
   const handleSelectEmoji = async (emoji: string) => {
-    if (targetMessage) await handleReact(targetMessage, emoji)
     handleClosePicker()
+    if (targetMessage) await handleReact(targetMessage, emoji)
   }
 
   // Replies
@@ -413,6 +477,40 @@ export const Chat: React.FC<ChatProps> = ({
       alert(message)
     } finally {
       setDownloadingFile(null)
+    }
+  }
+
+  const handleRenewFile = async (uhrpUrl: string) => {
+    setRenewingFile(uhrpUrl)
+    try {
+      const result = await renewFileHosting(client, uhrpUrl, 1440 * 7) // 7 days
+      if (result?.status === 'success') {
+        // Optionally use Snackbar later
+        alert('File renewed successfully!')
+
+        // Refresh expiry time from server
+        const updated = await getFileExpiry(client, uhrpUrl)
+        const expires = updated?.expiresInMs
+        if (typeof expires === 'number' && expires > 0) {
+          const hrs = Math.floor(expires / 3600000)
+          const mins = Math.floor((expires % 3600000) / 60000)
+
+          setFileExpirations(prev => ({
+            ...prev,
+            [uhrpUrl]: {
+              text: `${hrs}h ${mins}m remaining`,
+              expiryTime: Date.now() + expires
+            }
+          }))
+        }
+      } else {
+        alert('⚠️ File renewal failed.')
+      }
+    } catch (err) {
+      console.error('[ThreadPanel] Renew failed:', err)
+      alert('❌ Error renewing file.')
+    } finally {
+      setRenewingFile(null)
     }
   }
 
@@ -545,7 +643,7 @@ export const Chat: React.FC<ChatProps> = ({
                                     />
                                   ) : (
                                   <Typography color="text.secondary" fontSize="0.8rem">
-                                    (No preview)
+                                    (Loading preview)
                                   </Typography>
                                 )}
 
@@ -563,6 +661,25 @@ export const Chat: React.FC<ChatProps> = ({
                                     {downloadingFile === f.handle ? 'Downloading…' : 'Download'}
                                   </Button>
                                 )}
+                                {fileExpirations[f.handle]?.text && (
+                                  <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                                    ⏳ {fileExpirations[f.handle].text}
+                                  </Typography>
+                                )}
+                                <Button
+                                  size="small"
+                                  variant="text"
+                                  color="secondary"
+                                  sx={{ mt: 0.3, minWidth: 80 }}
+                                  onClick={() => handleRenewFile(f.handle)}
+                                  disabled={renewingFile === f.handle}
+                                >
+                                  {renewingFile === f.handle ? (
+                                    <CircularProgress size={14} color="secondary" />
+                                  ) : (
+                                    'Renew'
+                                  )}
+                                </Button>
                               </Box>
                             )
                           })}
@@ -623,6 +740,25 @@ export const Chat: React.FC<ChatProps> = ({
                         {downloadingFile === parsed.handle ? 'Downloading…' : 'Download'}
                       </Button>
                     )}
+                    {fileExpirations[parsed.handle]?.text && (
+                      <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                        ⏳ {fileExpirations[parsed.handle].text}
+                      </Typography>
+                    )}
+                    <Button
+                      size="small"
+                      variant="text"
+                      color="secondary"
+                      sx={{ mt: 0.3, minWidth: 80 }}
+                      onClick={() => handleRenewFile(parsed.handle)}
+                      disabled={renewingFile === parsed.handle}
+                    >
+                      {renewingFile === parsed.handle ? (
+                        <CircularProgress size={14} color="secondary" />
+                      ) : (
+                        'Renew'
+                      )}
+                    </Button>
                   </>
                 ) : (
                   <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{msg.content}</Typography>
@@ -706,13 +842,26 @@ export const Chat: React.FC<ChatProps> = ({
                 </Box>
 
                 {/* Emoji react button */}
-                <IconButton size="small" onClick={(e) => handleOpenPicker(e, msg)} sx={{
-                  color: 'rgba(255,255,255,0.7)', backgroundColor: 'rgba(255,255,255,0.08)',
-                  borderRadius: '16px', px: 1.2, py: 0.4, mt: 0.5,
-                  '&:hover': { backgroundColor: 'rgba(255,255,255,0.15)', color: '#fff' },
-                  transition: 'all 0.2s ease'
-                }}>
-                  <AddReactionIcon fontSize="small" />
+                <IconButton
+                  size="small"
+                  onClick={(e) => handleOpenPicker(e, msg)}
+                  disabled={reactingMsg === `${msg.txid}:${msg.vout}`}
+                  sx={{
+                    color: 'rgba(255,255,255,0.7)',
+                    backgroundColor: 'rgba(255,255,255,0.08)',
+                    borderRadius: '16px',
+                    px: 1.2,
+                    py: 0.4,
+                    mt: 0.5,
+                    '&:hover': { backgroundColor: 'rgba(255,255,255,0.15)', color: '#fff' },
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  {reactingMsg === `${msg.txid}:${msg.vout}` ? (
+                    <CircularProgress size={16} color="inherit" />
+                  ) : (
+                    <AddReactionIcon fontSize="small" />
+                  )}
                 </IconButton>
 
                 <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, textAlign: 'right' }}>

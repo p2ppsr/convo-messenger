@@ -118,6 +118,20 @@ export async function loadReplies({
   )
   console.log(`[LoadReplies] Deduped from ${filtered.length} → ${deduped.length} messages.`)
 
+  const renewalMap = new Map<string, MessagePayloadWithMetadata>()
+
+  for (const msg of deduped) {
+    const key = `${msg.sender}-${msg.createdAt}`
+    const existing = renewalMap.get(key)
+
+    if (!existing || msg.txid > existing.txid) {
+      renewalMap.set(key, msg)
+    }
+  }
+
+  const renewalDeduped = Array.from(renewalMap.values())
+  console.log(`[LoadReplies] Deduped renewed replies from ${deduped.length} → ${renewalDeduped.length}`)
+
   // --- Group reactions by message (only for this thread's replies) ---
   const groupedReactions: Record<string, any[]> = {}
   const replyTxids = new Set(deduped.map(m => m.txid))
@@ -151,12 +165,13 @@ export async function loadReplies({
   // --- Resolve sender display names ---
   const allSenders = [
     ...new Set(
-      deduped
+      renewalDeduped
         .map(m => {
           try {
             if (typeof m.sender === 'string') return m.sender
-            if (m.sender instanceof Uint8Array || Array.isArray(m.sender)) {
-              return Buffer.from(m.sender).toString('base64')
+            const senderVal: any = m.sender
+            if (senderVal instanceof Uint8Array || Array.isArray(senderVal)) {
+              return Buffer.from(senderVal).toString('base64')
             }
             return ''
           } catch {
@@ -171,7 +186,7 @@ export async function loadReplies({
   console.log('[LoadReplies] Name resolution complete. Entries:', nameMap.size)
 
   // --- Sort by timestamp ---
-  const sorted = deduped.sort((a, b) => a.createdAt - b.createdAt)
+  const sorted = renewalDeduped.sort((a, b) => a.createdAt - b.createdAt)
   console.log(`[LoadReplies] Returning ${sorted.length} replies.`)
 
   return {

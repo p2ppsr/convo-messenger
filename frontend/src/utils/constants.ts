@@ -33,9 +33,12 @@ const constants: ConvoConstants = {
   overlayTM: 'tm_ls_convo',
   basket: 'ls_convo',
   protocolID: [1, 'ConvoMessenger'],
-  uhrpGateway: uhrpFromEnv ?? (isLocal
-    ? 'http://localhost:3301'
-    : 'https://uhrp-lite.babbage.systems'),
+  // uhrpGateway: uhrpFromEnv ?? (isLocal
+  //   ? 'http://localhost:3301'
+  //   : 'https://uhrp-lite.babbage.systems'),
+      uhrpGateway: uhrpFromEnv ?? (isLocal
+          ? 'http://localhost:3301'
+          : 'https://nanostore.babbage.systems'),
 }
 
 export const POLLING_ENABLED = true
