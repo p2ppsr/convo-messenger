@@ -21,5 +21,8 @@
   "devDependencies": {
     "@bsv/cars-cli": "^1.2.9",
     "@bsv/lars": "^1.5.4"
+  },
+  "dependencies": {
+    "@bsv/message-box-client": "^1.4.2"
   }
 }

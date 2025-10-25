@@ -11,7 +11,7 @@ import {
 
 import { encryptMessage } from './MessageEncryptor'  // Our CurvePoint encryption wrapper
 import type { MessagePayload } from '../types/types'
-
+import { MessageBoxClient } from '@bsv/message-box-client';
 // Define expected options when sending a message
 export interface SendMessageOptions {
   client: WalletClient
@@ -57,13 +57,17 @@ export async function sendMessage({
   const broadcaster = new TopicBroadcaster([`tm_${topic}`], {
     networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
   })
-
+  let MB = new MessageBoxClient({
+          walletClient: new WalletClient(),
+          host: 'https://messagebox.babbage.systems'
+        })
   console.log(`\n[Convo] ----------------------------------------`)
   console.log(`[Convo] Preparing message for thread "${threadId}"`)
   console.log(`[Convo] Sender public key: ${senderPublicKey}`)
   console.log(`[Convo] Raw content: ${content}`)
   console.log(`[Convo] ProtocolID: ${JSON.stringify(protocolID)}, keyID: ${keyID}`)
   console.log(`[Convo] Topic: ${topic}, Basket: ${basket}`)
+
 
   // Deduplicate and always include the sender themselves in the recipient list.
   // This ensures the sender can also decrypt their own messages.
@@ -212,6 +216,11 @@ export async function sendMessage({
   // Broadcast to overlay
   try {
     await broadcaster.broadcast(transaction)
+     await MB.sendNotification(
+        recipients,
+        `${window.location}`,
+        'https://messagebox.babbage.systems'
+      );
     console.log(`[Convo] Broadcast to overlay succeeded. txid: ${txid}`)
   } catch (error) {
     console.error(`[Convo] Broadcast failed:`, error)
