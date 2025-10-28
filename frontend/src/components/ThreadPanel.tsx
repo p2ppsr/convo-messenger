@@ -36,6 +36,12 @@ interface ThreadPanelProps {
   setNameMap?: React.Dispatch<React.SetStateAction<Map<string, string>>>
 }
 
+type PreviewEntry =
+  | string
+  | { type: 'audio'; audioUrl: string }
+  | { type: 'video'; videoUrl: string }
+  | null
+
 function normalizeSender(sender: string): string {
   try {
     if (sender.startsWith('02') || sender.startsWith('03')) return sender
@@ -72,7 +78,7 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
   const [targetMessage, setTargetMessage] = useState<MessagePayloadWithMetadata | null>(null)
   const [uploading, setUploading] = useState(false)
   const [downloadingFile, setDownloadingFile] = useState<string | null>(null)
-  const [imagePreviews, setImagePreviews] = useState<Record<string, string>>({})
+  const [imagePreviews, setImagePreviews] = useState<Record<string, PreviewEntry | null>>({})
   const [sending, setSending] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [openImage, setOpenImage] = useState<string | null>(null)
@@ -82,9 +88,23 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
   Record<string, { text: string; expiryTime: number }>
     >({})
   const [renewingFile, setRenewingFile] = useState<string | null>(null)
+  const [openAudio, setOpenAudio] = useState<string | null>(null)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+
+  // === Audio Recording ===
+    const [recordDialogOpen, setRecordDialogOpen] = useState(false)
+    const [isRecording, setIsRecording] = useState(false)
+    const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null)
+    const [recordingUrl, setRecordingUrl] = useState<string | null>(null)
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+    const chunksRef = useRef<BlobPart[]>([])
+    const [elapsed, setElapsed] = useState(0)
+    const [audioContext, setAudioContext] = useState<AudioContext | null>(null)
+    const [analyser, setAnalyser] = useState<AnalyserNode | null>(null)
+    const canvasRef = useRef<HTMLCanvasElement | null>(null)
+    const timerRef = useRef<number | null>(null)
 
   // ============================= LOAD REPLIES =============================
   useEffect(() => {
@@ -268,6 +288,12 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
                 const text = await blob.text()
                 const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
                 setImagePreviews(prev => ({ ...prev, [file.handle]: snippet }))
+              } else if (file.mimetype.startsWith('audio/')) {
+              const audioUrl = URL.createObjectURL(blob)
+              setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'audio', audioUrl } }))
+              } else if (file.mimetype.startsWith('video/')) {
+                const videoUrl = URL.createObjectURL(blob)
+                setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'video', videoUrl } }))
               } else {
                 setImagePreviews(prev => ({ ...prev, [file.handle]: null }))
               }
@@ -346,6 +372,12 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
             const text = await blob.text()
             const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
             setImagePreviews((prev) => ({ ...prev, [file.handle]: snippet }))
+          } else if (file.mimetype.startsWith('audio/')) {
+              const audioUrl = URL.createObjectURL(blob)
+              setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'audio', audioUrl } }))
+          } else if (file.mimetype.startsWith('video/')) {
+            const videoUrl = URL.createObjectURL(blob)
+            setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'video', videoUrl } }))
           } else {
             setImagePreviews((prev) => ({ ...prev, [file.handle]: null }))
           }
@@ -646,6 +678,104 @@ useEffect(() => {
       }
     }
 
+    // Start recording from microphone
+  const handleStartRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+
+      const mediaRecorder = new MediaRecorder(stream)
+      mediaRecorderRef.current = mediaRecorder
+      chunksRef.current = []
+
+      const context = new AudioContext()
+      const source = context.createMediaStreamSource(stream)
+      const analyserNode = context.createAnalyser()
+      analyserNode.fftSize = 2048
+      source.connect(analyserNode)
+      setAudioContext(context)
+      setAnalyser(analyserNode)
+
+      // Draw waveform
+      const drawWaveform = () => {
+        if (!canvasRef.current || !analyserNode) return
+        const canvas = canvasRef.current
+        const ctx = canvas.getContext('2d')
+        if (!ctx) return
+        const bufferLength = analyserNode.fftSize
+        const dataArray = new Uint8Array(bufferLength)
+        analyserNode.getByteTimeDomainData(dataArray)
+
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        ctx.lineWidth = 2
+        ctx.strokeStyle = '#4caf50'
+        ctx.beginPath()
+
+        const sliceWidth = (canvas.width * 1.0) / bufferLength
+        let x = 0
+        for (let i = 0; i < bufferLength; i++) {
+          const v = dataArray[i] / 128.0
+          const y = (v * canvas.height) / 2
+          if (i === 0) ctx.moveTo(x, y)
+          else ctx.lineTo(x, y)
+          x += sliceWidth
+        }
+        ctx.lineTo(canvas.width, canvas.height / 2)
+        ctx.stroke()
+
+        if (isRecording) requestAnimationFrame(drawWaveform)
+      }
+
+      drawWaveform()
+
+      // Capture data chunks
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data)
+      }
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        setRecordedBlob(blob)
+        const url = URL.createObjectURL(blob)
+        setRecordingUrl(url)
+        setElapsed(0)
+        if (context.state !== 'closed') context.close()
+      }
+
+      mediaRecorder.start()
+      setIsRecording(true)
+      setRecordedBlob(null)
+      setRecordingUrl(null)
+
+      // Start timer
+      const startTime = Date.now()
+      timerRef.current = window.setInterval(() => {
+        setElapsed(Math.floor((Date.now() - startTime) / 1000))
+      }, 500)
+    } catch (err) {
+      console.error('Microphone access denied or error:', err)
+      alert('🎙️ Unable to access microphone.')
+    }
+  }
+
+  // Stop recording
+  const handleStopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop()
+      setIsRecording(false)
+      if (timerRef.current) clearInterval(timerRef.current)
+    }
+  }
+
+  // Upload recorded file as message
+  const handleUploadRecording = async () => {
+    if (!recordedBlob) return
+    const file = new File([recordedBlob], 'voice-message.webm', { type: 'audio/webm' })
+    setRecordDialogOpen(false)
+    await handleFileSelected(file)
+    setRecordedBlob(null)
+    setRecordingUrl(null)
+  }
+
   // ============================= KEYBOARD SHORTCUT =============================
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey && !sending) {
@@ -768,6 +898,7 @@ useEffect(() => {
                               {parsed.files.map((f: any, i: number) => {
                                 const preview = imagePreviews[f.handle]
                                 const isImage = f.mimetype?.startsWith('image/')
+                                const isAudio = f.mimetype?.startsWith('audio/')
                                 return (
                                   <Box
                                     key={i}
@@ -788,7 +919,8 @@ useEffect(() => {
                                       📎 {f.filename}
                                     </Typography>
 
-                                    {preview && isImage ? (
+                                    {/* IMAGE */}
+                                    {preview && isImage && typeof preview === 'string' && (
                                       <img
                                         src={preview}
                                         alt={f.filename}
@@ -803,22 +935,46 @@ useEffect(() => {
                                           setOpenGallery({
                                             images: parsed.files
                                               .filter((file: any) =>
-                                                file.mimetype?.startsWith('image/')
+                                                file.mimetype?.startsWith('image/') &&
+                                                typeof imagePreviews[file.handle] === 'string'
                                               )
                                               .map((file: any) => ({
-                                                url: imagePreviews[file.handle],
+                                                url: imagePreviews[file.handle] as string,
                                                 filename: file.filename
-                                              }))
-                                              .filter((img: any) => img.url),
+                                              })),
                                             index: i
                                           })
                                         }
                                       />
-                                    ) : (
-                                      <Typography color="text.secondary" fontSize="0.8rem">
-                                        (Loading preview)
-                                      </Typography>
-                                    )}
+                                   )}
+
+                                  {/* AUDIO */}
+                                  {isAudio && preview && typeof preview === 'object' && preview.type === 'audio' && (
+                                    <Box
+                                      sx={{
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        backgroundColor: 'rgba(255,255,255,0.05)',
+                                        borderRadius: '8px',
+                                        width: '140px',
+                                        height: '120px',
+                                        cursor: 'pointer'
+                                      }}
+                                      onClick={() => setOpenAudio(preview.audioUrl)}
+                                    >
+                                      <Typography variant="h4">🎵</Typography>
+                                      <Typography variant="caption" color="text.secondary">Play Audio</Typography>
+                                    </Box>
+                                  )}
+
+                                  {/* FALLBACK / LOADING */}
+                                  {!isImage && !isAudio && (
+                                    <Typography color="text.secondary" fontSize="0.8rem">
+                                      (Loading preview)
+                                    </Typography>
+                                  )}
 
                                     {imagePreviews[f.handle] !== 'EXPIRED' && (
                                       <Button
@@ -871,7 +1027,7 @@ useEffect(() => {
                           <Typography variant="body2" sx={{ mt: 0.5 }}>
                             📎 {parsed.filename}
                           </Typography>
-                          {isImage && preview && (
+                          {isImage && typeof preview === 'string' && (
                             <img
                               src={preview}
                               alt={parsed.filename}
@@ -889,7 +1045,7 @@ useEffect(() => {
                               }
                             />
                           )}
-                          {parsed.mimetype === 'application/pdf' && preview && (
+                          {parsed.mimetype === 'application/pdf' && typeof preview === 'string' && (
                             <Box mt={1}>
                               <embed
                                 src={preview}
@@ -1045,7 +1201,7 @@ useEffect(() => {
                                   </Typography>
                     
                                   {/* Image preview */}
-                                  {preview && f.mimetype.startsWith('image/') ? (
+                                  {typeof preview === 'string' && f.mimetype.startsWith('image/') ? (
                                     <img
                                       src={preview}
                                       alt={f.filename}
@@ -1062,17 +1218,17 @@ useEffect(() => {
                                         const imagesInMessage =
                                           parsed?.type === 'bundle'
                                             ? parsed.files
-                                                .filter((f: any) => f.mimetype.startsWith('image/') && imagePreviews[f.handle])
+                                                .filter((f: any) => f.mimetype.startsWith('image/') && typeof imagePreviews[f.handle] === 'string')
                                                 .map((f: any) => ({
-                                                  url: imagePreviews[f.handle],
+                                                  url: imagePreviews[f.handle] as string,
                                                   filename: f.filename
                                                 }))
-                                            : parsed?.type === 'file' && parsed.mimetype.startsWith('image/')
-                                            ? [{ url: imagePreviews[parsed.handle], filename: parsed.filename }]
+                                            : parsed?.type === 'file' && parsed.mimetype.startsWith('image/') && typeof imagePreviews[parsed.handle] === 'string'
+                                            ? [{ url: imagePreviews[parsed.handle] as string, filename: parsed.filename }]
                                             : []
 
                                         const currentIndex =
-                                          imagesInMessage.findIndex((img: any) => img.url === imagePreviews[f.handle]) ?? 0
+                                          imagesInMessage.findIndex((img: any) => img.url === (imagePreviews[f.handle] as string)) ?? 0
 
                                         setOpenGallery({ images: imagesInMessage, index: currentIndex })
                                       }}
@@ -1137,7 +1293,7 @@ useEffect(() => {
                             return (
                               <Typography color="error">File no longer hosted.</Typography>
                             )
-                          if (parsed.mimetype.startsWith('image/') && preview)
+                          if (parsed.mimetype.startsWith('image/') && typeof preview === 'string')
                             return (
                               <img
                                 src={preview}
@@ -1164,7 +1320,7 @@ useEffect(() => {
                                 }}
                               />
                             )
-                          if (parsed.mimetype === 'application/pdf' && preview)
+                          if (parsed.mimetype === 'application/pdf' && typeof preview === 'string')
                             return (
                               <Box mt={1}>
                                 <embed
@@ -1194,6 +1350,26 @@ useEffect(() => {
                               >
                                 {preview}
                               </Box>
+                            )
+                              if (parsed.mimetype.startsWith('audio/') && preview && typeof preview === 'object' && preview.type === 'audio')
+                                return (
+                                  <Box
+                                    sx={{
+                                      display: 'flex',
+                                      flexDirection: 'column',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      backgroundColor: 'rgba(255,255,255,0.05)',
+                                      borderRadius: '8px',
+                                      width: '160px',
+                                      height: '120px',
+                                      cursor: 'pointer'
+                                    }}
+                                    onClick={() => setOpenAudio(preview.audioUrl)}
+                                  >
+                                    <Typography variant="h4">🎵</Typography>
+                                    <Typography variant="caption" color="text.secondary">Play Audio</Typography>
+                                  </Box>
                             )
                           if (preview === null)
                             return (
@@ -1434,6 +1610,13 @@ useEffect(() => {
         >
           {sending ? 'Sending…' : 'Send'}
         </Button>
+        <Button
+          variant="contained"
+          color="secondary"
+          onClick={() => setRecordDialogOpen(true)}
+        >
+          🎙️ Record
+        </Button>
         <FileUpload onFileSelected={handleFileSelected} />
       </Box>
 
@@ -1600,6 +1783,116 @@ useEffect(() => {
               {openGallery.images[openGallery.index].filename}
             </Typography>
           </Box>
+        )}
+      </Dialog>
+      {/* Audio Player Dialog */}
+      <Dialog
+        open={!!openAudio}
+        onClose={() => setOpenAudio(null)}
+        fullWidth
+        maxWidth="sm"
+        PaperProps={{
+          sx: {
+            backgroundColor: 'rgba(0,0,0,0.9)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            p: 2
+          }
+        }}
+      >
+        {openAudio && (
+          <>
+            <Typography variant="h6" color="white" sx={{ mb: 1 }}>
+              Audio Player
+            </Typography>
+            <audio controls autoPlay src={openAudio} style={{ width: '100%' }} />
+          </>
+        )}
+      </Dialog>
+
+{/* ====================== Audio Recorder Dialog ====================== */}
+      <Dialog
+        open={recordDialogOpen}
+        onClose={() => setRecordDialogOpen(false)}
+        fullWidth
+        maxWidth="sm"
+        PaperProps={{
+          sx: {
+            backgroundColor: 'rgba(0,0,0,0.9)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            p: 2
+          }
+        }}
+      >
+        <Typography variant="h6" color="white" sx={{ mb: 2 }}>
+          Record Voice Message
+        </Typography>
+
+        {!recordedBlob ? (
+          <>
+            <canvas
+              ref={canvasRef}
+              width={400}
+              height={100}
+              style={{
+                backgroundColor: 'black',
+                border: '1px solid rgba(255,255,255,0.2)',
+                borderRadius: '8px',
+                marginBottom: '12px'
+              }}
+            />
+            <Typography color="white" sx={{ mb: 1 }}>
+              {isRecording ? `Recording... (${elapsed}s)` : `Ready to record`}
+            </Typography>
+
+            {isRecording ? (
+              <Button
+                variant="contained"
+                color="error"
+                onClick={handleStopRecording}
+              >
+                Stop Recording
+              </Button>
+            ) : (
+              <Button
+                variant="contained"
+                color="primary"
+                onClick={handleStartRecording}
+              >
+                Start Recording
+              </Button>
+            )}
+          </>
+        ) : (
+          <>
+            <audio
+              controls
+              src={recordingUrl || ''}
+              style={{ width: '100%', marginBottom: '12px' }}
+            />
+            <Box display="flex" gap={1}>
+              <Button
+                variant="outlined"
+                color="error"
+                onClick={() => {
+                  setRecordedBlob(null)
+                  setRecordingUrl(null)
+                }}
+              >
+                Discard
+              </Button>
+              <Button
+                variant="contained"
+                color="primary"
+                onClick={handleUploadRecording}
+              >
+                Upload
+              </Button>
+            </Box>
+          </>
         )}
       </Dialog>
 
