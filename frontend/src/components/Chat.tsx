@@ -28,6 +28,7 @@ import { POLLING_ENABLED } from '../utils/constants'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useIsMobile } from '../utils/useIsMobile'
 import { useGesture } from '@use-gesture/react'
+import { send } from 'process'
 
 interface ChatProps {
   client: WalletClient
@@ -96,6 +97,7 @@ export const Chat: React.FC<ChatProps> = ({
     >({})
   const [renewingFile, setRenewingFile] = useState<string | null>(null)
   const [openAudio, setOpenAudio] = useState<string | null>(null)
+  const [sendingTxid, setSendingTxid] = useState<string | null>(null)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -117,10 +119,15 @@ export const Chat: React.FC<ChatProps> = ({
 
   // Load messages (with batch reply counts)
   useEffect(() => {
+    if (sendingTxid === 'pending') {
+      console.log('[Chat] ⏳ Skipping fetch — still sending')
+      return
+    }
     let interval: NodeJS.Timeout
 
     const fetchMessages = async () => {
       try {
+        console.log('[Chat] Fetching messages for thread:', threadId)
         const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
         if (!result || !('messages' in result)) throw new Error('Unexpected loadMessages result')
 
@@ -166,9 +173,8 @@ export const Chat: React.FC<ChatProps> = ({
       interval = setInterval(fetchMessages, 5000)
     }
     return () => clearInterval(interval)
-  }, [threadId, client, protocolID, keyID])
+  }, [threadId, client, protocolID, keyID, sendingTxid])
 
-  // Auto-decrypt file previews
   useEffect(() => {
     const loadFilePreviews = async () => {
       for (const msg of messages) {
@@ -320,31 +326,26 @@ export const Chat: React.FC<ChatProps> = ({
   // Message send
   const handleSend = async () => {
     if ((!newMessage.trim() && pendingFiles.length === 0) || sending) return
+
     setSending(true)
+    setSendingTxid("pending")
 
     try {
       const fileMessages = []
-
-      // Upload all pending files first
       for (const file of pendingFiles) {
-        const { handle, header, filename, mimetype } = await uploadEncryptedFile(
-          client,
-          protocolID,
-          keyID,
-          currentRecipients,
-          file
+        const f = await uploadEncryptedFile(
+          client, protocolID, keyID, currentRecipients, file
         )
-        fileMessages.push({ type: 'file', handle, header, filename, mimetype })
+        fileMessages.push(f)
       }
 
-      // Prepare main message object
       const payload = {
-        type: 'bundle',
+        type: "bundle",
         text: newMessage.trim(),
         files: fileMessages
       }
 
-      await sendMessage({
+      const txid = await sendMessage({
         client,
         protocolID,
         keyID,
@@ -354,26 +355,17 @@ export const Chat: React.FC<ChatProps> = ({
         content: JSON.stringify(payload),
         threadName
       })
+      console.log("[Chat] Message sent with txid:", txid)
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          content: JSON.stringify(payload),
-          sender: senderPublicKey,
-          createdAt: Date.now(),
-          txid: 'temp',
-          vout: 0,
-          threadId
-        }
-      ])
-
-      setNewMessage('')
+      setNewMessage("")
       setPendingFiles([])
-      scrollToBottom()
-    } catch (err) {
-      console.error('[Chat] Failed to send combined message:', err)
-    } finally {
       setSending(false)
+      setSendingTxid(null)
+
+    } catch (err) {
+      console.error("[Chat] Failed to send:", err)
+      setSending(false)
+      setSendingTxid(null)
     }
   }
 
@@ -458,7 +450,10 @@ export const Chat: React.FC<ChatProps> = ({
     try {
       const { handle, header, filename, mimetype } = await uploadEncryptedFile(client, protocolID, keyID, currentRecipients, file)
       const fileMessage = JSON.stringify({ type: 'file', handle, header, filename, mimetype })
-      await sendMessage({
+
+      setSendingTxid('pending')
+
+      const txid = await sendMessage({
         client,
         protocolID,
         keyID,
@@ -468,15 +463,12 @@ export const Chat: React.FC<ChatProps> = ({
         content: fileMessage,
         threadName
       })
-      setMessages((prev) => [
-        ...prev,
-        { content: fileMessage, sender: senderPublicKey, createdAt: Date.now(), txid: 'temp', vout: 0, threadId }
-      ])
-      scrollToBottom()
+      console.log('[Chat] File message sent with txid:', txid)
+
+      setUploading(false)
+      setSendingTxid(null)
     } catch (err) {
       console.error('[Chat] Failed to upload file:', err)
-    } finally {
-      setUploading(false)
     }
   }
 

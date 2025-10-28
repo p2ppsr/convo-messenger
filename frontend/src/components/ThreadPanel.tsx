@@ -21,6 +21,7 @@ import AddReactionIcon from '@mui/icons-material/AddReaction'
 import EmojiPicker from './EmojiPicker'
 import { POLLING_ENABLED } from '../utils/constants'
 import { useGesture } from '@use-gesture/react'
+import { send } from 'process'
 
 interface ThreadPanelProps {
   open: boolean
@@ -89,6 +90,7 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
     >({})
   const [renewingFile, setRenewingFile] = useState<string | null>(null)
   const [openAudio, setOpenAudio] = useState<string | null>(null)
+  const [sendingTxid, setSendingTxid] = useState<string | null>(null)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -110,6 +112,10 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
   useEffect(() => {
   if (!parentMessage) {
     console.warn('[ThreadPanel] ⚠️ No parentMessage provided. Skipping fetchReplies.')
+    return
+  }
+  if (sendingTxid === 'pending') {
+    console.log('[ThreadPanel] ⏳ Skipping fetch — still sending')
     return
   }
 
@@ -166,6 +172,10 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
 
       // --- Shallow diff check ---
       setMessages((prev) => {
+        if (sendingTxid && loadedMessages.some(m => m.txid === sendingTxid)) {
+          console.log(`[ThreadPanel] Skipping update — tx ${sendingTxid} still finishing send process`)
+          return prev
+        }
         if (prev.length !== loadedMessages.length) {
           console.log(`[ThreadPanel] Message count changed: ${prev.length} → ${loadedMessages.length}`)
           return loadedMessages
@@ -219,7 +229,7 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
       console.log('[ThreadPanel] Cleared polling interval on unmount.')
     }
   }
-}, [parentMessage?.txid, client, protocolID, keyID])
+}, [parentMessage?.txid, client, protocolID, keyID, sendingTxid])
 
 
   // ============================= FILE PREVIEWS =============================
@@ -496,8 +506,9 @@ useEffect(() => {
         files: fileMessages
       }
 
+      setSendingTxid('pending')
       // Send single unified message (text + attachments)
-      await sendMessage({
+      const txid = await sendMessage({
         client,
         protocolID,
         keyID,
@@ -508,29 +519,17 @@ useEffect(() => {
         threadName,
         parentMessageId: parentMessage.txid
       })
+      console.log("[Chat] Message sent with txid:", txid)
 
-      // Add it to local UI immediately
-      setMessages((prev) => [
-        ...prev,
-        {
-          content: JSON.stringify(payload),
-          sender: senderPublicKey,
-          createdAt: Date.now(),
-          txid: 'temp',
-          vout: 0,
-          threadId: parentMessage.threadId
-        }
-      ])
-
-      // Reset inputs
-      setNewMessage('')
+      setNewMessage("")
       setPendingFiles([])
-      scrollToBottom()
-    } catch (err) {
-      console.error('[ThreadPanel] Failed to send combined message:', err)
-      alert('⚠️ Failed to send message.')
-    } finally {
       setSending(false)
+      setSendingTxid(null)
+
+    } catch (err) {
+      console.error("[Chat] Failed to send:", err)
+      setSending(false)
+      setSendingTxid(null)
     }
   }
 
@@ -588,7 +587,10 @@ useEffect(() => {
       )
 
       const fileMessage = JSON.stringify({ type: 'file', handle, header, filename, mimetype })
-      await sendMessage({
+
+      setSendingTxid('pending')
+
+      const txid = await sendMessage({
         client,
         protocolID,
         keyID,
@@ -599,23 +601,12 @@ useEffect(() => {
         threadName,
         parentMessageId: parentMessage.txid
       })
+      console.log('[Chat] File message sent with txid:', txid)
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          content: fileMessage,
-          sender: senderPublicKey,
-          createdAt: Date.now(),
-          txid: 'temp',
-          vout: 0,
-          threadId: parentMessage.threadId
-        }
-      ])
-      scrollToBottom()
+      setUploading(false)
+      setSendingTxid(null)
     } catch (err) {
       console.error('[Chat] Failed to upload file:', err)
-    } finally {
-      setUploading(false)
     }
   }
 
