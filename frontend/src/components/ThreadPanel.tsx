@@ -1022,6 +1022,7 @@ useEffect(() => {
                     } else if (parsed && parsed.type === 'file') {
                       const preview = imagePreviews[parsed.handle]
                       const isImage = parsed.mimetype?.startsWith('image/')
+                      const isAudio = parsed.mimetype?.startsWith('audio/')
                       return (
                         <>
                           <Typography variant="body2" sx={{ mt: 0.5 }}>
@@ -1053,6 +1054,27 @@ useEffect(() => {
                                 width="240px"
                                 height="240px"
                               />
+                            </Box>
+                          )}
+                          {isAudio && preview && typeof preview === 'object' && preview.type === 'audio' && (
+                            <Box
+                              sx={{
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                backgroundColor: 'rgba(255,255,255,0.05)',
+                                borderRadius: '8px',
+                                width: '160px',
+                                height: '120px',
+                                cursor: 'pointer'
+                              }}
+                              onClick={() => setOpenAudio(preview.audioUrl)}
+                            >
+                              <Typography variant="h4">🎵</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Play Audio
+                              </Typography>
                             </Box>
                           )}
                           {preview === 'EXPIRED' && (
