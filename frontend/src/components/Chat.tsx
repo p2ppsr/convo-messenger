@@ -61,6 +61,20 @@ function normalizeSender(sender: string): string {
   }
 }
 
+function mergeMessages(
+  prev: MessagePayloadWithMetadata[],
+  incoming: MessagePayloadWithMetadata[]
+) {
+  const map = new Map(prev.map(msg => [msg.txid, msg]))
+
+  // Add/replace incoming messages
+  for (const msg of incoming) {
+    map.set(msg.txid, msg)
+  }
+
+  return Array.from(map.values()).sort((a, b) => a.createdAt - b.createdAt)
+}
+
 export const Chat: React.FC<ChatProps> = ({
   client,
   protocolID,
@@ -98,6 +112,8 @@ export const Chat: React.FC<ChatProps> = ({
   const [renewingFile, setRenewingFile] = useState<string | null>(null)
   const [openAudio, setOpenAudio] = useState<string | null>(null)
   const [sendingTxid, setSendingTxid] = useState<string | null>(null)
+  const isSendingRef = useRef<boolean>(false)
+  const messageListRef = useRef<HTMLDivElement | null>(null)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -116,15 +132,21 @@ export const Chat: React.FC<ChatProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const timerRef = useRef<number | null>(null)
 
+  const scrollToBottomIfNearEnd = () => {
+      const container = messageListRef.current
+      if (!container) return
+
+      const distanceFromBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight
+
+      // Only auto-scroll if user is within 200px of the bottom
+      if (distanceFromBottom < 200) {
+        container.scrollTop = container.scrollHeight
+      }
+    }
 
   // Load messages (with batch reply counts)
   useEffect(() => {
-    if (sendingTxid === 'pending') {
-      console.log('[Chat] ⏳ Skipping fetch — still sending')
-      return
-    }
-    let interval: NodeJS.Timeout
-
     const fetchMessages = async () => {
       try {
         console.log('[Chat] Fetching messages for thread:', threadId)
@@ -142,13 +164,7 @@ export const Chat: React.FC<ChatProps> = ({
         console.log('[Chat] Loaded replyCounts:', loadedReplyCounts)
         console.log('[Chat] Loaded latestReplyTimes:', loadedLatestReplyTimes)
 
-        // Shallow diff check by txid for performance
-        setMessages((prev) => {
-          if (prev.length !== loadedMessages.length) return loadedMessages
-          const changed = prev.some((m, i) => m.txid !== loadedMessages[i]?.txid)
-          return changed ? loadedMessages : prev
-        })
-
+        setMessages(prev => mergeMessages(prev, loadedMessages))
         setReactions(loadedReactions)
         setNameMap(resolvedNames)
         setReplyCounts(loadedReplyCounts || {})
@@ -169,11 +185,70 @@ export const Chat: React.FC<ChatProps> = ({
 
     setLoading(true)
     fetchMessages()
-    if (POLLING_ENABLED) {
-      interval = setInterval(fetchMessages, 5000)
+    scrollToBottom()
+  }, [threadId])
+
+  useEffect(() => {
+  let interval: NodeJS.Timeout | undefined
+
+  const pollMessages = async () => {
+    // Don't fetch if still sending
+    if (isSendingRef.current) {
+      console.log("[Chat] ⏳ Poll skip — message still sending")
+      return
     }
-    return () => clearInterval(interval)
-  }, [threadId, client, protocolID, keyID, sendingTxid])
+
+    try {
+      console.log("[Chat] Polling overlay for updates...")
+
+      const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
+      if (!result || !("messages" in result)) throw new Error("Unexpected loadMessages result")
+
+      const {
+        messages: loadedMessages,
+        reactions: loadedReactions,
+        nameMap: resolvedNames,
+        replyCounts: loadedReplyCounts,
+        latestReplyTimes: loadedLatestReplyTimes
+      } = result
+
+      // ✅ Append-only update (no full rerender)
+      setMessages(prev => mergeMessages(prev, loadedMessages))
+
+      // ✅ update other metadata but keeps prev messages intact
+      setReactions(loadedReactions)
+      setNameMap(resolvedNames)
+      setReplyCounts(loadedReplyCounts || {})
+      setLatestReplyTimes(loadedLatestReplyTimes || {})
+
+      // ✅ Only auto-restore recipients on newest messages (like before)
+      if (loadedMessages.length > 0) {
+        const last = loadedMessages[loadedMessages.length - 1]
+        if (last?.recipients?.length) setCurrentRecipients(last.recipients)
+      }
+
+    } catch (err) {
+      console.error("[Chat] Polling failed:", err)
+    } finally {
+      scrollToBottomIfNearEnd()   // ✅ only scroll if user is near bottom
+    }
+  }
+
+  console.log("[Chat] ▶ Polling started")
+
+  // First poll immediately
+  pollMessages()
+
+  // Start interval
+  interval = setInterval(pollMessages, 5000)
+
+  // Cleanup
+  return () => {
+    console.log("[Chat] ⏹ Polling stopped")
+    clearInterval(interval)
+  }
+
+}, [threadId, client, protocolID, keyID])
 
   useEffect(() => {
     const loadFilePreviews = async () => {
@@ -329,6 +404,7 @@ export const Chat: React.FC<ChatProps> = ({
 
     setSending(true)
     setSendingTxid("pending")
+    isSendingRef.current = true
 
     try {
       const fileMessages = []
@@ -361,11 +437,13 @@ export const Chat: React.FC<ChatProps> = ({
       setPendingFiles([])
       setSending(false)
       setSendingTxid(null)
+      isSendingRef.current = false
 
     } catch (err) {
       console.error("[Chat] Failed to send:", err)
       setSending(false)
       setSendingTxid(null)
+      isSendingRef.current = false
     }
   }
 
