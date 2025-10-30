@@ -218,7 +218,7 @@ export async function sendMessage({
     await broadcaster.broadcast(transaction)
      await MB.sendNotification(
         recipients,
-        `${window.location}`,
+        JSON.stringify({ url: window.location, body: content }),
         'https://messagebox.babbage.systems'
       );
     console.log(`[Convo] Broadcast to overlay succeeded. txid: ${txid}`)

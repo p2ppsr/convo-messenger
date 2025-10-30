@@ -17,9 +17,9 @@
     "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,json,css,scss,md}\""
   },
   "dependencies": {
-    "@bsv/identity-react": "^1.0.0",
+    "@bsv/identity-react": "^1.1.10",
     "@bsv/sdk": "^1.8.10",
-    "@bsv/uhrp-react": "^1.0.3",
+    "@bsv/uhrp-react": "^1.0.4",
     "@emotion/react": "^11.13.5",
     "@emotion/styled": "^11.13.5",
     "@mui/icons-material": "^7.1.0",
