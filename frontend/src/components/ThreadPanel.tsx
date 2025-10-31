@@ -21,7 +21,8 @@ import AddReactionIcon from '@mui/icons-material/AddReaction'
 import EmojiPicker from './EmojiPicker'
 import { POLLING_ENABLED } from '../utils/constants'
 import { useGesture } from '@use-gesture/react'
-import { send } from 'process'
+import { motion, AnimatePresence } from 'framer-motion'
+// import { send } from 'process'
 
 interface ThreadPanelProps {
   open: boolean
@@ -58,6 +59,20 @@ function normalizeSender(sender: string): string {
   }
 }
 
+function mergeMessages(
+  prev: MessagePayloadWithMetadata[],
+  incoming: MessagePayloadWithMetadata[]
+) {
+  const map = new Map(prev.map(msg => [msg.txid, msg]))
+
+  // Add/replace incoming messages
+  for (const msg of incoming) {
+    map.set(msg.txid, msg)
+  }
+
+  return Array.from(map.values()).sort((a, b) => a.createdAt - b.createdAt)
+}
+
 export const ThreadPanel: React.FC<ThreadPanelProps> = ({
   onClose,
   parentMessage,
@@ -90,7 +105,12 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
     >({})
   const [renewingFile, setRenewingFile] = useState<string | null>(null)
   const [openAudio, setOpenAudio] = useState<string | null>(null)
+  const [openVideo, setOpenVideo] = useState<string | null>(null)
   const [sendingTxid, setSendingTxid] = useState<string | null>(null)
+  const isSendingRef = useRef<boolean>(false)
+  const messageListRef = useRef<HTMLDivElement | null>(null)
+  const [showNewMessageAlert, setShowNewMessageAlert] = useState(false)
+  const [incomingPreview, setIncomingPreview] = useState<string>("")
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -108,129 +128,150 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
     const canvasRef = useRef<HTMLCanvasElement | null>(null)
     const timerRef = useRef<number | null>(null)
 
-  // ============================= LOAD REPLIES =============================
+    const scrollToBottomIfNearEnd = () => {
+      const container = messageListRef.current
+      if (!container) return
+
+      const distanceFromBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight
+
+      // Only auto-scroll if user is within 200px of the bottom
+      if (distanceFromBottom < 200) {
+        container.scrollTop = container.scrollHeight
+      }
+    }
+
+  // ============================= LOAD REPLIES (initial load) =============================
   useEffect(() => {
-  if (!parentMessage) {
-    console.warn('[ThreadPanel] ⚠️ No parentMessage provided. Skipping fetchReplies.')
-    return
-  }
-  if (sendingTxid === 'pending') {
-    console.log('[ThreadPanel] ⏳ Skipping fetch — still sending')
-    return
-  }
+    if (!parentMessage) return;
 
-  let interval: NodeJS.Timeout | undefined
-  console.log(`[ThreadPanel] ▼ useEffect triggered for parentMessage.txid = ${parentMessage.txid}`)
-  console.log('Client:', client)
-  console.log('ProtocolID:', protocolID)
-  console.log('KeyID:', keyID)
-  console.log('Polling enabled:', POLLING_ENABLED)
+    const fetchReplies = async () => {
+      try {
+        const result = await loadReplies({
+          client,
+          protocolID,
+          keyID,
+          parentMessageId: parentMessage.txid,
+        });
 
-  setLoading(true)
+        if (!result || !("messages" in result))
+          throw new Error("Invalid loadReplies result");
 
-  const fetchReplies = async () => {
-    console.log(`[ThreadPanel] ▶ FetchReplies start for parentMessageId: ${parentMessage.txid}`)
-    try {
-      const result = await loadReplies({
-        client,
-        protocolID,
-        keyID,
-        parentMessageId: parentMessage.txid
-      })
+        const { messages: loadedMessages, reactions: loadedReactions, nameMap: resolvedNames } = result;
 
-      console.log('[ThreadPanel] loadReplies() returned:', {
-        messageCount: result.messages?.length ?? 0,
-        reactionGroups: Object.keys(result.reactions ?? {}).length,
-        nameMapEntries: result.nameMap?.size ?? 0
-      })
+        setMessages(prev => mergeMessages(prev, loadedMessages));
+        setReactions(loadedReactions);
 
-      if (!result || !('messages' in result)) {
-        throw new Error('Invalid loadReplies result structure')
-      }
+        // Merge names (do not replace)
+        setNameMap(prev => {
+          const merged = new Map(prev);
+          for (const [k, v] of resolvedNames.entries()) merged.set(k, v);
+          return merged;
+        });
 
-      const {
-        messages: loadedMessages,
-        reactions: loadedReactions,
-        nameMap: resolvedNames
-      } = result
-
-      // --- Inspect first few replies ---
-      if (loadedMessages.length) {
-        console.log('[ThreadPanel] Loaded messages preview:')
-        loadedMessages.slice(0, 5).forEach((m, i) => {
-          console.log(`  Reply[${i}]`, {
-            txid: m.txid,
-            parentMessageId: m.parentMessageId,
-            threadId: m.threadId,
-            sender: m.sender,
-            contentPreview: m.content?.slice?.(0, 60)
-          })
-        })
-      } else {
-        console.warn('[ThreadPanel] No replies returned by loadReplies.')
-      }
-
-      // --- Shallow diff check ---
-      setMessages((prev) => {
-        if (sendingTxid && loadedMessages.some(m => m.txid === sendingTxid)) {
-          console.log(`[ThreadPanel] Skipping update — tx ${sendingTxid} still finishing send process`)
-          return prev
+        // Restore recipients
+        if (loadedMessages.length > 0) {
+          const last = loadedMessages[loadedMessages.length - 1];
+          if (last?.recipients?.length) setCurrentRecipients(last.recipients);
         }
-        if (prev.length !== loadedMessages.length) {
-          console.log(`[ThreadPanel] Message count changed: ${prev.length} → ${loadedMessages.length}`)
-          return loadedMessages
-        }
-        const changed = prev.some((m, i) => m.txid !== loadedMessages[i]?.txid)
-        if (changed) console.log('[ThreadPanel] Message order or IDs changed. Updating state.')
-        else console.log('[ThreadPanel] No message diff detected. Skipping update.')
-        return changed ? loadedMessages : prev
-      })
 
-      setReactions(loadedReactions)
-
-      // --- Merge resolved names into existing nameMap (don’t overwrite) ---
-      setNameMap((prev) => {
-        const merged = new Map(prev)
-        for (const [k, v] of resolvedNames.entries()) merged.set(k, v)
-        return merged
-      })
-
-      // --- Auto-restore recipients ---
-      if (loadedMessages.length > 0) {
-        const latest = loadedMessages[loadedMessages.length - 1]
-        if (latest.recipients?.length) {
-          console.log('[ThreadPanel] 👥 Restoring recipients from latest message:', latest.recipients)
-          setCurrentRecipients(latest.recipients)
-        } else {
-          console.log('[ThreadPanel] No recipients found in latest message.')
-        }
+      } catch (err) {
+        console.error("[ThreadPanel] Initial load failed:", err);
+      } finally {
+        setLoading(false);
+        scrollToBottom();
       }
-    } catch (err) {
-      console.error('[ThreadPanel] Failed to load replies:', err)
-    } finally {
-      setLoading(false)
-      scrollToBottom()
-      console.log('[ThreadPanel] fetchReplies complete. Scrolled to bottom.')
-    }
-  }
+    };
 
-  // --- Initial load ---
-  fetchReplies()
+    setLoading(true);
+    fetchReplies();
+  }, [parentMessage?.txid, client, protocolID, keyID]);
 
-  // --- Polling (if enabled) ---
-  if (POLLING_ENABLED) {
-    console.log('[ThreadPanel] Starting polling interval (5000ms)')
-    interval = setInterval(fetchReplies, 5000)
-  }
+  // ============================= POLLING (merge + new message alert) =============================
+  useEffect(() => {
+    let interval: NodeJS.Timeout | undefined;
 
-  return () => {
-    if (interval) {
-      clearInterval(interval)
-      console.log('[ThreadPanel] Cleared polling interval on unmount.')
-    }
-  }
-}, [parentMessage?.txid, client, protocolID, keyID, sendingTxid])
+    const pollReplies = async () => {
+      if (isSendingRef.current) return;
 
+      try {
+        const result = await loadReplies({
+          client,
+          protocolID,
+          keyID,
+          parentMessageId: parentMessage.txid,
+        });
+
+        if (!result || !("messages" in result)) return;
+
+        const { messages: loadedMessages, reactions: loadedReactions, nameMap: resolvedNames } = result;
+
+        setMessages(prev => {
+          const merged = mergeMessages(prev, loadedMessages);
+
+          // Detect new message txids
+          const newOnes = merged.filter(m => !prev.some(p => p.txid === m.txid));
+          if (newOnes.length > 0) {
+            const newest = newOnes[newOnes.length - 1];
+
+            const normalizedSender = newest.sender.startsWith("02") || newest.sender.startsWith("03")
+              ? newest.sender
+              : newest.sender.slice(0, 12);
+
+            const senderName =
+              resolvedNames.get(normalizedSender) ??
+              normalizedSender.slice(0, 10) + "...";
+
+            // extract summary
+            let summary = "(attachment)";
+            try {
+              const parsed = JSON.parse(newest.content);
+              if (parsed?.text) summary = parsed.text.slice(0, 80);
+              else if (parsed?.files?.length > 0)
+                summary = `📎 ${parsed.files.length} file${parsed.files.length > 1 ? "s" : ""}`;
+            } catch {}
+
+            const container = messageListRef.current;
+            const distanceFromBottom = container
+              ? container.scrollHeight - container.scrollTop - container.clientHeight
+              : 0;
+
+            const userIsNearBottom = distanceFromBottom < 150;
+
+            if (!userIsNearBottom) {
+              setIncomingPreview(`${senderName}: ${summary}`);
+              setShowNewMessageAlert(true);
+            } else {
+              setTimeout(() => scrollToBottom(), 50);
+            }
+          }
+
+          return merged;
+        });
+
+        // update reaction map & name map
+        setReactions(loadedReactions);
+        setNameMap(prev => {
+          const merged = new Map(prev);
+          for (const [k, v] of resolvedNames.entries()) merged.set(k, v);
+          return merged;
+        });
+
+      } catch (err) {
+        console.error("[ThreadPanel] Polling error:", err);
+      } finally {
+        scrollToBottomIfNearEnd();
+      }
+    };
+
+    // First run immediately
+    pollReplies();
+
+    if (POLLING_ENABLED)
+      interval = setInterval(pollReplies, 5000);
+
+    return () => clearInterval(interval);
+  }, [parentMessage?.txid, client, protocolID, keyID]);
 
   // ============================= FILE PREVIEWS =============================
   useEffect(() => {
@@ -483,6 +524,7 @@ useEffect(() => {
     // Don't send if nothing to send or already sending
     if ((!newMessage.trim() && pendingFiles.length === 0) || sending) return
     setSending(true)
+    isSendingRef.current = true 
 
     try {
       const fileMessages = []
@@ -523,13 +565,15 @@ useEffect(() => {
 
       setNewMessage("")
       setPendingFiles([])
-      setSending(false)
-      setSendingTxid(null)
-
     } catch (err) {
       console.error("[Chat] Failed to send:", err)
       setSending(false)
       setSendingTxid(null)
+    } finally {
+      setSending(false)
+      isSendingRef.current = false
+      setSendingTxid(null)
+      scrollToBottomIfNearEnd()
     }
   }
 
@@ -787,6 +831,7 @@ useEffect(() => {
         color: 'text.primary'
       }}
     >
+
       {/* Header */}
       <Box
         display="flex"
@@ -808,7 +853,57 @@ useEffect(() => {
       </Box>
 
       {/* Main message area */}
-      <Box display="flex" flexDirection="column" flex={1} overflow="auto" p={2}>
+      <Box
+        ref={messageListRef}
+        display="flex"
+        flexDirection="column"
+        flex={1}
+        overflow="auto"
+        p={2}
+      >
+        {/* New message alert banner */}
+      <AnimatePresence>
+        {showNewMessageAlert && (
+          <motion.div
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 30 }}
+            transition={{ duration: 0.25 }}
+          >
+            <Box
+              onClick={() => {
+                scrollToBottom()
+                setShowNewMessageAlert(false)
+              }}
+              sx={{
+                backgroundColor: "#4caf50",
+                color: "white",
+                padding: "8px 12px",
+                borderRadius: "10px",
+                mb: 1,
+                cursor: "pointer",
+                boxShadow: "0px 0px 6px rgba(0,0,0,0.3)",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center"
+              }}
+            >
+              <Typography fontWeight="bold">{incomingPreview}</Typography>
+
+              <IconButton
+                size="small"
+                sx={{ color: "white" }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setShowNewMessageAlert(false)
+                }}
+              >
+                ✕
+              </IconButton>
+            </Box>
+          </motion.div>
+        )}
+      </AnimatePresence>
         {threadName && (
           <Box my={2} display="flex" justifyContent="center">
             <Paper
@@ -890,6 +985,7 @@ useEffect(() => {
                                 const preview = imagePreviews[f.handle]
                                 const isImage = f.mimetype?.startsWith('image/')
                                 const isAudio = f.mimetype?.startsWith('audio/')
+                                const isVideo = f.mimetype?.startsWith('video/')
                                 return (
                                   <Box
                                     key={i}
@@ -959,9 +1055,29 @@ useEffect(() => {
                                       <Typography variant="caption" color="text.secondary">Play Audio</Typography>
                                     </Box>
                                   )}
+                                  {/* VIDEO */}
+                                  {isVideo && preview && typeof preview === 'object' && preview.type === 'video' && (
+                                    <Box
+                                      sx={{
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        backgroundColor: 'rgba(255,255,255,0.05)',
+                                        borderRadius: '8px',
+                                        width: '140px',
+                                        height: '120px',
+                                        cursor: 'pointer'
+                                      }}
+                                      onClick={() => setOpenVideo(preview.videoUrl)}
+                                    >
+                                      <Typography variant="h4">🎥</Typography>
+                                      <Typography variant="caption" color="text.secondary">Play Video</Typography>
+                                    </Box>
+                                  )}
 
                                   {/* FALLBACK / LOADING */}
-                                  {!isImage && !isAudio && (
+                                  {!isImage && !isAudio && !isVideo && (
                                     <Typography color="text.secondary" fontSize="0.8rem">
                                       (Loading preview)
                                     </Typography>
@@ -1014,6 +1130,7 @@ useEffect(() => {
                       const preview = imagePreviews[parsed.handle]
                       const isImage = parsed.mimetype?.startsWith('image/')
                       const isAudio = parsed.mimetype?.startsWith('audio/')
+                      const isVideo = parsed.mimetype?.startsWith('video/')
                       return (
                         <>
                           <Typography variant="body2" sx={{ mt: 0.5 }}>
@@ -1065,6 +1182,27 @@ useEffect(() => {
                               <Typography variant="h4">🎵</Typography>
                               <Typography variant="caption" color="text.secondary">
                                 Play Audio
+                              </Typography>
+                            </Box>
+                          )}
+                          {isVideo && preview && typeof preview === 'object' && preview.type === 'video' && (
+                            <Box
+                              sx={{
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                backgroundColor: 'rgba(255,255,255,0.05)',
+                                borderRadius: '8px',
+                                width: '160px',
+                                height: '120px',
+                                cursor: 'pointer'
+                              }}
+                              onClick={() => setOpenVideo(preview.videoUrl)}
+                            >
+                              <Typography variant="h4">🎥</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Play Video
                               </Typography>
                             </Box>
                           )}
@@ -1384,11 +1522,33 @@ useEffect(() => {
                                     <Typography variant="caption" color="text.secondary">Play Audio</Typography>
                                   </Box>
                             )
-                          if (preview === null)
-                            return (
-                              <Typography color="text.secondary">
-                                Preview unavailable.
-                              </Typography>
+                              if (parsed.mimetype.startsWith('video/') && preview && typeof preview === 'object' && preview.type === 'video')
+                                return (
+                                  <Box
+                                    sx={{
+                                      display: 'flex',
+                                      flexDirection: 'column',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      backgroundColor: 'rgba(255,255,255,0.05)',
+                                      borderRadius: '8px',
+                                      width: '160px',
+                                      height: '120px',
+                                      cursor: 'pointer'
+                                    }}
+                                    onClick={() => setOpenVideo(preview.videoUrl)}
+                                  >
+                                    <Typography variant="h4">🎥</Typography>
+                                    <Typography variant="caption" color="text.secondary">
+                                      Play Video
+                                    </Typography>
+                                  </Box>
+                                )
+                              if (preview === null)
+                                return (
+                                  <Typography color="text.secondary">
+                                    Preview unavailable.
+                                  </Typography>
                             )
                           return (
                             <Box display="flex" alignItems="center" gap={1}>
@@ -1649,13 +1809,15 @@ useEffect(() => {
         onClose={() => setOpenImage(null)}
         fullWidth
         maxWidth="xl"
-        PaperProps={{
-          sx: {
-            backgroundColor: 'rgba(0,0,0,0.9)',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            p: 0
+         slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: 'rgba(0,0,0,0.9)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              p: 0
+            }
           }
         }}
       >
@@ -1692,7 +1854,8 @@ useEffect(() => {
         onClose={() => setOpenGallery(null)}
         fullWidth
         maxWidth="xl"
-        PaperProps={{
+        slotProps={{
+          paper: {
           sx: {
             backgroundColor: 'rgba(0,0,0,0.95)',
             display: 'flex',
@@ -1701,7 +1864,8 @@ useEffect(() => {
             p: 0,
             overflow: 'hidden'
           }
-        }}
+        }
+      }}
       >
         {openGallery && (
           <Box
@@ -1804,13 +1968,15 @@ useEffect(() => {
         onClose={() => setOpenAudio(null)}
         fullWidth
         maxWidth="sm"
-        PaperProps={{
-          sx: {
-            backgroundColor: 'rgba(0,0,0,0.9)',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            p: 2
+        slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: 'rgba(0,0,0,0.9)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              p: 2
+            }
           }
         }}
       >
@@ -1830,13 +1996,15 @@ useEffect(() => {
         onClose={() => setRecordDialogOpen(false)}
         fullWidth
         maxWidth="sm"
-        PaperProps={{
-          sx: {
-            backgroundColor: 'rgba(0,0,0,0.9)',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            p: 2
+        slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: 'rgba(0,0,0,0.9)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              p: 2
+            }
           }
         }}
       >
@@ -1905,6 +2073,38 @@ useEffect(() => {
                 Upload
               </Button>
             </Box>
+          </>
+        )}
+      </Dialog>
+      {/* ====================== Video Player Dialog ====================== */}
+      <Dialog
+        open={!!openVideo}
+        onClose={() => setOpenVideo(null)}
+        fullWidth
+        maxWidth="lg"
+         slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: 'rgba(0,0,0,0.9)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              p: 0
+            }
+          }
+        }}
+      >
+        {openVideo && (
+          <>
+            <Typography variant="h6" color="white" sx={{ mb: 1 }}>
+              Video Player
+            </Typography>
+            <video
+              controls
+              autoPlay
+              style={{ width: '100%', maxHeight: '90vh', borderRadius: '8px' }}
+              src={openVideo}
+            />
           </>
         )}
       </Dialog>

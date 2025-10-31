@@ -111,9 +111,12 @@ export const Chat: React.FC<ChatProps> = ({
     >({})
   const [renewingFile, setRenewingFile] = useState<string | null>(null)
   const [openAudio, setOpenAudio] = useState<string | null>(null)
+  const [openVideo, setOpenVideo] = useState<string | null>(null)
   const [sendingTxid, setSendingTxid] = useState<string | null>(null)
   const isSendingRef = useRef<boolean>(false)
   const messageListRef = useRef<HTMLDivElement | null>(null)
+  const [showNewMessageAlert, setShowNewMessageAlert] = useState(false)
+  const [incomingPreview, setIncomingPreview] = useState<string>("")
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -189,66 +192,107 @@ export const Chat: React.FC<ChatProps> = ({
   }, [threadId])
 
   useEffect(() => {
-  let interval: NodeJS.Timeout | undefined
+    let interval: NodeJS.Timeout | undefined
 
-  const pollMessages = async () => {
-    // Don't fetch if still sending
-    if (isSendingRef.current) {
-      console.log("[Chat] ⏳ Poll skip — message still sending")
-      return
-    }
-
-    try {
-      console.log("[Chat] Polling overlay for updates...")
-
-      const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
-      if (!result || !("messages" in result)) throw new Error("Unexpected loadMessages result")
-
-      const {
-        messages: loadedMessages,
-        reactions: loadedReactions,
-        nameMap: resolvedNames,
-        replyCounts: loadedReplyCounts,
-        latestReplyTimes: loadedLatestReplyTimes
-      } = result
-
-      // ✅ Append-only update (no full rerender)
-      setMessages(prev => mergeMessages(prev, loadedMessages))
-
-      // ✅ update other metadata but keeps prev messages intact
-      setReactions(loadedReactions)
-      setNameMap(resolvedNames)
-      setReplyCounts(loadedReplyCounts || {})
-      setLatestReplyTimes(loadedLatestReplyTimes || {})
-
-      // ✅ Only auto-restore recipients on newest messages (like before)
-      if (loadedMessages.length > 0) {
-        const last = loadedMessages[loadedMessages.length - 1]
-        if (last?.recipients?.length) setCurrentRecipients(last.recipients)
+    const pollMessages = async () => {
+      // Don't fetch if still sending
+      if (isSendingRef.current) {
+        console.log("[Chat] ⏳ Poll skip — message still sending")
+        return
       }
 
-    } catch (err) {
-      console.error("[Chat] Polling failed:", err)
-    } finally {
-      scrollToBottomIfNearEnd()   // ✅ only scroll if user is near bottom
+      try {
+        console.log("[Chat] Polling overlay for updates...")
+
+        const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
+        if (!result || !("messages" in result)) throw new Error("Unexpected loadMessages result")
+
+        const {
+          messages: loadedMessages,
+          reactions: loadedReactions,
+          nameMap: resolvedNames,
+          replyCounts: loadedReplyCounts,
+          latestReplyTimes: loadedLatestReplyTimes
+        } = result
+
+        setMessages(prev => {
+          const merged = mergeMessages(prev, loadedMessages)
+
+          // Detect new incoming messages (strictly new txids)
+          const newOnes = merged.filter(m => !prev.some(p => p.txid === m.txid))
+
+          if (newOnes.length > 0) {
+            const newest = newOnes[newOnes.length - 1]
+
+            // Determine sender display name
+            const normalizedSender =
+              newest.sender.startsWith("02") || newest.sender.startsWith("03")
+                ? newest.sender
+                : newest.sender.slice(0, 12)
+
+            const senderName =
+              resolvedNames.get(normalizedSender) ??
+              normalizedSender.slice(0, 10) + "..."
+
+            // Extract preview text
+            let summary = "(attachment)"
+            try {
+              const parsed = JSON.parse(newest.content)
+              if (parsed?.text) summary = parsed.text.slice(0, 80)
+              else if (parsed?.files?.length > 0) summary = `📎 ${parsed.files.length} file${parsed.files.length > 1 ? "s" : ""}`
+            } catch {}
+
+            const container = messageListRef.current
+            const distanceFromBottom = container
+              ? container.scrollHeight - container.scrollTop - container.clientHeight
+              : 0
+
+            const userIsNearBottom = distanceFromBottom < 150
+
+            if (!userIsNearBottom) {
+              setIncomingPreview(`${senderName}: ${summary}`)
+              setShowNewMessageAlert(true)
+            } else {
+              // If user is reading the latest, scroll smoothly to newest msg
+              setTimeout(() => scrollToBottom(), 50)
+            }
+          }
+
+          return merged
+        })
+
+        setReactions(loadedReactions)
+        setNameMap(resolvedNames)
+        setReplyCounts(loadedReplyCounts || {})
+        setLatestReplyTimes(loadedLatestReplyTimes || {})
+
+        if (loadedMessages.length > 0) {
+          const last = loadedMessages[loadedMessages.length - 1]
+          if (last?.recipients?.length) setCurrentRecipients(last.recipients)
+        }
+
+      } catch (err) {
+        console.error("[Chat] Polling failed:", err)
+      } finally {
+        scrollToBottomIfNearEnd()
+      }
     }
-  }
 
-  console.log("[Chat] ▶ Polling started")
+    console.log("[Chat] ▶ Polling started")
 
-  // First poll immediately
-  pollMessages()
+    // First poll immediately
+    pollMessages()
 
-  // Start interval
-  interval = setInterval(pollMessages, 5000)
+    // Start interval
+    interval = setInterval(pollMessages, 5000)
 
-  // Cleanup
-  return () => {
-    console.log("[Chat] ⏹ Polling stopped")
-    clearInterval(interval)
-  }
+    // Cleanup
+    return () => {
+      console.log("[Chat] ⏹ Polling stopped")
+      clearInterval(interval)
+    }
 
-}, [threadId, client, protocolID, keyID])
+  }, [threadId, client, protocolID, keyID])
 
   useEffect(() => {
     const loadFilePreviews = async () => {
@@ -524,9 +568,13 @@ export const Chat: React.FC<ChatProps> = ({
 
   // File upload
   const handleFileSelected = async (file: File) => {
+    isSendingRef.current = true
     setUploading(true)
+    setSendingTxid('pending')
     try {
+      console.log("[Upload] Starting encrypted file upload...");
       const { handle, header, filename, mimetype } = await uploadEncryptedFile(client, protocolID, keyID, currentRecipients, file)
+      console.log("[Upload] Finished upload. Preparing sendMessage...");
       const fileMessage = JSON.stringify({ type: 'file', handle, header, filename, mimetype })
 
       setSendingTxid('pending')
@@ -543,10 +591,12 @@ export const Chat: React.FC<ChatProps> = ({
       })
       console.log('[Chat] File message sent with txid:', txid)
 
-      setUploading(false)
-      setSendingTxid(null)
     } catch (err) {
       console.error('[Chat] Failed to upload file:', err)
+    } finally {
+      setUploading(false)
+      setSendingTxid(null)
+      isSendingRef.current = false
     }
   }
 
@@ -719,6 +769,48 @@ export const Chat: React.FC<ChatProps> = ({
   // ========================================= RENDER =========================================
   return (
     <Box display="flex" flexDirection="column" height="100%" p={2}>
+      {/* New Message Alert */}
+      <AnimatePresence>
+      {showNewMessageAlert && (
+        <motion.div
+          initial={{ opacity: 0, y: 30 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 30 }}
+          transition={{ duration: 0.25 }}
+        >
+          <Box
+            onClick={() => {
+              scrollToBottom()
+              setShowNewMessageAlert(false)
+            }}
+            sx={{
+              backgroundColor: "#4caf50",
+              color: "white",
+              padding: "8px 12px",
+              borderRadius: "10px",
+              mb: 1,
+              cursor: "pointer",
+              boxShadow: "0px 0px 6px rgba(0,0,0,0.3)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center"
+            }}
+          >
+            <Typography fontWeight="bold">{incomingPreview}</Typography>
+            <IconButton
+              size="small"
+              sx={{ color: "white" }}
+              onClick={(e) => {
+                e.stopPropagation()
+                setShowNewMessageAlert(false)
+              }}
+            >
+              ✕
+            </IconButton>
+          </Box>
+        </motion.div>
+      )}
+    </AnimatePresence>
       <Box flex={1} overflow="auto" mb={2}>
         {threadName && (
           <Box my={2} display="flex" justifyContent="center">
@@ -941,6 +1033,26 @@ export const Chat: React.FC<ChatProps> = ({
                           >
                             <Typography variant="h4">🎵</Typography>
                             <Typography variant="caption" color="text.secondary">Play Audio</Typography>
+                          </Box>
+                        )
+                      if (parsed.mimetype.startsWith('video/') && preview && typeof preview === 'object' && preview.type === 'video')
+                        return (
+                          <Box
+                            sx={{
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              backgroundColor: 'rgba(255,255,255,0.05)',
+                              borderRadius: '8px',
+                              width: '160px',
+                              height: '120px',
+                              cursor: 'pointer'
+                            }}
+                            onClick={() => setOpenVideo(preview.videoUrl)}
+                          >
+                            <Typography variant="h4">🎬</Typography>
+                            <Typography variant="caption" color="text.secondary">Play Video</Typography>
                           </Box>
                         )
                       if (preview === null)
@@ -1293,13 +1405,15 @@ export const Chat: React.FC<ChatProps> = ({
         onClose={() => setOpenImage(null)}
         fullWidth
         maxWidth="xl"
-        PaperProps={{
-          sx: {
-            backgroundColor: 'rgba(0,0,0,0.9)',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            p: 0
+        slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: 'rgba(0,0,0,0.9)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              p: 0
+            }
           }
         }}
       >
@@ -1336,15 +1450,17 @@ export const Chat: React.FC<ChatProps> = ({
         onClose={() => setOpenGallery(null)}
         fullWidth
         maxWidth="xl"
-        PaperProps={{
-          sx: {
-            backgroundColor: 'rgba(0,0,0,0.95)',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            p: 0,
+        slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: 'rgba(0,0,0,0.95)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              p: 0,
             overflow: 'hidden'
-          }
+            }
+         } 
         }}
       >
         {openGallery && (
@@ -1449,13 +1565,15 @@ export const Chat: React.FC<ChatProps> = ({
         onClose={() => setOpenAudio(null)}
         fullWidth
         maxWidth="sm"
-        PaperProps={{
+        slotProps={{
+          paper: {
           sx: {
             backgroundColor: 'rgba(0,0,0,0.9)',
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
             p: 2
+            }
           }
         }}
       >
@@ -1475,13 +1593,15 @@ export const Chat: React.FC<ChatProps> = ({
         onClose={() => setRecordDialogOpen(false)}
         fullWidth
         maxWidth="sm"
-        PaperProps={{
-          sx: {
-            backgroundColor: 'rgba(0,0,0,0.9)',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
+        slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: 'rgba(0,0,0,0.9)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
             p: 2
+            }
           }
         }}
       >
@@ -1550,6 +1670,38 @@ export const Chat: React.FC<ChatProps> = ({
                 Upload
               </Button>
             </Box>
+          </>
+        )}
+      </Dialog>
+      {/* ====================== Video Player Dialog ====================== */}
+      <Dialog
+        open={!!openVideo}
+        onClose={() => setOpenVideo(null)}
+        fullWidth
+        maxWidth="lg"
+        slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: 'rgba(0,0,0,0.9)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+            p: 2
+            }
+          }
+        }}
+      >
+        {openVideo && (
+          <>
+            <Typography variant="h6" color="white" sx={{ mb: 1 }}>
+              Video Player
+            </Typography>
+            <video
+              controls
+              autoPlay
+              style={{ width: '100%', maxHeight: '90vh', borderRadius: '8px' }}
+              src={openVideo}
+            />
           </>
         )}
       </Dialog>
