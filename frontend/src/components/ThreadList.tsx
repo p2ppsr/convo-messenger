@@ -12,7 +12,7 @@ import {
 } from '@mui/material'
 
 import { decodeOutputs } from '../utils/decodeOutputs'
-import { decryptMessageBatch } from '../utils/MessageDecryptor'
+import { decryptMessage } from '../utils/MessageDecryptor'
 import { resolveDisplayNames } from '../utils/resolveDisplayNames'
 import type { WalletInterface, WalletProtocol } from '@bsv/sdk'
 import { POLLING_ENABLED } from '../utils/constants'
@@ -81,76 +81,99 @@ const ThreadList = ({
    * Load all threads from overlay
    */
   const loadThreads = async () => {
-    // console.log('[ThreadList] loadThreads called with protocolID:', protocolID, 'keyID:', keyID)
-    try {
-      // Use LookupResolver to query the overlay
-      const resolver = new LookupResolver({
-        networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
-      })
+  try {
+    const resolver = new LookupResolver({
+      networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
+    })
 
-      // Query for all convo messages
-      const response = await resolver.query({
-        service: 'ls_convo',
-        query: { type: 'findAll' }
-      })
+    const response = await resolver.query({
+      service: 'ls_convo',
+      query: { type: 'findAll' }
+    })
 
-      if (response.type !== 'output-list') {
-        throw new Error(`Unexpected response type: ${response.type}`)
+    if (response.type !== 'output-list') {
+      throw new Error(`Unexpected response type: ${response.type}`)
+    }
+
+    const toDecode = response.outputs.map((o) => ({
+      beef: o.beef,
+      outputIndex: o.outputIndex,
+      timestamp: parseInt(Utils.toUTF8(o.context ?? []))
+    }))
+
+    // 🔥 decode only — NOT decrypting messages
+    const decoded = await decodeOutputs(toDecode)
+
+    const grouped: Record<string, ThreadSummary> = {}
+
+    for (const msg of decoded) {
+      if (msg.type !== 'message') continue
+
+      const { threadId, createdAt, recipients = [], threadName, encryptedThreadNameHeader, encryptedThreadNameCiphertext } = msg
+
+      // Skip direct messages (no thread name, no encrypted thread name)
+      const hasEncryptedName = encryptedThreadNameHeader && encryptedThreadNameCiphertext
+      const hasPlaintextName = threadName && threadName.trim().length > 0
+
+      if (!hasEncryptedName && !hasPlaintextName) {
+        continue
       }
 
-      // Prepare for decodeOutputs
-      const toDecode = response.outputs.map((o) => ({
-        beef: o.beef,                  // BEEF-format data
-        outputIndex: o.outputIndex,    // vout index
-        timestamp: parseInt(Utils.toUTF8(o.context ?? [])) // convert context → timestamp
-      }))
-
-      // Decode envelope(s) then decrypt with wallet
-      const decoded = await decodeOutputs(toDecode, wallet, protocolID, keyID)
-      const decrypted = await decryptMessageBatch(wallet, decoded, protocolID, keyID)
-
-      // Group by threadId
-      const grouped: Record<string, ThreadSummary> = {}
-
-      for (const msg of decrypted) {
-        const { threadId, createdAt, payload } = msg
-        if (!payload) continue // skip if decryption failed
-
-        const recipients = payload.recipients ?? []
-
-        if (!grouped[threadId]) {
-          const threadName = payload.name?.trim()
-
-          // Only group threads (must have a name)
-          if (!threadName) continue
-
-          const nameMap = await resolveDisplayNames(recipients, identityKey)
-          const displayNames = Array.from(nameMap.values())
-
-          grouped[threadId] = {
-            threadId,
-            displayNames,
-            recipientKeys: recipients,
-            lastTimestamp: createdAt,
-            threadName
-          }
+      // seed entry if first time we see this threadId
+      if (!grouped[threadId]) {
+        grouped[threadId] = {
+          threadId,
+          displayNames: [],
+          recipientKeys: recipients,
+          lastTimestamp: createdAt,
+          threadName: '' // filled below
         }
       }
 
-      // Sort threads newest → oldest
-      const sortedThreads = Object.values(grouped).sort(
-        (a, b) => b.lastTimestamp - a.lastTimestamp
+      grouped[threadId].lastTimestamp = Math.max(
+        grouped[threadId].lastTimestamp,
+        createdAt
       )
 
-      // Update state only if something changed
-      const hasChanged = JSON.stringify(threads) !== JSON.stringify(sortedThreads)
-      if (hasChanged) setThreads(sortedThreads)
-    } catch (err) {
-      console.error('[ThreadList] Failed to load threads:', err)
-    } finally {
-      setLoading(false)
+      // Only decrypt the first threadname we encounter
+      if (!grouped[threadId].threadName) {
+        if (hasPlaintextName) {
+          grouped[threadId].threadName = threadName!.trim()
+        }
+
+        if (hasEncryptedName) {
+          const result = await decryptMessage(
+            wallet,
+            encryptedThreadNameHeader!,
+            encryptedThreadNameCiphertext!,
+            protocolID,
+            keyID
+          )
+
+          if (result?.content) {
+            grouped[threadId].threadName = result.content.trim()
+          }
+        }
+
+        // Resolve human readable names only once
+        if (grouped[threadId].displayNames.length === 0) {
+          const map = await resolveDisplayNames(recipients, identityKey)
+          grouped[threadId].displayNames = Array.from(map.values())
+        }
+      }
     }
+
+    const sortedThreads = Object.values(grouped).sort(
+      (a, b) => b.lastTimestamp - a.lastTimestamp
+    )
+
+    setThreads(sortedThreads)
+  } catch (err) {
+    console.error('[ThreadList] Failed to load threads:', err)
+  } finally {
+    setLoading(false)
   }
+}
 
   /**
    * Effect: load threads initially and whenever identity/wallet/protocolID/keyID changes

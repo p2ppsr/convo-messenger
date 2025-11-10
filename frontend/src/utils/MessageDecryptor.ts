@@ -33,6 +33,9 @@ export async function decryptMessage(
   protocolID: WalletProtocol,
   keyID: string
 ): Promise<(MessagePayload & { recipients?: string[] }) | null> {
+  const perfStart = performance.now()
+  console.log(`\n%cdeclryptMessage() START @ ${perfStart.toFixed(3)} ms`, "color: orange")
+
   try {
     // console.log('\n[MessageDecryptor] --------------------------------------')
     // console.log('[MessageDecryptor] Decryption Attempt Starting')
@@ -43,7 +46,9 @@ export async function decryptMessage(
 
     // --- Step 1: Initialize CurvePoint with wallet ---
     // CurvePoint manages key wrapping/unwrapping logic for recipients
+     const tInit = performance.now()
     const curvePoint = getCurvePoint(wallet)
+    console.log(`[Decrypt][timing] getCurvePoint(): ${(performance.now() - tInit).toFixed(2)} ms`)
 
     // Combine header + encrypted payload into one ciphertext blob
     const ciphertext = [...header, ...encryptedPayload]
@@ -57,14 +62,21 @@ export async function decryptMessage(
     // --- Step 2: Attempt decryption ---
     // CurvePoint.decrypt() tries to unwrap the symmetric key for this wallet
     // using protocolID + keyID, then decrypts payload.
+    const tDecrypt = performance.now()
     const decryptedBytes = await curvePoint.decrypt(ciphertext, protocolID, keyID)
+    console.log(`[Decrypt][timing] CurvePoint.decrypt(): ${(performance.now() - tDecrypt).toFixed(2)} ms`)
+
 
     // Convert decrypted bytes → string → JSON
+    const tJSON = performance.now()
     const json = new TextDecoder().decode(Uint8Array.from(decryptedBytes))
     const parsed = JSON.parse(json) as MessagePayload
+    console.log(`[Decrypt][timing] JSON.parse: ${(performance.now() - tJSON).toFixed(2)} ms`)
+
 
     // --- Step 3: Parse recipients from the header ---
     // parseHeader extracts structural metadata (like numRecipients).
+    const tParseHeader = performance.now()
     const parsedHeader = curvePoint.parseHeader(ciphertext)
     const reader = new Utils.Reader(parsedHeader.header)
 
@@ -99,6 +111,10 @@ export async function decryptMessage(
       const encryptedKeyLength = reader.readVarIntNum()
       reader.read(encryptedKeyLength)
     }
+
+    console.log(`[Decrypt][timing] parseHeader(): ${(performance.now() - tParseHeader).toFixed(2)} ms`)
+
+    console.log(`%cdeclryptMessage() COMPLETE: ${(performance.now() - perfStart).toFixed(2)} ms`, "color: lime; font-weight: bold")
 
     // --- Step 4: Return parsed payload + recipients list ---
     return {

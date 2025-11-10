@@ -25,7 +25,7 @@
     "@mui/icons-material": "^7.1.0",
     "@mui/material": "^7.1.0",
     "@use-gesture/react": "^10.3.1",
-    "curvepoint": "^1.0.4",
+    "curvepoint": "^1.0.5",
     "framer-motion": "^12.23.24",
     "prettier": "^3.3.3",
     "react": "^18.2.0",

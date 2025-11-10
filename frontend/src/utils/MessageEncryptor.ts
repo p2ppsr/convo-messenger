@@ -34,6 +34,9 @@ export async function encryptMessage(
   protocolID: WalletProtocol,
   keyID: string
 ): Promise<{ encryptedPayload: number[]; header: number[] }> {
+  const perfStart = performance.now()
+  console.log(`\n%cencryptMessage() START @ ${perfStart.toFixed(3)} ms`, "color: cyan")
+
   // console.log('\n[MessageEncryptor] --------------------------------------')
   // console.log('[MessageEncryptor] Starting encryption...')
   // console.log('[MessageEncryptor] Recipients:', recipients)
@@ -41,9 +44,12 @@ export async function encryptMessage(
   // console.log('[MessageEncryptor] Key ID:', keyID)
   // console.log('[MessageEncryptor] Payload object:', payload)
 
+   const tEncodeStart = performance.now()
   // --- Step 1: Convert payload object into a byte array ---
   const plaintext = JSON.stringify(payload)
   const dataBytes = Array.from(new TextEncoder().encode(plaintext))
+console.log(`[Encrypt][timing] serialize payload: ${(performance.now() - tEncodeStart).toFixed(2)} ms`)
+
 
   // console.log('[MessageEncryptor] Plaintext (string):', plaintext)
   // console.log('[MessageEncryptor] Plaintext (bytes length):', dataBytes.length)
@@ -55,20 +61,26 @@ export async function encryptMessage(
 
   // --- Step 2: Initialize CurvePoint with wallet ---
   // This ties encryption to the wallet’s key derivation logic.
+    const tCPstart = performance.now()
   const curvePoint = getCurvePoint(wallet)
-
+console.log(`[Encrypt][timing] getCurvePoint(): ${(performance.now() - tCPstart).toFixed(2)} ms`)
   // --- Step 3: Perform encryption ---
   // CurvePoint builds a header with:
   //   - numRecipients
   //   - each recipient’s pubkey
   //   - encrypted symmetric key material for each recipient
   // The same symmetric key is used for all recipients’ encryptedPayload.
+  const tEncStart = performance.now()
   const { encryptedMessage, header } = await curvePoint.encrypt(
     dataBytes,
     protocolID,
     keyID,
     recipients
   )
+
+  console.log(`[Encrypt][timing] CurvePoint.encrypt(): ${(performance.now() - tEncStart).toFixed(2)} ms`)
+
+  console.log(`%cencryptMessage() COMPLETE: ${(performance.now() - perfStart).toFixed(2)} ms`, "color: lime; font-weight: bold")
 
   // console.log('[MessageEncryptor] Encryption successful.')
   // console.log('[MessageEncryptor] Header length:', header.length)

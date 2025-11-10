@@ -52,6 +52,9 @@ export async function sendMessage({
   threadName,
   parentMessageId
 }: SendMessageOptions): Promise<string> {
+  const perfStart = performance.now()
+  console.log(`\n\n%csendMessage() START @ ${perfStart.toFixed(3)}ms`, "color: cyan")
+
   // Setup helpers
   const pushdrop = new PushDrop(client)
   const broadcaster = new TopicBroadcaster([`tm_${topic}`], {
@@ -81,6 +84,8 @@ export async function sendMessage({
     mediaURL: undefined
   }
 
+  const tEncryptStart = performance.now()
+  console.log("[Convo][timing] encryptMessage START")
   // Encrypt the payload with CurvePoint
   let header: number[], encryptedPayload: number[]
   try {
@@ -104,11 +109,16 @@ export async function sendMessage({
     throw new Error('Failed to encrypt message.')
   }
 
+  console.log(`[Convo][timing] encryptMessage DONE: ${(performance.now() - tEncryptStart).toFixed(2)} ms`)
+  console.log('[Convo] Header preview (first 8 bytes):', header.slice(0, 8))
+  console.log('[Convo] Encrypted payload length:', encryptedPayload.length)
+
   // Optional: Encrypt thread name if provided
   let threadNameHeader: number[] | undefined
   let threadNameCiphertext: number[] | undefined
 
   if (threadName) {
+    const tNameStart = performance.now()
     console.log('[Convo] Encrypting thread name...')
     try {
       ;({ header: threadNameHeader, encryptedPayload: threadNameCiphertext } =
@@ -127,6 +137,8 @@ export async function sendMessage({
       console.error('[Convo] Failed to encrypt thread name:', err)
       throw new Error('Failed to encrypt thread name.')
     }
+    console.log(`[Convo][timing] encrypt threadName DONE: ${(performance.now() - tNameStart).toFixed(2)} ms`)
+  
   }
 
   // Timestamp and random unique ID for this message
@@ -183,10 +195,16 @@ export async function sendMessage({
     console.log(`  [${index}] ${stringValue} (${field.length} bytes): ${preview}`)
   })
 
+  const tLockStart = performance.now()
+  console.log("[Convo][timing] pushdrop.lock START")
   // Build the locking script for the PushDrop message
   const lockingScript = await pushdrop.lock(fields, [2, basket], keyID, 'anyone', true)
+  console.log(`[Convo][timing] pushdrop.lock DONE: ${(performance.now() - tLockStart).toFixed(2)} ms`)
+
   console.log('[Convo] Locking script constructed.')
 
+   const tCreateTxStart = performance.now()
+  console.log("[Convo][timing] wallet.createAction START")
   // Create the transaction
   const { tx } = await client.createAction({
     outputs: [
@@ -204,6 +222,8 @@ export async function sendMessage({
     }
   })
 
+  console.log(`[Convo][timing] wallet.createAction DONE: ${(performance.now() - tCreateTxStart).toFixed(2)} ms`)
+
   if (!tx) {
     throw new Error('[Convo] Failed to create transaction.')
   }
@@ -213,9 +233,14 @@ export async function sendMessage({
   const txid = transaction.id('hex')
   console.log(`[Convo] Created transaction. txid: ${txid}`)
 
+  const tBroadcastStart = performance.now()
+  console.log("[Convo][timing] broadcaster.broadcast START")
+
   // Broadcast to overlay
   try {
     await broadcaster.broadcast(transaction)
+    console.log(`[Convo][timing] broadcaster.broadcast DONE: ${(performance.now() - tBroadcastStart).toFixed(2)} ms`)
+
      await MB.sendNotification(
         recipients,
         JSON.stringify({ url: window.location, body: content }),
@@ -227,5 +252,9 @@ export async function sendMessage({
     throw error
   }
 
+  console.log(
+    `%csendMessage() COMPLETE: ${(performance.now() - perfStart).toFixed(2)} ms`,
+    "color: lime; font-weight: bold"
+  )
   return txid
 }

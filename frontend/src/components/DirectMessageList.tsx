@@ -9,7 +9,6 @@ import {
 } from '@mui/material'
 
 import { decodeOutputs } from '../utils/decodeOutputs'
-import { decryptMessageBatch } from '../utils/MessageDecryptor'
 import { resolveDisplayNames } from '../utils/resolveDisplayNames'
 import type { WalletInterface, WalletProtocol } from '@bsv/sdk'
 
@@ -65,7 +64,7 @@ const DirectMessageList = ({
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   // Whether we’re still waiting for overlay responses
   const [loading, setLoading] = useState<boolean>(true)
-  const pollingRef = useRef<NodeJS.Timeout | null>(null) // keep interval id if polling enabled
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null) // keep interval id if polling enabled
 
   /**
    * Query overlay + rebuild the local thread summary list
@@ -96,61 +95,69 @@ const DirectMessageList = ({
 
       // 4. Decode PushDrop fields + 5. Attempt batch decryption
       const decoded = await decodeOutputs(toDecode)
-      const decrypted = await decryptMessageBatch(wallet, decoded, protocolID, keyID)
+
+      // ✅ Only keep messages where THIS wallet is actually a recipient
+const filtered = decoded.filter(msg =>
+  msg.type === 'message' && msg.recipients?.includes(identityKey)
+)
 
       // 6. Group messages into thread summaries
       const grouped: Record<string, ThreadSummary & { isGroup: boolean }> = {}
 
-      for (const msg of decrypted) {
-        const { threadId, createdAt, payload } = msg
-        if (!payload) continue // skip undecryptable
+      for (const msg of filtered) {
+  if (msg.type !== 'message') continue
 
-        const threadName = payload.name?.trim()
-        const recipients = payload.recipients ?? []
+  const {
+    threadId,
+    recipients = [],
+    createdAt,
+    threadName,
+    encryptedThreadNameHeader,
+    encryptedThreadNameCiphertext
+  } = msg
 
-        if (!grouped[threadId]) {
-          // First message for this thread → seed summary
-          const nameMap = await resolveDisplayNames(recipients, identityKey)
-          const displayNames = Array.from(nameMap.values())
+  const isGroupThread =
+    !!threadName || (!!encryptedThreadNameHeader && !!encryptedThreadNameCiphertext)
 
-          grouped[threadId] = {
-            threadId,
-            displayNames,
-            recipientKeys: recipients,
-            lastTimestamp: createdAt,
-            isGroup: !!threadName
-          }
-        } else {
-          // Existing thread → update with new info
-          grouped[threadId].lastTimestamp = Math.max(
-            grouped[threadId].lastTimestamp,
-            createdAt
-          )
-          if (threadName) grouped[threadId].isGroup = true
+  if (!grouped[threadId]) {
+  const nameMap = await resolveDisplayNames(recipients, identityKey)
 
-          // Merge in any new recipients discovered later in the thread
-          const existing = new Set(grouped[threadId].recipientKeys)
-          let changed = false
-          for (const r of recipients) {
-            if (!existing.has(r)) {
-              existing.add(r)
-              changed = true
-            }
-          }
-          if (changed) {
-            grouped[threadId].recipientKeys = Array.from(existing)
-            const nameMap = await resolveDisplayNames(grouped[threadId].recipientKeys, identityKey)
-            grouped[threadId].displayNames = Array.from(nameMap.values())
-          }
-        }
+  // Filter yourself out of display names
+  const displayNames = Array.from(nameMap.entries())
+    .filter(([pubKey]) => pubKey !== identityKey)
+    .map(([_, name]) => name)
+
+  grouped[threadId] = {
+    threadId,
+    displayNames,
+    recipientKeys: recipients,
+    lastTimestamp: createdAt,
+    isGroup: isGroupThread
+  }
+} else {
+  // Update timestamp
+  grouped[threadId].lastTimestamp = Math.max(
+    grouped[threadId].lastTimestamp,
+    createdAt
+  )
+
+  // If a newer message adds more recipients (i.e., an invite happened)
+  if (recipients.length > grouped[threadId].recipientKeys.length) {
+    grouped[threadId].recipientKeys = recipients
+
+    const nameMap = await resolveDisplayNames(recipients, identityKey)
+    grouped[threadId].displayNames = Array.from(nameMap.entries())
+      .filter(([pubKey]) => pubKey !== identityKey)
+      .map(([_, name]) => name)
+  }
+}
       }
-
-      // 7. Only keep DM threads (no explicit threadName = not a group)
+      // Only keep Direct Message threads (no threadName)
       const directThreads = Object.values(grouped)
         .filter((t) => !t.isGroup)
-        .sort((a, b) => b.lastTimestamp - a.lastTimestamp) // newest first
+        .map(({ isGroup, ...rest }) => rest)
+        .sort((a, b) => b.lastTimestamp - a.lastTimestamp)
 
-      // Only update state if something actually changed
       const hasChanged = JSON.stringify(threads) !== JSON.stringify(directThreads)
       if (hasChanged) setThreads(directThreads)
     } catch (err) {
@@ -160,70 +167,50 @@ const DirectMessageList = ({
     }
   }
 
-  /**
-   * On mount (and whenever identity/wallet/protocolID/keyID change), reload thread list.
-   * Polling support is left in place but commented out for now.
-   */
   useEffect(() => {
     loadThreads()
     pollingRef.current = setInterval(loadThreads, POLLING_INTERVAL_MS)
     return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current)
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current as unknown as number)
+        pollingRef.current = null
+      }
     }
   }, [identityKey, wallet, protocolID, keyID])
 
-  /**
-   * Render direct message list
-   */
-  return (
-    <>
-      {loading ? (
-        <CircularProgress />
-      ) : (
-        <List disablePadding>
-          {threads.map((thread) => (
-            <ListItem key={thread.threadId} disablePadding sx={{ mb: 0.5 }}>
-              <ListItemButton
-                onClick={() => onSelectThread(thread.threadId, thread.recipientKeys)}
-                sx={(theme) => ({
-                  borderRadius: '9999px', // pill look
-                  px: 2,
-                  py: 0.75,
-                  '&:hover': {
-                    backgroundColor: theme.palette.action.hover,
-                  },
-                  '&.Mui-selected': {
-                    backgroundColor: theme.palette.primary.main,
-                    color: theme.palette.primary.contrastText,
-                    '&:hover': {
-                      backgroundColor: theme.palette.primary.dark,
-                    },
-                  },
-                })}
-              >
-                <ListItemText
-                  primary={
-                    thread.displayNames.length > 0
-                      ? `To: ${thread.displayNames.join(', ')}`
-                      : 'Unnamed Thread'
-                  }
-                  secondary={`Last activity: ${new Date(thread.lastTimestamp).toLocaleString()}`}
-                  slotProps={{
-                    primary: {
-                      noWrap: true,
-                      sx: { fontSize: 14 },
-                    },
-                    secondary: {
-                      sx: { fontSize: 12, color: 'text.secondary' },
-                    },
-                  }}
-                />
-              </ListItemButton>
-            </ListItem>
-          ))}
-        </List>
-      )}
-    </>
+  return loading ? (
+    <CircularProgress />
+  ) : (
+    <List disablePadding>
+      {threads.map((thread) => (
+        <ListItem key={thread.threadId} disablePadding sx={{ mb: 0.5 }}>
+          <ListItemButton
+            onClick={() => onSelectThread(thread.threadId, thread.recipientKeys)}
+            sx={(theme) => ({
+              borderRadius: '9999px',
+              px: 2,
+              py: 0.75,
+              '&:hover': {
+                backgroundColor: theme.palette.action.hover
+              }
+            })}
+          >
+            <ListItemText
+              primary={
+                thread.displayNames.length > 0
+                  ? `To: ${thread.displayNames.join(', ')}`
+                  : 'Unnamed Thread'
+              }
+              secondary={`Last activity: ${new Date(thread.lastTimestamp).toLocaleString()}`}
+              slotProps={{
+                primary: { noWrap: true, sx: { fontSize: 14 } },
+                secondary: { sx: { fontSize: 12, color: 'text.secondary' } }
+              }}
+            />
+          </ListItemButton>
+        </ListItem>
+      ))}
+    </List>
   )
 }
 

@@ -1,7 +1,6 @@
 // src/utils/decodeOutputs.ts
 
-import { Transaction, PushDrop, Utils, WalletInterface, WalletProtocol } from '@bsv/sdk'
-import { decryptMessage } from './MessageDecryptor'
+import { Transaction, PushDrop, Utils } from '@bsv/sdk'
 
 /**
  * DecodedMessage
@@ -26,6 +25,8 @@ export interface DecodedMessage {
   messageVout?: number
   reaction?: string
   parentMessageId?: string    // optional: txid of message being replied to
+  encryptedThreadNameHeader?: number[]
+  encryptedThreadNameCiphertext?: number[]
 }
 
 /**
@@ -49,9 +50,6 @@ export async function decodeOutput(
   beef: number[],
   outputIndex: number,
   timestamp: number,
-  wallet?: WalletInterface,
-  protocolID?: WalletProtocol,
-  keyID?: string
 ): Promise<DecodedMessage> {
   const decodedTx = Transaction.fromBEEF(beef)
   const output = decodedTx.outputs[outputIndex]
@@ -63,16 +61,17 @@ export async function decodeOutput(
   // console.log('[decodeOutput] PushDrop fields length:', fields.length)
 
 //     fields.forEach((f, i) => {
-    //   const hex = Utils.toHex(f)
-    //   let utf8: string
-    //   try {
-    //     utf8 = Utils.toUTF8(f)
-    //   } catch {
-    //     utf8 = '(non-UTF8 binary)'
-    //   }
-    //   console.log(`Field[${i}] → HEX: ${hex}`)
-    //   console.log(`Field[${i}] → UTF8: ${utf8}`)
-    // })
+//   const hex = Utils.toHex(f)
+//   let utf8: string
+//   try {
+//     utf8 = Utils.toUTF8(f)
+//   } catch {
+//     utf8 = '(non-UTF8 binary)'
+//   }
+//   console.log(`Field[${i}] → HEX: ${hex}`)
+//   console.log(`Field[${i}] → UTF8: ${utf8}`)
+// })
+
 
   // --- Detect record type from field[0] marker ---
   const marker = Utils.toUTF8(fields[0])
@@ -107,6 +106,7 @@ export async function decodeOutput(
     }
   }
 
+
   // Expecting at least 7 fields in our schema
   if (fields.length < 7) {
     throw new Error('Invalid PushDrop message: not enough fields')
@@ -121,19 +121,44 @@ export async function decodeOutput(
   // console.log('Thread ID:', threadId)
   // console.log('Sender pubkey:', sender)
 
-  // Field 6: recipients array (each an identity key)
-  const recipients = Array.isArray(fields[6])
-    ? fields[6]
-        .map((r: unknown) => {
-          try {
-            return Utils.toHex(Array.from(r as unknown as Uint8Array))
-          } catch (err) {
-            console.warn('[decodeOutput] Failed to decode recipient field:', r, err)
-            return ''
-          }
-        })
-        .filter((r) => r.length > 0)
-    : []
+  let recipients: string[] = []
+
+  try {
+    const headerField = fields[4]
+
+    // Convert PushDrop field into a byte array
+    const headerBytes: number[] = Array.isArray(headerField)
+      ? headerField as number[]
+      : Array.from(headerField as unknown as Uint8Array)
+
+    const reader = new Utils.Reader(headerBytes)
+
+    // FIX: read the header length first (varint)
+    const headerLength = reader.readVarIntNum()
+
+    // Extract just the header section (don't read payload!)
+    const headerOnly = reader.read(headerLength)
+
+    // Now parse *inside* the header
+    const headerReader = new Utils.Reader(headerOnly)
+
+    const version = headerReader.readUInt32LE()
+    const recipientCount = headerReader.readVarIntNum()
+
+    const acc: string[] = []
+
+    for (let i = 0; i < recipientCount; i++) {
+      const recipPK = Utils.toHex(headerReader.read(33)) // 33 bytes recipient pubkey
+      headerReader.read(33)                               // skip sender pubkey
+      const encLen = headerReader.readVarIntNum()         // symmetric key length
+      headerReader.read(encLen)                           // skip encrypted symmetric key
+      acc.push(recipPK)
+    }
+
+    recipients = acc
+  } catch (e) {
+    console.warn('[decodeOutput] Could not parse recipients from header:', e)
+  }
 
     // Field 7: per-message unique ID
     let uniqueID: string | undefined
@@ -145,31 +170,16 @@ export async function decodeOutput(
     }
 
     let parentMessageId: string | undefined
+  let encryptedThreadNameHeader: number[] | undefined
+  let encryptedThreadNameCiphertext: number[] | undefined
 
   // Field 8 (optional): thread name (UTF8 string)
   let threadName: string | undefined
   if (fields.length === 11) {
-    const nameHeader = fields[8] as unknown as Uint8Array
-    const nameCiphertext = fields[9] as unknown as Uint8Array
-    // console.log('[decodeOutput] Found encrypted thread name:')
+    // encrypted thread name (header + ciphertext)
+    encryptedThreadNameHeader = Array.from(fields[8] as unknown as Uint8Array)
+    encryptedThreadNameCiphertext = Array.from(fields[9] as unknown as Uint8Array)
 
-    if (wallet && protocolID && keyID) {
-      const decryptedName = await decryptMessage(
-        wallet,
-        Array.from(nameHeader),
-        Array.from(nameCiphertext),
-        protocolID,
-        keyID
-      )
-
-      // decryptedName is a MessagePayload object
-      if (decryptedName?.content) {
-        threadName = decryptedName.content.trim()
-        // console.log('[decodeOutput] Found thread name:', threadName)
-      }
-    } else {
-      // console.log('[decodeOutput] Encrypted thread name detected but no wallet/protocol provided')
-    }
   } else if (fields.length === 10) {
   const possibleValue = Utils.toUTF8(fields[8]).trim()
   // A TXID is always 64 hex chars (0–9, a–f)
@@ -208,7 +218,9 @@ export async function decodeOutput(
     recipients,
     threadName,
     uniqueID,
-    parentMessageId
+    parentMessageId,
+    encryptedThreadNameHeader,
+    encryptedThreadNameCiphertext
   }
 }
 
@@ -220,15 +232,12 @@ export async function decodeOutput(
  * - Skips and logs any failures instead of crashing the whole batch.
  */
 export async function decodeOutputs(
-  outputs: Array<{ beef: number[]; outputIndex: number; timestamp: number }>,
-  wallet?: WalletInterface,
-  protocolID?: WalletProtocol,
-  keyID?: string
+  outputs: Array<{ beef: number[]; outputIndex: number; timestamp: number }>
 ): Promise<DecodedMessage[]> {
   return Promise.all(
     outputs.map(({ beef, outputIndex, timestamp }) =>
-      decodeOutput(beef, outputIndex, timestamp, wallet, protocolID, keyID).catch((err) => {
-        console.warn(`[decodeOutputs] Skipping invalid output at vout ${outputIndex}:`, err)
+      decodeOutput(beef, outputIndex, timestamp).catch((err) => {
+        console.warn(`[decodeOutputs] Skipping invalid output @ vout ${outputIndex}:`, err)
         return null
       })
     )

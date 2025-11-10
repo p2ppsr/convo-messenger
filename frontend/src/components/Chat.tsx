@@ -151,9 +151,13 @@ export const Chat: React.FC<ChatProps> = ({
   // Load messages (with batch reply counts)
   useEffect(() => {
     const fetchMessages = async () => {
+      const start = performance.now()
+      console.log("[Chat] fetchMessages START")
       try {
+        const t0 = performance.now()
         console.log('[Chat] Fetching messages for thread:', threadId)
         const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
+        console.log(`[Chat] loadMessages returned in ${(performance.now() - t0) * 1000} μs`)
         if (!result || !('messages' in result)) throw new Error('Unexpected loadMessages result')
 
         const {
@@ -183,6 +187,7 @@ export const Chat: React.FC<ChatProps> = ({
       } finally {
         setLoading(false)
         scrollToBottom()
+        console.log(`[Chat] fetchMessages DONE (${(performance.now() - start) * 1000} μs)`)
       }
     }
 
@@ -204,7 +209,10 @@ export const Chat: React.FC<ChatProps> = ({
       try {
         console.log("[Chat] Polling overlay for updates...")
 
+        const t0 = performance.now()
+        console.log('[Chat] Fetching messages for thread:', threadId)
         const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
+        console.log(`[Chat] loadMessages returned in ${(performance.now() - t0) * 1000} μs`)
         if (!result || !("messages" in result)) throw new Error("Unexpected loadMessages result")
 
         const {
@@ -215,6 +223,7 @@ export const Chat: React.FC<ChatProps> = ({
           latestReplyTimes: loadedLatestReplyTimes
         } = result
 
+        const tMergeStart = performance.now()
         setMessages(prev => {
           const merged = mergeMessages(prev, loadedMessages)
 
@@ -258,6 +267,7 @@ export const Chat: React.FC<ChatProps> = ({
             }
           }
 
+          console.log(`[Chat] mergeMessages took ${(performance.now() - tMergeStart) * 1000} μs`)
           return merged
         })
 
@@ -295,6 +305,7 @@ export const Chat: React.FC<ChatProps> = ({
   }, [threadId, client, protocolID, keyID])
 
   useEffect(() => {
+    const tPoll = performance.now()
     const loadFilePreviews = async () => {
       for (const msg of messages) {
         let parsed: any
@@ -379,6 +390,7 @@ export const Chat: React.FC<ChatProps> = ({
       }
     }
 
+    console.log(`[Chat] Poll FINISHED after ${(performance.now() - tPoll) * 1000} μs`)
     if (messages.length > 0) loadFilePreviews()
   }, [messages])
 
@@ -446,25 +458,41 @@ export const Chat: React.FC<ChatProps> = ({
   const handleSend = async () => {
     if ((!newMessage.trim() && pendingFiles.length === 0) || sending) return
 
+    const perfStart = performance.now()
+    console.log(`\n\n[Chat][handleSend] START @ ${perfStart.toFixed(3)} ms`)
+
     setSending(true)
     setSendingTxid("pending")
     isSendingRef.current = true
 
     try {
+      const uploadStart = performance.now()
       const fileMessages = []
       for (const file of pendingFiles) {
+        const fStart = performance.now()
+        console.log(`[Chat][handleSend] → uploadEncryptedFile("${file.name}") START`)
         const f = await uploadEncryptedFile(
           client, protocolID, keyID, currentRecipients, file
         )
         fileMessages.push(f)
+        console.log(`[Chat][handleSend] → uploadEncryptedFile("${file.name}") DONE @ ${(performance.now() - fStart) * 1000} μs`)
       }
 
+      const payloadStart = performance.now()
       const payload = {
         type: "bundle",
         text: newMessage.trim(),
         files: fileMessages
       }
+      console.log(
+      `[Chat][handleSend] payload JSON SIZE: ${JSON.stringify(payload).length} bytes`
+      )
+      console.log(
+        `[Chat][handleSend] PAYLOAD BUILD TIME: ${(performance.now() - payloadStart).toFixed(2)} ms`
+      )
 
+      const sendStart = performance.now()
+    console.log(`[Chat][handleSend] → sendMessage START`)
       const txid = await sendMessage({
         client,
         protocolID,
@@ -475,13 +503,26 @@ export const Chat: React.FC<ChatProps> = ({
         content: JSON.stringify(payload),
         threadName
       })
+      console.log(
+      `[Chat][handleSend] ← sendMessage DONE: ${(performance.now() - sendStart).toFixed(2)} ms`
+    )
       console.log("[Chat] Message sent with txid:", txid)
 
+      const resetStart = performance.now()
       setNewMessage("")
       setPendingFiles([])
       setSending(false)
       setSendingTxid(null)
       isSendingRef.current = false
+
+      console.log(
+      `[Chat][handleSend] STATE RESET: ${(performance.now() - resetStart).toFixed(2)} ms`
+    )
+
+    console.log(
+      `%c[Chat][handleSend] COMPLETE: ${(performance.now() - perfStart).toFixed(2)} ms`,
+      "color: green; font-weight: bold"
+    )
 
     } catch (err) {
       console.error("[Chat] Failed to send:", err)
@@ -568,17 +609,34 @@ export const Chat: React.FC<ChatProps> = ({
 
   // File upload
   const handleFileSelected = async (file: File) => {
+    const perfStart = performance.now()
+    console.log(`\n\n[Upload][handleFileSelected] START @ ${perfStart.toFixed(3)} ms`)
     isSendingRef.current = true
     setUploading(true)
     setSendingTxid('pending')
     try {
+      const encryptStart = performance.now()
+      console.log(`[Upload] → uploadEncryptedFile("${file.name}") START`)
       console.log("[Upload] Starting encrypted file upload...");
       const { handle, header, filename, mimetype } = await uploadEncryptedFile(client, protocolID, keyID, currentRecipients, file)
+      const encryptEnd = performance.now()
+    console.log(
+      `[Upload] ← uploadEncryptedFile("${file.name}") DONE: ${(encryptEnd - encryptStart).toFixed(2)} ms`
+    )
       console.log("[Upload] Finished upload. Preparing sendMessage...");
+      const buildStart = performance.now()
       const fileMessage = JSON.stringify({ type: 'file', handle, header, filename, mimetype })
+      console.log(
+      `[Upload] fileMessage JSON size: ${fileMessage.length} bytes`
+    )
+    console.log(
+      `[Upload] FILE MESSAGE BUILD TIME: ${(performance.now() - buildStart).toFixed(2)} ms`
+    )
 
       setSendingTxid('pending')
 
+      const sendStart = performance.now()
+    console.log("[Upload] → sendMessage START")
       const txid = await sendMessage({
         client,
         protocolID,
@@ -591,9 +649,19 @@ export const Chat: React.FC<ChatProps> = ({
       })
       console.log('[Chat] File message sent with txid:', txid)
 
+      console.log(
+      `[Upload] ← sendMessage DONE: ${(performance.now() - sendStart).toFixed(2)} ms`
+    )
+    console.log("[Chat] File message sent with txid:", txid)
+
     } catch (err) {
       console.error('[Chat] Failed to upload file:', err)
     } finally {
+      const perfEnd = performance.now()
+    console.log(
+      `%c[Upload][handleFileSelected] COMPLETE: ${(perfEnd - perfStart).toFixed(2)} ms`,
+      "color: cyan; font-weight: bold"
+    )
       setUploading(false)
       setSendingTxid(null)
       isSendingRef.current = false
