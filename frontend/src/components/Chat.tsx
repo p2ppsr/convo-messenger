@@ -29,6 +29,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useIsMobile } from '../utils/useIsMobile'
 import { useGesture } from '@use-gesture/react'
 import { send } from 'process'
+import { getPreviewForMessage } from '../utils/getPreviewForMessage'
 
 interface ChatProps {
   client: WalletClient
@@ -117,6 +118,7 @@ export const Chat: React.FC<ChatProps> = ({
   const messageListRef = useRef<HTMLDivElement | null>(null)
   const [showNewMessageAlert, setShowNewMessageAlert] = useState(false)
   const [incomingPreview, setIncomingPreview] = useState<string>("")
+  const previewLoading = useRef<boolean>(false)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -305,94 +307,88 @@ export const Chat: React.FC<ChatProps> = ({
   }, [threadId, client, protocolID, keyID])
 
   useEffect(() => {
-    const tPoll = performance.now()
-    const loadFilePreviews = async () => {
+  if (previewLoading.current) return;
+  if (messages.length === 0) return;
+
+  previewLoading.current = true;
+  const tPoll = performance.now();
+
+  const loadFilePreviews = async () => {
+    try {
       for (const msg of messages) {
-        let parsed: any
+        let parsed: any;
         try {
-          parsed = JSON.parse(msg.content)
+          parsed = JSON.parse(msg.content);
         } catch {
-          continue
+          continue;
         }
 
-        // ---- Support both single files and bundles ----
         const filesToProcess =
-          parsed?.type === 'file'
+          parsed?.type === "file"
             ? [parsed]
-            : parsed?.type === 'bundle' && Array.isArray(parsed.files)
+            : parsed?.type === "bundle" && Array.isArray(parsed.files)
             ? parsed.files
-            : []
+            : [];
 
         for (const file of filesToProcess) {
-          if (!file?.handle) continue
+          if (!file?.handle) continue;
 
+          // Skip if preview already exists or marked EXPIRED
+          if (imagePreviews[file.handle] !== undefined) continue;
+
+          // ---- Fetch expiry metadata (non-blocking UI)
           try {
-            // --- Fetch expiry info first ---
-            try {
-              const info = await getFileExpiry(client, file.handle)
-              const expires =
-                typeof info?.expiresInMs === 'number' && info.expiresInMs > 0
-                  ? info.expiresInMs
-                  : undefined
-              if (expires !== undefined) {
-                const hrs = Math.floor(expires / 3600000)
-                const mins = Math.floor((expires % 3600000) / 60000)
-                setFileExpirations(prev => ({
-                  ...prev,
-                  [file.handle]: {
-                    text: `${hrs}h ${mins}m remaining`,
-                    expiryTime: Date.now() + expires
-                  }
-                }))
-              }
-            } catch (err) {
-              console.warn('[Chat] Could not get expiry for', file.filename, err)
-            }
+            const info = await getFileExpiry(client, file.handle);
+            const expires =
+              typeof info?.expiresInMs === "number" && info.expiresInMs > 0
+                ? info.expiresInMs
+                : undefined;
 
-            // --- Skip preview if already loaded ---
-            if (imagePreviews[file.handle]) continue
-
-            // --- Download & decrypt preview ---
-            try {
-              const blob = await downloadAndDecryptFile(
-                client,
-                protocolID,
-                keyID,
-                file.handle,
-                file.header,
-                file.mimetype
-              )
-
-              if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
-                const url = URL.createObjectURL(blob)
-                setImagePreviews(prev => ({ ...prev, [file.handle]: url }))
-              } else if (file.mimetype.startsWith('text/')) {
-                const text = await blob.text()
-                const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
-                setImagePreviews(prev => ({ ...prev, [file.handle]: snippet }))
-              } else if (file.mimetype.startsWith('audio/')) {
-                const audioUrl = URL.createObjectURL(blob)
-                setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'audio', audioUrl } }))
-              } else if (file.mimetype.startsWith('video/')) {
-                const videoUrl = URL.createObjectURL(blob)
-                setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'video', videoUrl } }))
-              } else {
-                setImagePreviews(prev => ({ ...prev, [file.handle]: null }))
-              }
-            } catch (err) {
-              console.warn('[Chat] Failed to load preview for', file.filename, err)
-              setImagePreviews(prev => ({ ...prev, [file.handle]: 'EXPIRED' }))
+            if (expires !== undefined) {
+              const hrs = Math.floor(expires / 3600000);
+              const mins = Math.floor((expires % 3600000) / 60000);
+              setFileExpirations((prev) => ({
+                ...prev,
+                [file.handle]: {
+                  text: `${hrs}h ${mins}m remaining`,
+                  expiryTime: Date.now() + expires,
+                },
+              }));
             }
           } catch (err) {
-            console.error('[Chat] Unexpected error in file loop:', err)
+            console.warn("[Chat] Could not get expiry for", file.filename, err);
+          }
+
+          // ---- Download & decrypt preview (cached by handle)
+          try {
+            const preview = await getPreviewForMessage(
+              client,
+              protocolID,
+              keyID,
+              msg,
+              file
+            );
+
+            setImagePreviews((prev) => ({ ...prev, [file.handle]: preview }));
+          } catch (err) {
+            console.warn("[Chat] Failed to load preview for", file.filename, err);
+            setImagePreviews((prev) => ({ ...prev, [file.handle]: "EXPIRED" }));
           }
         }
       }
+    } finally {
+      previewLoading.current = false;
+      console.log(
+        `[Chat] Preview pass finished in ${(performance.now() - tPoll).toFixed(
+          1
+        )}ms`
+      );
     }
+  };
 
-    console.log(`[Chat] Poll FINISHED after ${(performance.now() - tPoll) * 1000} μs`)
-    if (messages.length > 0) loadFilePreviews()
-  }, [messages])
+  loadFilePreviews();
+}, [messages, client, protocolID, keyID]);
+
 
   // Fullscreen image viewer with gallery support
   const [openGallery, setOpenGallery] = useState<{

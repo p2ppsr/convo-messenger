@@ -22,6 +22,7 @@ import EmojiPicker from './EmojiPicker'
 import { POLLING_ENABLED } from '../utils/constants'
 import { useGesture } from '@use-gesture/react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { getPreviewForMessage } from '../utils/getPreviewForMessage'
 // import { send } from 'process'
 
 interface ThreadPanelProps {
@@ -111,6 +112,8 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
   const messageListRef = useRef<HTMLDivElement | null>(null)
   const [showNewMessageAlert, setShowNewMessageAlert] = useState(false)
   const [incomingPreview, setIncomingPreview] = useState<string>("")
+  const previewLoading = useRef<boolean>(false)
+  const previewLoadingParent = useRef<boolean>(false)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -275,172 +278,149 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
 
   // ============================= FILE PREVIEWS =============================
   useEffect(() => {
-    const loadFilePreviews = async () => {
+  const loadFilePreviews = async () => {
+    if (previewLoading.current) return;
+    previewLoading.current = true;
+
+    try {
       for (const msg of messages) {
-        let parsed: any
+        let parsed: any;
         try {
-          parsed = JSON.parse(msg.content)
+          parsed = JSON.parse(msg.content);
         } catch {
-          continue
+          continue;
         }
 
-        // ---- Support both single files and bundles ----
         const filesToProcess =
-          parsed?.type === 'file'
+          parsed?.type === "file"
             ? [parsed]
-            : parsed?.type === 'bundle' && Array.isArray(parsed.files)
+            : parsed?.type === "bundle" && Array.isArray(parsed.files)
             ? parsed.files
-            : []
+            : [];
 
         for (const file of filesToProcess) {
-          if (!file?.handle) continue
+          if (!file?.handle) continue;
+
+          // Skip if preview already exists OR was cached as EXPIRED
+          if (imagePreviews[file.handle] !== undefined) continue;
 
           try {
-            // --- Fetch expiry info first ---
+            // --- get expiry for display ---
             try {
-              const info = await getFileExpiry(client, file.handle)
+              const info = await getFileExpiry(client, file.handle);
               const expires =
-                typeof info?.expiresInMs === 'number' && info.expiresInMs > 0
+                typeof info?.expiresInMs === "number" && info.expiresInMs > 0
                   ? info.expiresInMs
-                  : undefined
+                  : undefined;
               if (expires !== undefined) {
-                const hrs = Math.floor(expires / 3600000)
-                const mins = Math.floor((expires % 3600000) / 60000)
-                setFileExpirations(prev => ({
+                const hrs = Math.floor(expires / 3600000);
+                const mins = Math.floor((expires % 3600000) / 60000);
+                setFileExpirations((prev) => ({
                   ...prev,
                   [file.handle]: {
                     text: `${hrs}h ${mins}m remaining`,
-                    expiryTime: Date.now() + expires
-                  }
-                }))
+                    expiryTime: Date.now() + expires,
+                  },
+                }));
               }
             } catch (err) {
-              console.warn('[Chat] Could not get expiry for', file.filename, err)
+              console.warn("[Chat] Could not get expiry for", file.filename, err);
             }
 
-            // --- Skip preview if already loaded ---
-            if (imagePreviews[file.handle]) continue
+            // Preview fetch
+            const preview = await getPreviewForMessage(client, protocolID, keyID, msg, file);
+            setImagePreviews((prev) => ({ ...prev, [file.handle]: preview }));
 
-            // --- Download & decrypt preview ---
-            try {
-              const blob = await downloadAndDecryptFile(
-                client,
-                protocolID,
-                keyID,
-                file.handle,
-                file.header,
-                file.mimetype
-              )
-
-              if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
-                const url = URL.createObjectURL(blob)
-                setImagePreviews(prev => ({ ...prev, [file.handle]: url }))
-              } else if (file.mimetype.startsWith('text/')) {
-                const text = await blob.text()
-                const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
-                setImagePreviews(prev => ({ ...prev, [file.handle]: snippet }))
-              } else if (file.mimetype.startsWith('audio/')) {
-              const audioUrl = URL.createObjectURL(blob)
-              setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'audio', audioUrl } }))
-              } else if (file.mimetype.startsWith('video/')) {
-                const videoUrl = URL.createObjectURL(blob)
-                setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'video', videoUrl } }))
-              } else {
-                setImagePreviews(prev => ({ ...prev, [file.handle]: null }))
-              }
-            } catch (err) {
-              console.warn('[Chat] Failed to load preview for', file.filename, err)
-              setImagePreviews(prev => ({ ...prev, [file.handle]: 'EXPIRED' }))
-            }
           } catch (err) {
-            console.error('[Chat] Unexpected error in file loop:', err)
+            console.warn("[Chat] Failed to load preview for", file.filename, err);
+            setImagePreviews((prev) => ({ ...prev, [file.handle]: "EXPIRED" }));
           }
         }
       }
+    } finally {
+      previewLoading.current = false;   // unlock so polling can resume
     }
+  };
 
-    if (messages.length > 0) loadFilePreviews()
-  }, [messages])
+  if (messages.length > 0) loadFilePreviews();
+}, [messages]);
+
 
   // ============================= PARENT MESSAGE PREVIEWS =============================
   useEffect(() => {
-    if (!parentMessage) return
+  if (!parentMessage) return;
+  if (previewLoadingParent.current) return;
+  previewLoadingParent.current = true;
 
-    const loadParentPreviews = async () => {
-      let parsed: any
+  const loadParentPreviews = async () => {
+    try {
+      let parsed: any;
       try {
-        parsed = JSON.parse(parentMessage.content)
+        parsed = JSON.parse(parentMessage.content);
       } catch {
-        return
+        return;
       }
 
       const filesToProcess =
-        parsed?.type === 'file'
+        parsed?.type === "file"
           ? [parsed]
-          : parsed?.type === 'bundle' && Array.isArray(parsed.files)
+          : parsed?.type === "bundle" && Array.isArray(parsed.files)
           ? parsed.files
-          : []
+          : [];
 
       for (const file of filesToProcess) {
-        if (!file?.handle) continue
+        if (!file?.handle) continue;
 
-        // --- Fetch expiry info first ---
-      try {
-        const info = await getFileExpiry(client, file.handle)
-        const expires =
-          typeof info?.expiresInMs === 'number' && info.expiresInMs > 0
-            ? info.expiresInMs
-            : undefined
-        if (expires !== undefined) {
-          const hrs = Math.floor(expires / 3600000)
-          const mins = Math.floor((expires % 3600000) / 60000)
-          setFileExpirations(prev => ({
-            ...prev,
-            [file.handle]: {
-              text: `${hrs}h ${mins}m remaining`,
-              expiryTime: Date.now() + expires
-            }
-          }))
-        }
-      } catch (err) {
-        console.warn('[ThreadPanel] Could not get expiry for parent file', file.filename, err)
-      }
+        // Skip if preview already exists or marked EXPIRED
+        if (imagePreviews[file.handle] !== undefined) continue;
 
+        // ---- Fetch expiry (non-blocking UI)
         try {
-          const blob = await downloadAndDecryptFile(
+          const info = await getFileExpiry(client, file.handle);
+          const expires =
+            typeof info?.expiresInMs === "number" && info.expiresInMs > 0
+              ? info.expiresInMs
+              : undefined;
+
+          if (expires !== undefined) {
+            const hrs = Math.floor(expires / 3600000);
+            const mins = Math.floor((expires % 3600000) / 60000);
+
+            setFileExpirations((prev) => ({
+              ...prev,
+              [file.handle]: {
+                text: `${hrs}h ${mins}m`,
+                expiryTime: Date.now() + expires,
+              },
+            }));
+          }
+        } catch (err) {
+          console.warn("[ThreadPanel] Could not get expiry for parent file", file.filename, err);
+        }
+
+        // ---- Download & decrypt preview ----
+        try {
+          const preview = await getPreviewForMessage(
             client,
             protocolID,
             keyID,
-            file.handle,
-            file.header,
-            file.mimetype
-          )
-
-          if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
-            const url = URL.createObjectURL(blob)
-            setImagePreviews((prev) => ({ ...prev, [file.handle]: url }))
-          } else if (file.mimetype.startsWith('text/')) {
-            const text = await blob.text()
-            const snippet = text.length > 500 ? text.slice(0, 500) + '…' : text
-            setImagePreviews((prev) => ({ ...prev, [file.handle]: snippet }))
-          } else if (file.mimetype.startsWith('audio/')) {
-              const audioUrl = URL.createObjectURL(blob)
-              setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'audio', audioUrl } }))
-          } else if (file.mimetype.startsWith('video/')) {
-            const videoUrl = URL.createObjectURL(blob)
-            setImagePreviews(prev => ({ ...prev, [file.handle]: { type: 'video', videoUrl } }))
-          } else {
-            setImagePreviews((prev) => ({ ...prev, [file.handle]: null }))
-          }
+            parentMessage,
+            file
+          );
+          setImagePreviews((prev) => ({ ...prev, [file.handle]: preview }));
         } catch (err) {
-          console.warn('[ThreadPanel] Failed to load parent preview for', file.filename, err)
-          setImagePreviews((prev) => ({ ...prev, [file.handle]: 'EXPIRED' }))
+          console.warn("[ThreadPanel] Failed to load parent preview", file.filename, err);
+          setImagePreviews((prev) => ({ ...prev, [file.handle]: "EXPIRED" }));
         }
       }
+    } finally {
+      previewLoadingParent.current = false;
     }
+  };
 
-    loadParentPreviews()
-  }, [parentMessage, client, protocolID, keyID])
+  loadParentPreviews();
+}, [parentMessage, client, protocolID, keyID]);
+
 
   // Ensure parent sender is inserted once parentMessage becomes available
 useEffect(() => {
