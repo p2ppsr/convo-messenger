@@ -7,6 +7,12 @@ import {
 import { checkMessages } from './checkMessages'
 import type { MessagePayloadWithMetadata } from '../types/types'
 import { resolveDisplayNames } from './resolveDisplayNames'
+import {
+  addToCache,
+  getFromCache,
+  type CachedMessage
+} from './messageCache'
+import { Transaction } from '@bsv/sdk';
 
 export interface LoadMessagesOptions {
   client: WalletInterface
@@ -19,6 +25,7 @@ interface OverlayOutput {
   outputIndex: number
   beef: number[]
   context?: number[]
+  uniqueID?: string
 }
 
 export async function loadMessages({
@@ -80,18 +87,72 @@ export async function loadMessages({
         if (!isNaN(parsed)) timestamp = parsed
       }
     } catch {}
-    return { beef: o.beef, outputIndex: o.outputIndex, timestamp }
+    return { beef: o.beef, outputIndex: o.outputIndex, timestamp, uniqueID: (o as any).uniqueID }
   })
 
   console.log(`[LoadMessages] Decoding and decrypting ${lookupResults.length} outputs...`)
 
-  // --- Step 3: Decode + decrypt ---
-  const { messages: rawMessages, reactions: rawReactions } = await checkMessages({
+  // --- Step 3: separate cached vs new based on txid:vout or uniqueID ---
+const cachedMessages: MessagePayloadWithMetadata[] = [];
+const newLookupResults: typeof lookupResults = [];
+
+for (const o of lookupResults) {
+
+  // ✅ Always derive txid correctly from BEEF
+  const tx = Transaction.fromBEEF(o.beef);
+  const txid = tx.id("hex");
+
+  // ✅ Use the right unique lookup key
+  const lookupKey = o.uniqueID ?? `${txid}:${o.outputIndex}`;
+
+  const cached = getFromCache(lookupKey);
+
+  if (cached) {
+    cachedMessages.push(cached.payload as MessagePayloadWithMetadata);
+  } else {
+    newLookupResults.push(o);
+  }
+}
+
+console.log(
+  `[LoadMessages] Cache hits: ${cachedMessages.length} | Misses: ${newLookupResults.length}`
+);
+
+
+let decryptedMessages: MessagePayloadWithMetadata[] = []
+let rawReactions: any[] = []
+
+if (newLookupResults.length > 0) {
+  const { messages, reactions } = await checkMessages({
     client,
     protocolID,
     keyID,
-    lookupResults
+    lookupResults: newLookupResults
   })
+
+  decryptedMessages = messages
+  rawReactions = reactions
+
+  for (const m of decryptedMessages) {
+
+  const lookupKey = `${m.txid}:${m.vout}`
+
+  console.log(`[LoadMessages] Caching decrypted message: ${lookupKey}`);
+  addToCache({
+    uniqueID: lookupKey,
+    threadId: m.threadId,
+    payload: m,
+    createdAt: m.createdAt,
+    filePreviews: {}
+  });
+}
+
+
+}
+
+  // merged is all decrypted + cached
+  const rawMessages = [...cachedMessages, ...decryptedMessages]
+
 
   console.log(`[LoadMessages] Retrieved ${rawMessages.length} messages, ${rawReactions.length} reactions.`)
 

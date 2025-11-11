@@ -94,7 +94,8 @@ export async function checkMessages({
           content: decrypted.content,
           mediaURL: decrypted.mediaURL,
           createdAt: msg.createdAt,
-          recipients: decrypted.recipients || [],
+          // recipients: decrypted.recipients || [],
+          recipients: msg.recipients ?? decrypted.recipients ?? [],
           threadName: msg.threadName || undefined,
           uniqueID: msg.uniqueID || undefined,
           parentMessageId: msg.parentMessageId || undefined
