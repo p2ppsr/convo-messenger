@@ -18,7 +18,7 @@ import {
   Popover
 } from '@mui/material'
 import FileUpload from './FileUpload'
-import type { DisplayableIdentity, WalletClient, WalletProtocol } from '@bsv/sdk'
+import type { DisplayableIdentity, WalletClient, WalletProtocol, LookupResolver } from '@bsv/sdk'
 import type { MessagePayloadWithMetadata } from '../types/types'
 import { sendReaction } from '../utils/sendReaction'
 import AddReactionIcon from '@mui/icons-material/AddReaction'
@@ -39,6 +39,7 @@ interface ChatProps {
   threadId: string
   recipientPublicKeys: string[]
   threadName?: string
+  resolver: LookupResolver
 }
 
 type PreviewEntry =
@@ -83,7 +84,8 @@ export const Chat: React.FC<ChatProps> = ({
   senderPublicKey,
   threadId,
   recipientPublicKeys,
-  threadName
+  threadName,
+  resolver
 }) => {
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
   const [newMessage, setNewMessage] = useState('')
@@ -158,7 +160,7 @@ export const Chat: React.FC<ChatProps> = ({
       try {
         const t0 = performance.now()
         console.log('[Chat] Fetching messages for thread:', threadId)
-        const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
+        const result = await loadMessages({ client, protocolID, keyID, topic: threadId, resolver })
         console.log(`[Chat] loadMessages returned in ${(performance.now() - t0) * 1000} μs`)
         if (!result || !('messages' in result)) throw new Error('Unexpected loadMessages result')
 
@@ -213,7 +215,7 @@ export const Chat: React.FC<ChatProps> = ({
 
         const t0 = performance.now()
         console.log('[Chat] Fetching messages for thread:', threadId)
-        const result = await loadMessages({ client, protocolID, keyID, topic: threadId })
+        const result = await loadMessages({ client, protocolID, keyID, topic: threadId, resolver })
         console.log(`[Chat] loadMessages returned in ${(performance.now() - t0) * 1000} μs`)
         if (!result || !("messages" in result)) throw new Error("Unexpected loadMessages result")
 
@@ -1422,6 +1424,7 @@ export const Chat: React.FC<ChatProps> = ({
                 recipientPublicKeys={currentRecipients}
                 nameMap={nameMap}
                 setNameMap={setNameMap}
+                resolver={resolver}
               />
             </motion.div>
           ) : (
@@ -1458,6 +1461,7 @@ export const Chat: React.FC<ChatProps> = ({
                 recipientPublicKeys={currentRecipients}
                 nameMap={nameMap}
                 setNameMap={setNameMap}
+                resolver={resolver}
               />
             </motion.div>
           )

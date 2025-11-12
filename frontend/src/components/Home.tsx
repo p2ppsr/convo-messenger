@@ -13,20 +13,22 @@ import Chat from './Chat'
 import { useIsMobile } from '../utils/useIsMobile'
 
 // Types
-import type { WalletClient, WalletProtocol } from '@bsv/sdk'
+import type { WalletClient, WalletProtocol, LookupResolver } from '@bsv/sdk'
 
 interface HomeProps {
   identityKey: string
   walletClient: WalletClient
   protocolID: WalletProtocol
   keyID: string
+  resolver: LookupResolver
 }
 
 const Home: React.FC<HomeProps> = ({
   identityKey,
   walletClient,
   protocolID,
-  keyID
+  keyID,
+  resolver
 }) => {
   const navigate = useNavigate()
   const { threadId } = useParams()
@@ -64,6 +66,7 @@ const Home: React.FC<HomeProps> = ({
             client={walletClient}
             protocolID={protocolID}
             keyID={keyID}
+            resolver={resolver}
           />
 
           <Box
@@ -85,6 +88,7 @@ const Home: React.FC<HomeProps> = ({
                 threadId={threadId}
                 recipientPublicKeys={location.state?.recipientPublicKeys || []}
                 threadName={location.state?.threadName}
+                resolver={resolver}
               />
             ) : (
               <Typography variant="h5" sx={{ color: '#888' }}>
@@ -117,6 +121,7 @@ const Home: React.FC<HomeProps> = ({
                 client={walletClient}
                 protocolID={protocolID}
                 keyID={keyID}
+                resolver={resolver}
               />
             </Box>
           )}
@@ -177,6 +182,7 @@ const Home: React.FC<HomeProps> = ({
                   threadId={threadId}
                   recipientPublicKeys={location.state?.recipientPublicKeys || []}
                   threadName={location.state?.threadName}
+                  resolver={resolver}
                 />
               </Box>
             </Box>

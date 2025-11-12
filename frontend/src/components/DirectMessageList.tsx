@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
-import { LookupResolver, Utils } from '@bsv/sdk'
+import { LookupResolver, Utils, Transaction } from '@bsv/sdk'
 import {
   List,
   ListItem,
@@ -11,6 +11,7 @@ import {
 import { decodeOutputs } from '../utils/decodeOutputs'
 import { resolveDisplayNames } from '../utils/resolveDisplayNames'
 import type { WalletInterface, WalletProtocol } from '@bsv/sdk'
+import { addThreadSummary, getThreadSummary } from '../utils/threadCache'
 
 /**
  * ThreadSummary
@@ -36,6 +37,7 @@ interface DirectMessageListProps {
   protocolID: WalletProtocol
   keyID: string
   onSelectThread: (threadId: string, recipientKeys: string[]) => void
+  resolver: LookupResolver
 }
 
 const POLLING_INTERVAL_MS = 5000  // optional refresh interval (ms)
@@ -58,7 +60,8 @@ const DirectMessageList = ({
   wallet,
   protocolID,
   keyID,
-  onSelectThread
+  onSelectThread,
+  resolver
 }: DirectMessageListProps) => {
   // Local state for thread summaries
   const [threads, setThreads] = useState<ThreadSummary[]>([])
@@ -71,88 +74,111 @@ const DirectMessageList = ({
    */
   const loadThreads = async () => {
     try {
-      // 1. Create resolver targeting local or mainnet
-      const resolver = new LookupResolver({
-        networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
-      })
-
-      // 2. Ask overlay for all convo outputs
       const response = await resolver.query({
         service: 'ls_convo',
         query: { type: 'findAll' }
       })
-
       if (response.type !== 'output-list') {
         throw new Error(`Unexpected response type: ${response.type}`)
       }
 
-      // 3. Normalize results for decodeOutputs
       const toDecode = response.outputs.map((o) => ({
-        beef: o.beef,                        // raw tx in BEEF encoding
-        outputIndex: o.outputIndex,          // which vout
-        timestamp: parseInt(Utils.toUTF8(o.context ?? [])) // overlay attaches context timestamp
+        beef: o.beef,
+        outputIndex: o.outputIndex,
+        timestamp: parseInt(Utils.toUTF8(o.context ?? []))
       }))
 
-      // 4. Decode PushDrop fields + 5. Attempt batch decryption
       const decoded = await decodeOutputs(toDecode)
-
-      // ✅ Only keep messages where THIS wallet is actually a recipient
-const filtered = decoded.filter(msg =>
-  msg.type === 'message' && msg.recipients?.includes(identityKey)
-)
-
-      // 6. Group messages into thread summaries
       const grouped: Record<string, ThreadSummary & { isGroup: boolean }> = {}
 
-      for (const msg of filtered) {
-  if (msg.type !== 'message') continue
+      for (let i = 0; i < decoded.length; i++) {
+        const msg = decoded[i]
+        if (msg.type !== 'message') continue
 
-  const {
-    threadId,
-    recipients = [],
-    createdAt,
-    threadName,
-    encryptedThreadNameHeader,
-    encryptedThreadNameCiphertext
-  } = msg
+        const base = toDecode[i]
+        const tx = Transaction.fromBEEF(base.beef)
+        const txid = tx.id('hex')
+        const lookupKey = `${txid}:${base.outputIndex}`
 
-  const isGroupThread =
-    !!threadName || (!!encryptedThreadNameHeader && !!encryptedThreadNameCiphertext)
+        const {
+          threadId,
+          recipients = [],
+          createdAt,
+          threadName,
+          encryptedThreadNameHeader,
+          encryptedThreadNameCiphertext
+        } = msg
 
-  if (!grouped[threadId]) {
-  const nameMap = await resolveDisplayNames(recipients, identityKey)
+        const isGroup =
+          !!threadName || (!!encryptedThreadNameHeader && !!encryptedThreadNameCiphertext)
 
-  // Filter yourself out of display names
-  const displayNames = Array.from(nameMap.entries())
-    .filter(([pubKey]) => pubKey !== identityKey)
-    .map(([_, name]) => name)
+        // Only include if I'm a participant
+        if (!recipients.includes(identityKey)) continue
+        // Check cache first
+        const cached = getThreadSummary(threadId)
 
-  grouped[threadId] = {
-    threadId,
-    displayNames,
-    recipientKeys: recipients,
-    lastTimestamp: createdAt,
-    isGroup: isGroupThread
-  }
-} else {
-  // Update timestamp
-  grouped[threadId].lastTimestamp = Math.max(
-    grouped[threadId].lastTimestamp,
-    createdAt
-  )
+        if (cached) {
+          // Already have a summary — just update timestamp if needed
+          if (!grouped[threadId]) {
+            grouped[threadId] = cached
+          } else {
+            grouped[threadId].lastTimestamp = Math.max(
+              grouped[threadId].lastTimestamp,
+              createdAt
+            )
+          }
+          continue
+        }
 
-  // If a newer message adds more recipients (i.e., an invite happened)
-  if (recipients.length > grouped[threadId].recipientKeys.length) {
-    grouped[threadId].recipientKeys = recipients
+        // Not cached — resolve names once
+        const nameMap = await resolveDisplayNames(recipients, identityKey)
+        const displayNames = Array.from(nameMap.entries())
+          .filter(([pub]) => pub !== identityKey)
+          .map(([_, name]) => name)
 
-    const nameMap = await resolveDisplayNames(recipients, identityKey)
-    grouped[threadId].displayNames = Array.from(nameMap.entries())
-      .filter(([pubKey]) => pubKey !== identityKey)
-      .map(([_, name]) => name)
-  }
-}
+        // Add to grouped summary
+        if (!grouped[threadId]) {
+          grouped[threadId] = {
+            threadId,
+            recipientKeys: recipients,
+            displayNames,
+            lastTimestamp: createdAt,
+            isGroup: false
+          }
+        } else {
+          grouped[threadId].lastTimestamp = Math.max(
+            grouped[threadId].lastTimestamp,
+            createdAt
+          )
+        }
+
+        // Cache this thread summary for faster reuse
+        addThreadSummary({
+          threadId,
+          threadName: '',
+          recipientKeys: recipients,
+          displayNames,
+          lastTimestamp: createdAt,
+          isGroup: false
+        })
+
+
+        if (!grouped[threadId]) {
+          grouped[threadId] = {
+            threadId,
+            recipientKeys: recipients,
+            displayNames,
+            lastTimestamp: createdAt,
+            isGroup
+          }
+        } else {
+          grouped[threadId].lastTimestamp = Math.max(
+            grouped[threadId].lastTimestamp,
+            createdAt
+          )
+        }
       }
-      // Only keep Direct Message threads (no threadName)
+
       const directThreads = Object.values(grouped)
         .filter((t) => !t.isGroup)
         .map(({ isGroup, ...rest }) => rest)
@@ -166,6 +192,7 @@ const filtered = decoded.filter(msg =>
       setLoading(false)
     }
   }
+
 
   useEffect(() => {
     loadThreads()

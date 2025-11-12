@@ -2,47 +2,46 @@
 
 import { useEffect, useState } from 'react'
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
-import { WalletClient, SecurityLevel } from '@bsv/sdk'
-
-// MUI
+import { WalletClient, SecurityLevel, LookupResolver } from '@bsv/sdk'
 import { ThemeProvider, CssBaseline } from '@mui/material'
 import theme from './theme'
 
-// Components
 import Home from './components/Home'
-
-// Utils
 import checkForMetaNetClient from './utils/checkForMetaNetClient'
 
-// Styles
 import './App.scss'
 
 const App = () => {
   const [walletClient, setWalletClient] = useState<WalletClient | null>(null)
   const [identityKey, setIdentityKey] = useState<string | null>(null)
 
+  const [resolver] = useState(
+    () =>
+      new LookupResolver({
+        networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet',
+      })
+  )
+
   useEffect(() => {
-    const initWallet = async () => {
+    const init = async () => {
       const client = new WalletClient('auto', 'localhost')
       const status = await checkForMetaNetClient()
 
       if (status === 0) {
-        console.warn('[Convo] MetaNet client not detected. Read-only mode enabled.')
-        return
+        console.warn('[Convo] MetaNet client not detected (read-only mode).')
+      } else {
+        await client.waitForAuthentication()
+        console.log('[Convo] MetaNet client authenticated.')
       }
 
-      await client.waitForAuthentication()
-      console.log('[Convo] MetaNet client detected and authenticated.')
-
+      // Use MetaNet Identity Key
       const pubkey = await client.getPublicKey({ identityKey: true })
-      console.log('[Convo] Derived identity key:', pubkey)
-
       setWalletClient(client)
       setIdentityKey(pubkey.publicKey)
     }
 
-    initWallet()
-  }, [])
+    init()
+  }, [resolver])
 
   if (!walletClient || !identityKey) {
     return <div className="loading">Connecting to MetaNet Client...</div>
@@ -64,6 +63,7 @@ const App = () => {
                 walletClient={walletClient}
                 protocolID={protocolID}
                 keyID={keyID}
+                resolver={resolver}
               />
             }
           />
@@ -75,6 +75,7 @@ const App = () => {
                 walletClient={walletClient}
                 protocolID={protocolID}
                 keyID={keyID}
+                resolver={resolver}
               />
             }
           />

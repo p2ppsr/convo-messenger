@@ -36,8 +36,8 @@
   "author": "BSV Association",
   "license": "SEE LICENSE IN LICENSE.txt",
   "dependencies": {
-    "@bsv/overlay": "^0.4.1",
-    "@bsv/sdk": "^1.7.6",
+    "@bsv/overlay": "^0.5.2",
+    "@bsv/sdk": "^1.9.3",
     "express": "^5.1.0",
     "mongodb": "^6.16.0"
   },

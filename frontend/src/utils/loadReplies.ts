@@ -14,6 +14,7 @@ export interface LoadRepliesOptions {
   protocolID: WalletProtocol
   keyID: string
   parentMessageId: string
+  resolver: LookupResolver
 }
 
 interface OverlayOutput {
@@ -30,7 +31,8 @@ export async function loadReplies({
   client,
   protocolID,
   keyID,
-  parentMessageId
+  parentMessageId,
+  resolver
 }: LoadRepliesOptions): Promise<{
   messages: MessagePayloadWithMetadata[]
   reactions: Record<string, any[]>
@@ -39,10 +41,6 @@ export async function loadReplies({
 
   console.log(`\n[LoadReplies] --------------------------------------`)
   console.log(`[LoadReplies] Fetching replies for parentMessageId: ${parentMessageId}`)
-
-  const resolver = new LookupResolver({
-    networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
-  })
 
   let response
   try {

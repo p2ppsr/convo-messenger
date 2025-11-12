@@ -19,6 +19,7 @@ export interface LoadMessagesOptions {
   protocolID: WalletProtocol
   keyID: string
   topic: string
+  resolver: LookupResolver
 }
 
 interface OverlayOutput {
@@ -32,7 +33,8 @@ export async function loadMessages({
   client,
   protocolID,
   keyID,
-  topic
+  topic,
+  resolver
 }: LoadMessagesOptions): Promise<{
   messages: MessagePayloadWithMetadata[]
   reactions: Record<string, any[]>
@@ -44,10 +46,6 @@ export async function loadMessages({
   console.log(`[LoadMessages] Starting message load for topic: ${topic}`)
   console.log('[LoadMessages] Protocol ID:', protocolID)
   console.log('[LoadMessages] Key ID:', keyID)
-
-  const resolver = new LookupResolver({
-    networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet'
-  })
 
   let response
   try {
@@ -98,11 +96,11 @@ const newLookupResults: typeof lookupResults = [];
 
 for (const o of lookupResults) {
 
-  // ✅ Always derive txid correctly from BEEF
+  // Always derive txid correctly from BEEF
   const tx = Transaction.fromBEEF(o.beef);
   const txid = tx.id("hex");
 
-  // ✅ Use the right unique lookup key
+  // Use the right unique lookup key
   const lookupKey = o.uniqueID ?? `${txid}:${o.outputIndex}`;
 
   const cached = getFromCache(lookupKey);

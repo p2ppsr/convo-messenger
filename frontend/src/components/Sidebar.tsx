@@ -2,6 +2,7 @@ import React from 'react'
 import { Box, Divider, Paper, Typography, Button } from '@mui/material'
 import ThreadList from './ThreadList'
 import DirectMessageList from './DirectMessageList'
+import { LookupResolver } from '@bsv/sdk'
 
 interface SidebarProps {
   onSelectThread: (threadId: string, recipientKeys: string[], threadName?: string) => void
@@ -11,6 +12,7 @@ interface SidebarProps {
   client: any
   protocolID: any
   keyID: string
+  resolver: LookupResolver
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -21,6 +23,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   client,
   protocolID,
   keyID,
+  resolver
 }) => {
   return (
     <Box
@@ -50,6 +53,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           protocolID={protocolID}
           keyID={keyID}
           onSelectThread={onSelectThread}
+          resolver={resolver}
         />
       </Paper>
 
@@ -71,6 +75,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           protocolID={protocolID}
           keyID={keyID}
           onSelectThread={onSelectThread}
+          resolver={resolver}
         />
       </Paper>
     </Box>

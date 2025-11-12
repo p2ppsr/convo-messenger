@@ -14,7 +14,7 @@ import {
   Dialog
 } from '@mui/material'
 import FileUpload from './FileUpload'
-import type { WalletClient, WalletProtocol } from '@bsv/sdk'
+import type { WalletClient, WalletProtocol, LookupResolver } from '@bsv/sdk'
 import type { MessagePayloadWithMetadata } from '../types/types'
 import { sendReaction } from '../utils/sendReaction'
 import AddReactionIcon from '@mui/icons-material/AddReaction'
@@ -37,6 +37,7 @@ interface ThreadPanelProps {
   threadName?: string
   nameMap?: Map<string, string>
   setNameMap?: React.Dispatch<React.SetStateAction<Map<string, string>>>
+  resolver: LookupResolver
 }
 
 type PreviewEntry =
@@ -84,7 +85,8 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
   recipientPublicKeys,
   threadName,
   nameMap = new Map(),
-  setNameMap = () => {}
+  setNameMap = () => {},
+  resolver
 }) => {
   const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
   const [newMessage, setNewMessage] = useState('')
@@ -155,6 +157,7 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
           protocolID,
           keyID,
           parentMessageId: parentMessage.txid,
+          resolver
         });
 
         if (!result || !("messages" in result))
@@ -203,6 +206,7 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
           protocolID,
           keyID,
           parentMessageId: parentMessage.txid,
+          resolver
         });
 
         if (!result || !("messages" in result)) return;
