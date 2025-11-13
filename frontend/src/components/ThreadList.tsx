@@ -85,110 +85,120 @@ const ThreadList = ({
    * Load all threads from overlay
    */
   const loadThreads = async () => {
-  try {
-    const response = await resolver.query({
-      service: 'ls_convo',
-      query: { type: 'findAll' }
-    })
-    if (response.type !== 'output-list') {
-      throw new Error(`Unexpected response type: ${response.type}`)
-    }
-
-    const toDecode = response.outputs.map((o) => ({
-      beef: o.beef,
-      outputIndex: o.outputIndex,
-      timestamp: parseInt(Utils.toUTF8(o.context ?? []))
-    }))
-
-    const decoded = await decodeOutputs(toDecode)
-
-    const grouped: Record<string, ThreadSummary> = {}
-
-    for (let i = 0; i < decoded.length; i++) {
-      const msg = decoded[i]
-      if (msg.type !== 'message') continue
-
-      const base = toDecode[i]
-      const tx = Transaction.fromBEEF(base.beef)
-      const txid = tx.id('hex')
-      const lookupKey = `${txid}:${base.outputIndex}`
-
-      const {
-        threadId,
-        createdAt,
-        recipients = [],
-        threadName,
-        encryptedThreadNameHeader,
-        encryptedThreadNameCiphertext
-      } = msg
-
-      const hasEncryptedName = !!(encryptedThreadNameHeader && encryptedThreadNameCiphertext)
-      const hasPlaintextName = !!(threadName && threadName.trim().length > 0)
-      if (!hasEncryptedName && !hasPlaintextName) continue // skip DMs
-
-      // Try lightweight thread cache first
-      const cached = getThreadSummary(threadId)
-      let name = cached?.threadName || (threadName?.trim() ?? '')
-
-      // If not cached and no plaintext name, decrypt just once here
-      if (!name && hasEncryptedName) {
-        const result = await decryptMessage(
-          wallet,
-          encryptedThreadNameHeader!,
-          encryptedThreadNameCiphertext!,
-          protocolID,
-          keyID
-        )
-        if (result?.content) name = result.content.trim()
-      }
-
-      // Resolve names if not cached
-      let displayNames: string[]
-      if (cached?.displayNames?.length) {
-        displayNames = cached.displayNames
-      } else {
-        const map = await resolveDisplayNames(recipients, identityKey)
-        displayNames = Array.from(map.values())
-      }
-
-      // Build/update grouped summary
-      if (!grouped[threadId]) {
-        grouped[threadId] = {
-          threadId,
-          displayNames,
-          recipientKeys: recipients,
-          lastTimestamp: createdAt,
-          threadName: name
-        }
-      } else {
-        grouped[threadId].lastTimestamp = Math.max(
-          grouped[threadId].lastTimestamp,
-          createdAt
-        )
-        if (!grouped[threadId].threadName && name) grouped[threadId].threadName = name
-      }
-
-      addThreadSummary({
-        threadId,
-        threadName: name,
-        recipientKeys: recipients,
-        displayNames,
-        lastTimestamp: createdAt,
-        isGroup: true
+    try {
+      const response = await resolver.query({
+        service: 'ls_convo',
+        query: { type: 'findAll' }
       })
+      if (response.type !== 'output-list') {
+        throw new Error(`Unexpected response type: ${response.type}`)
+      }
+
+      const toDecode = response.outputs.map((o) => ({
+        beef: o.beef,
+        outputIndex: o.outputIndex,
+        timestamp: parseInt(Utils.toUTF8(o.context ?? []))
+      }))
+
+      const decoded = await decodeOutputs(toDecode)
+
+      const grouped: Record<string, ThreadSummary> = {}
+
+      for (let i = 0; i < decoded.length; i++) {
+        const msg = decoded[i]
+        if (msg.type !== 'message') continue
+
+        const base = toDecode[i]
+        const tx = Transaction.fromBEEF(base.beef)
+        const txid = tx.id('hex')
+        const lookupKey = `${txid}:${base.outputIndex}`
+
+        const {
+          threadId,
+          createdAt,
+          recipients = [],
+          threadName,
+          encryptedThreadNameHeader,
+          encryptedThreadNameCiphertext
+        } = msg
+
+        // Skip messages not intended for this identity
+        if (!recipients.includes(identityKey)) continue
+
+        const hasEncryptedName = !!(encryptedThreadNameHeader && encryptedThreadNameCiphertext)
+        const hasPlaintextName = !!(threadName && threadName.trim().length > 0)
+        if (!hasEncryptedName && !hasPlaintextName) continue // skip DMs
+
+        // Try lightweight thread cache first
+        const cached = getThreadSummary(threadId)
+        let name = cached?.threadName || (threadName?.trim() ?? '')
+
+        // If not cached and no plaintext name, decrypt just once here (safe)
+        if (!name && hasEncryptedName) {
+          try {
+            const result = await decryptMessage(
+              wallet,
+              encryptedThreadNameHeader!,
+              encryptedThreadNameCiphertext!,
+              protocolID,
+              keyID
+            )
+            if (result?.content) name = result.content.trim()
+          } catch (err) {
+            console.warn(`[ThreadList] Cannot decrypt thread name for ${threadId}:`, err)
+            // Keep thread visible but unnamed
+            name = ''
+          }
+        }
+
+        // Resolve names if not cached
+        let displayNames: string[]
+        if (cached?.displayNames?.length) {
+          displayNames = cached.displayNames
+        } else {
+          const map = await resolveDisplayNames(recipients, identityKey)
+          displayNames = Array.from(map.values())
+        }
+
+        // Build/update grouped summary
+        if (!grouped[threadId]) {
+          grouped[threadId] = {
+            threadId,
+            displayNames,
+            recipientKeys: recipients,
+            lastTimestamp: createdAt,
+            threadName: name
+          }
+        } else {
+          grouped[threadId].lastTimestamp = Math.max(
+            grouped[threadId].lastTimestamp,
+            createdAt
+          )
+          if (!grouped[threadId].threadName && name) grouped[threadId].threadName = name
+        }
+
+        addThreadSummary({
+          threadId,
+          threadName: name,
+          recipientKeys: recipients,
+          displayNames,
+          lastTimestamp: createdAt,
+          isGroup: true
+        })
+      }
+
+      const sortedThreads = Object.values(grouped)
+        // Keep even unnamed group threads — optional filter tweak:
+        .filter(t => t.threadName !== undefined)
+        .sort((a, b) => b.lastTimestamp - a.lastTimestamp)
+
+      setThreads(sortedThreads)
+    } catch (err) {
+      console.error('[ThreadList] Failed to load threads:', err)
+    } finally {
+      setLoading(false)
     }
-
-    const sortedThreads = Object.values(grouped)
-      .filter(t => t.threadName && t.threadName.length > 0)
-      .sort((a, b) => b.lastTimestamp - a.lastTimestamp)
-
-    setThreads(sortedThreads)
-  } catch (err) {
-    console.error('[ThreadList] Failed to load threads:', err)
-  } finally {
-    setLoading(false)
   }
-}
 
   /**
    * Effect: load threads initially and whenever identity/wallet/protocolID/keyID changes

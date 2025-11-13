@@ -109,16 +109,18 @@ const DirectMessageList = ({
           encryptedThreadNameCiphertext
         } = msg
 
-        const isGroup =
-          !!threadName || (!!encryptedThreadNameHeader && !!encryptedThreadNameCiphertext)
-
-        // Only include if I'm a participant
+        // Skip if this user is not a participant
         if (!recipients.includes(identityKey)) continue
-        // Check cache first
-        const cached = getThreadSummary(threadId)
 
+        // Mark as group if there’s a thread name (plain or encrypted)
+        const isGroup =
+          !!threadName ||
+          (!!encryptedThreadNameHeader && !!encryptedThreadNameCiphertext)
+        if (isGroup) continue // skip group threads entirely
+
+        // Try lightweight cache first
+        const cached = getThreadSummary(threadId)
         if (cached) {
-          // Already have a summary — just update timestamp if needed
           if (!grouped[threadId]) {
             grouped[threadId] = cached
           } else {
@@ -130,13 +132,13 @@ const DirectMessageList = ({
           continue
         }
 
-        // Not cached — resolve names once
+        // Not cached — resolve names (exclude self)
         const nameMap = await resolveDisplayNames(recipients, identityKey)
         const displayNames = Array.from(nameMap.entries())
           .filter(([pub]) => pub !== identityKey)
           .map(([_, name]) => name)
 
-        // Add to grouped summary
+        // Build thread summary
         if (!grouped[threadId]) {
           grouped[threadId] = {
             threadId,
@@ -152,7 +154,7 @@ const DirectMessageList = ({
           )
         }
 
-        // Cache this thread summary for faster reuse
+        // Cache summary for next refresh
         addThreadSummary({
           threadId,
           threadName: '',
@@ -161,24 +163,9 @@ const DirectMessageList = ({
           lastTimestamp: createdAt,
           isGroup: false
         })
-
-
-        if (!grouped[threadId]) {
-          grouped[threadId] = {
-            threadId,
-            recipientKeys: recipients,
-            displayNames,
-            lastTimestamp: createdAt,
-            isGroup
-          }
-        } else {
-          grouped[threadId].lastTimestamp = Math.max(
-            grouped[threadId].lastTimestamp,
-            createdAt
-          )
-        }
       }
 
+      // Only keep direct (non-group) threads, newest first
       const directThreads = Object.values(grouped)
         .filter((t) => !t.isGroup)
         .map(({ isGroup, ...rest }) => rest)
@@ -192,7 +179,6 @@ const DirectMessageList = ({
       setLoading(false)
     }
   }
-
 
   useEffect(() => {
     loadThreads()
