@@ -243,7 +243,10 @@ export async function sendMessage({
 
      await MB.sendNotification(
         recipients,
-        JSON.stringify({ url: window.location, body: content }),
+        JSON.stringify({
+          url: `https://convo.metanet.app/${threadId}`,
+          body: "New Message!!"
+        }),
         'https://messagebox.babbage.systems'
       );
     console.log(`[Convo] Broadcast to overlay succeeded. txid: ${txid}`)
