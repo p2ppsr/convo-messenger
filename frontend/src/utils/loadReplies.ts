@@ -14,13 +14,21 @@ export interface LoadRepliesOptions {
   protocolID: WalletProtocol
   keyID: string
   parentMessageId: string
+  since?: number
   resolver: LookupResolver
+   overrideOutputs?: {
+    beef: number[]
+    outputIndex: number
+    context?: number[]
+    uniqueID?: string
+  }[]
 }
 
 interface OverlayOutput {
   outputIndex: number
   beef: number[]
   context?: number[]
+  uniqueID?: string
 }
 
 /**
@@ -32,7 +40,9 @@ export async function loadReplies({
   protocolID,
   keyID,
   parentMessageId,
-  resolver
+  resolver,
+  since,
+  overrideOutputs
 }: LoadRepliesOptions): Promise<{
   messages: MessagePayloadWithMetadata[]
   reactions: Record<string, any[]>
@@ -42,24 +52,46 @@ export async function loadReplies({
   console.log(`\n[LoadReplies] --------------------------------------`)
   console.log(`[LoadReplies] Fetching replies for parentMessageId: ${parentMessageId}`)
 
-  let response
-  try {
-    response = await resolver.query({
-      service: 'ls_convo',
-      query: { type: 'findRepliesByParent', value: { parentMessageId } }
-    })
-  } catch (err) {
-    console.error('[LoadReplies] Overlay query failed:', err)
-    return { messages: [], reactions: {}, nameMap: new Map() }
+  let lookupSourceRaw: OverlayOutput[]
+
+  //
+  // 1. NEW: use overrideOutputs if provided (pagination)
+  //
+  if (overrideOutputs && overrideOutputs.length > 0) {
+    console.log(`[LoadReplies] Using override outputs (${overrideOutputs.length})`)
+    lookupSourceRaw = overrideOutputs
+  } else {
+    //
+    // FALLBACK: the original overlay call (non-paginated)
+    //
+    let response
+    try {
+      response = await resolver.query({
+  service: "ls_convo",
+  query: {
+    type: "findRepliesByParent",
+    value: { parentMessageId },
+    since     // <-- Optional incremental timestamp
+  }
+})
+    } catch (err) {
+      console.error("[LoadReplies] Overlay query failed", err)
+      return { messages: [], reactions: {}, nameMap: new Map() }
+    }
+
+    if (response.type !== "output-list" || !Array.isArray(response.outputs)) {
+      return { messages: [], reactions: {}, nameMap: new Map() }
+    }
+
+    lookupSourceRaw = response.outputs
   }
 
-  if (response.type !== 'output-list' || !Array.isArray(response.outputs)) {
-    return { messages: [], reactions: {}, nameMap: new Map() }
-  }
-
-  // Extract timestamps & lookup objects
-  const lookupResults = response.outputs.map((o: OverlayOutput) => {
+  //
+  // 2. Normalize outputs exactly like loadMessages
+  //
+  const lookupResults = lookupSourceRaw.map((o) => {
     let timestamp = Date.now()
+
     try {
       if (o.context) {
         const decoded = Utils.toUTF8(o.context)
@@ -67,10 +99,16 @@ export async function loadReplies({
         if (!isNaN(parsed)) timestamp = parsed
       }
     } catch {}
-    return { beef: o.beef, outputIndex: o.outputIndex, timestamp }
+
+    return {
+      beef: o.beef,
+      outputIndex: o.outputIndex,
+      timestamp,
+      uniqueID: (o as any).uniqueID
+    }
   })
 
-  console.log(`[LoadReplies] Overlay returned ${lookupResults.length} outputs.`)
+  console.log(`[LoadReplies] Decoding ${lookupResults.length} items...`)
 
   // ---------------------------------------------------------------
 //  CACHE AWARE REPLY LOADING (MATCHES loadMessages.ts EXACTLY)
@@ -132,8 +170,12 @@ if (newOutputs.length > 0) {
 }
 
 
-  const rawMessages = [...cachedMessages, ...decryptedMessages]
+  let rawMessages = [...cachedMessages, ...decryptedMessages]
 
+  // Filter messages by incremental polling boundary
+if (since !== undefined) {
+  rawMessages = rawMessages.filter(m => m.createdAt > since);
+}
   // ------------------------------------------------------------------
   // Filter, dedupe, build reaction list
   // ------------------------------------------------------------------

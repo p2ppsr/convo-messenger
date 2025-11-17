@@ -38,6 +38,7 @@ export class ConvoStorage {
     this.messages.createIndex({ parentMessageId: 1 })
     this.reactions.createIndex({ threadId: 1 })
     this.logs.createIndex({ threadId: 1 })
+    this.messages.createIndex({ threadId: 1, createdAt: -1 })
   }
 
   // ========== THREADS ==========
@@ -129,4 +130,90 @@ export class ConvoStorage {
     .sort({ createdAt: 1 })
     .toArray()
 }
+
+/**
+ * Returns the latest message for each threadId.
+ * Supports pagination with skip + limit.
+ */
+async listLatestMessages(skip = 0, limit = 50): Promise<EncryptedMessage[]> {
+  return await this.messages
+    .aggregate<EncryptedMessage>([
+      // Sort messages newest first
+      { $sort: { createdAt: -1 } },
+
+      // Group so each threadId keeps only its newest message
+      {
+        $group: {
+          _id: "$threadId",
+          threadId: { $first: "$threadId" },
+          txid: { $first: "$txid" },
+          outputIndex: { $first: "$outputIndex" },
+          sender: { $first: "$sender" },
+          header: { $first: "$header" },
+          encryptedPayload: { $first: "$encryptedPayload" },
+          createdAt: { $first: "$createdAt" },
+          threadName: { $first: "$threadName" },
+          parentMessageId: { $first: "$parentMessageId" },
+          uniqueId: { $first: "$uniqueId" }
+        }
+      },
+
+      // sort after grouping
+      { $sort: { createdAt: -1 } },
+
+      // pagination
+      { $skip: skip },
+      { $limit: limit }
+    ])
+    .toArray()
+}
+
+
+/**
+ * Paginated messages inside a single thread.
+ * Sorted oldest → newest (so the UI can append at the bottom naturally).
+ */
+async listThreadMessages(
+  threadId: string,
+  skip = 0,
+  limit = 50
+): Promise<EncryptedMessage[]> {
+
+  const results = await this.messages
+    .aggregate<EncryptedMessage>([
+      { $match: { threadId } },
+
+      // Sort newest → oldest so skip+limit works
+      { $sort: { createdAt: -1 } },
+
+      { $skip: skip },
+      { $limit: limit }
+    ])
+    .toArray()
+
+  // Reverse for UI (oldest → newest)
+  return results.reverse()
+}
+
+
+
+async countThreadMessages(threadId: string): Promise<number> {
+  return await this.messages.countDocuments({ threadId })
+}
+
+async countReplies(parentMessageId: string): Promise<number> {
+  return await this.messages.countDocuments({ parentMessageId })
+}
+
+async listReplies(parentMessageId: string, skip = 0, limit = 50): Promise<EncryptedMessage[]> {
+  const results = await this.messages
+    .find({ parentMessageId })
+    .sort({ createdAt: -1 }) // newest → oldest
+    .skip(skip)
+    .limit(limit)
+    .toArray()
+
+  return results.reverse() // oldest → newest for UI
+}
+
 }

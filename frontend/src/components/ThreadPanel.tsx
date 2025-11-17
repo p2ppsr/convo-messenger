@@ -15,6 +15,7 @@ import {
 } from '@mui/material'
 import FileUpload from './FileUpload'
 import type { WalletClient, WalletProtocol, LookupResolver } from '@bsv/sdk'
+import { Utils } from '@bsv/sdk'
 import type { MessagePayloadWithMetadata } from '../types/types'
 import { sendReaction } from '../utils/sendReaction'
 import AddReactionIcon from '@mui/icons-material/AddReaction'
@@ -88,7 +89,7 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
   setNameMap = () => {},
   resolver
 }) => {
-  const [messages, setMessages] = useState<MessagePayloadWithMetadata[]>([])
+  const [replies, setReplies] = useState<MessagePayloadWithMetadata[]>([])
   const [newMessage, setNewMessage] = useState('')
   const [loading, setLoading] = useState(true)
   const [currentRecipients, setCurrentRecipients] = useState<string[]>(recipientPublicKeys)
@@ -119,6 +120,11 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+const [loadingMore, setLoadingMore] = useState(false)
+const [hasMoreAbove, setHasMoreAbove] = useState(false)
+const oldestLoadedIndexRef = useRef(0)
+const BATCH_SIZE = 10
+
 
   // === Audio Recording ===
     const [recordDialogOpen, setRecordDialogOpen] = useState(false)
@@ -146,139 +152,222 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
       }
     }
 
+    const loadInitialReplies = async () => {
+  setLoading(true)
+
+  try {
+    const countResp = await resolver.query({
+      service: "ls_convo",
+      query: {
+        type: "countReplies",
+        parentMessageId: parentMessage.txid
+      }
+    })
+
+    const total = parseInt(Utils.toUTF8(countResp.outputs?.[0]?.context ?? [])) || 0
+    const skip = Math.max(0, total - BATCH_SIZE)
+    oldestLoadedIndexRef.current = skip
+    setHasMoreAbove(skip > 0)
+
+    const pageResp = await resolver.query({
+      service: "ls_convo",
+      query: {
+        type: "listReplies",
+        parentMessageId: parentMessage.txid,
+        skip,
+        limit: BATCH_SIZE
+      }
+    })
+
+    const overrideOutputs = pageResp.outputs.map(o => ({
+      beef: o.beef,
+      outputIndex: o.outputIndex,
+      context: o.context
+    }))
+
+    const {
+      messages: loadedReplies
+    } = await loadReplies({
+      client,
+      protocolID,
+      keyID,
+      parentMessageId: parentMessage.txid,
+      resolver,
+      overrideOutputs       // <-- IMPORTANT
+    })
+
+    setReplies(loadedReplies)
+
+    setTimeout(() => {
+      scrollToBottom()
+    }, 25)
+
+  } catch (err) {
+    console.error("[ThreadPanel] Failed initial reply load:", err)
+  } finally {
+    setLoading(false)
+  }
+}
+
+const loadOlderReplies = async () => {
+  if (!hasMoreAbove || loadingMore) return
+  setLoadingMore(true)
+
+  const nextSkip = Math.max(0, oldestLoadedIndexRef.current - BATCH_SIZE)
+
+  const pageResp = await resolver.query({
+    service: "ls_convo",
+    query: {
+      type: "listReplies",
+      parentMessageId: parentMessage.txid,
+      skip: nextSkip,
+      limit: BATCH_SIZE
+    }
+  })
+
+  const overrideOutputs = pageResp.outputs.map(o => ({
+    beef: o.beef,
+    outputIndex: o.outputIndex,
+    context: o.context
+  }))
+
+  const { messages: older } = await loadReplies({
+    client,
+    protocolID,
+    keyID,
+    parentMessageId: parentMessage.txid,
+    resolver,
+    overrideOutputs
+  })
+
+  const container = messageListRef.current
+  const prevHeight = container?.scrollHeight ?? 0
+
+  setReplies(prev => [...older, ...prev])
+
+  setTimeout(() => {
+    if (!container) return
+    const newHeight = container.scrollHeight
+    container.scrollTop = newHeight - prevHeight
+  }, 0)
+
+  oldestLoadedIndexRef.current = nextSkip
+  setHasMoreAbove(nextSkip > 0)
+  setLoadingMore(false)
+}
+
+const onScroll = () => {
+  const el = messageListRef.current
+  if (!el) return
+  if (el.scrollTop < 50) {   // near top
+    loadOlderReplies()
+  }
+}
+
   // ============================= LOAD REPLIES (initial load) =============================
   useEffect(() => {
-    if (!parentMessage) return;
+  if (!parentMessage) return;
 
-    const fetchReplies = async () => {
-      try {
-        const result = await loadReplies({
-          client,
-          protocolID,
-          keyID,
-          parentMessageId: parentMessage.txid,
-          resolver
-        });
+  loadInitialReplies();
+}, [parentMessage?.txid]);
 
-        if (!result || !("messages" in result))
-          throw new Error("Invalid loadReplies result");
-
-        const { messages: loadedMessages, reactions: loadedReactions, nameMap: resolvedNames } = result;
-
-        setMessages(prev => mergeMessages(prev, loadedMessages));
-        setReactions(loadedReactions);
-
-        // Merge names (do not replace)
-        setNameMap(prev => {
-          const merged = new Map(prev);
-          for (const [k, v] of resolvedNames.entries()) merged.set(k, v);
-          return merged;
-        });
-
-        // Restore recipients
-        if (loadedMessages.length > 0) {
-          const last = loadedMessages[loadedMessages.length - 1];
-          if (last?.recipients?.length) setCurrentRecipients(last.recipients);
-        }
-
-      } catch (err) {
-        console.error("[ThreadPanel] Initial load failed:", err);
-      } finally {
-        setLoading(false);
-        scrollToBottom();
-      }
-    };
-
-    setLoading(true);
-    fetchReplies();
-  }, [parentMessage?.txid, client, protocolID, keyID]);
 
   // ============================= POLLING (merge + new message alert) =============================
-  useEffect(() => {
-    let interval: NodeJS.Timeout | undefined;
+useEffect(() => {
+  let interval: NodeJS.Timeout | undefined;
 
-    const pollReplies = async () => {
-      if (isSendingRef.current) return;
+  const pollReplies = async () => {
+    if (isSendingRef.current) return;
 
-      try {
-        const result = await loadReplies({
-          client,
-          protocolID,
-          keyID,
-          parentMessageId: parentMessage.txid,
-          resolver
-        });
+    try {
+      const newest = replies[replies.length - 1];
+      const newestTimestamp = newest?.createdAt ?? 0;
 
-        if (!result || !("messages" in result)) return;
+      const result = await loadReplies({
+        client,
+        protocolID,
+        keyID,
+        parentMessageId: parentMessage.txid,
+        resolver,
+        since: newestTimestamp   // incremental polling
+      });
 
-        const { messages: loadedMessages, reactions: loadedReactions, nameMap: resolvedNames } = result;
+      if (!result || !("messages" in result)) return;
 
-        setMessages(prev => {
-          const merged = mergeMessages(prev, loadedMessages);
+      const { messages: loadedMessages, reactions: loadedReactions, nameMap: resolvedNames } = result;
 
-          // Detect new message txids
-          const newOnes = merged.filter(m => !prev.some(p => p.txid === m.txid));
-          if (newOnes.length > 0) {
-            const newest = newOnes[newOnes.length - 1];
+      setReplies(prev => {
+        const merged = mergeMessages(prev, loadedMessages);
 
-            const normalizedSender = newest.sender.startsWith("02") || newest.sender.startsWith("03")
-              ? newest.sender
-              : newest.sender.slice(0, 12);
+        // Detect newly arrived messages (prev → merged difference)
+        const newOnes = merged.filter(m => !prev.some(p => p.txid === m.txid));
+        if (newOnes.length > 0) {
+          const newest = newOnes[newOnes.length - 1];
 
-            const senderName =
-              resolvedNames.get(normalizedSender) ??
-              normalizedSender.slice(0, 10) + "...";
+          const normalizedSender = newest.sender.startsWith("02") || newest.sender.startsWith("03")
+            ? newest.sender
+            : newest.sender.slice(0, 12);
 
-            // extract summary
-            let summary = "(attachment)";
-            try {
-              const parsed = JSON.parse(newest.content);
-              if (parsed?.text) summary = parsed.text.slice(0, 80);
-              else if (parsed?.files?.length > 0)
-                summary = `📎 ${parsed.files.length} file${parsed.files.length > 1 ? "s" : ""}`;
-            } catch {}
+          const senderName =
+            resolvedNames.get(normalizedSender) ??
+            normalizedSender.slice(0, 10) + "...";
 
-            const container = messageListRef.current;
-            const distanceFromBottom = container
-              ? container.scrollHeight - container.scrollTop - container.clientHeight
-              : 0;
+          let summary = "(attachment)";
+          try {
+            const parsed = JSON.parse(newest.content);
+            if (parsed?.text) summary = parsed.text.slice(0, 80);
+            else if (parsed?.files?.length > 0)
+              summary = `📎 ${parsed.files.length} file${parsed.files.length > 1 ? "s" : ""}`;
+          } catch {}
 
-            const userIsNearBottom = distanceFromBottom < 150;
+          const container = messageListRef.current;
+          const distanceFromBottom = container
+            ? container.scrollHeight - container.scrollTop - container.clientHeight
+            : 0;
 
-            if (!userIsNearBottom) {
-              setIncomingPreview(`${senderName}: ${summary}`);
-              setShowNewMessageAlert(true);
-            } else {
-              setTimeout(() => scrollToBottom(), 50);
-            }
+          const userIsNearBottom = distanceFromBottom < 150;
+
+          if (!userIsNearBottom) {
+            setIncomingPreview(`${senderName}: ${summary}`);
+            setShowNewMessageAlert(true);
+          } else {
+            setTimeout(() => scrollToBottom(), 50);
           }
+        }
 
-          return merged;
-        });
+        return merged;
+      });
 
-        // update reaction map & name map
-        setReactions(loadedReactions);
-        setNameMap(prev => {
-          const merged = new Map(prev);
-          for (const [k, v] of resolvedNames.entries()) merged.set(k, v);
-          return merged;
-        });
+      // update reaction map & names
+      setReactions(loadedReactions);
+      setNameMap(prev => {
+        const merged = new Map(prev);
+        for (const [k, v] of resolvedNames.entries()) merged.set(k, v);
+        return merged;
+      });
 
-      } catch (err) {
-        console.error("[ThreadPanel] Polling error:", err);
-      } finally {
-        scrollToBottomIfNearEnd();
-      }
-    };
+    } catch (err) {
+      console.error("[ThreadPanel] Polling error:", err);
+    } finally {
+      scrollToBottomIfNearEnd();
+    }
+  };
 
-    // First run immediately
-    pollReplies();
+  // run immediately
+  pollReplies();
 
-    if (POLLING_ENABLED)
-      interval = setInterval(pollReplies, 5000);
+  if (POLLING_ENABLED)
+    interval = setInterval(pollReplies, 5000);
 
-    return () => clearInterval(interval);
-  }, [parentMessage?.txid, client, protocolID, keyID]);
+  return () => clearInterval(interval);
+}, [
+  parentMessage?.txid,
+  client,
+  protocolID,
+  keyID,
+  replies     // <-- needed to keep newestTimestamp fresh
+]);
+
 
   // ============================= FILE PREVIEWS =============================
   useEffect(() => {
@@ -287,7 +376,7 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
     previewLoading.current = true;
 
     try {
-      for (const msg of messages) {
+      for (const msg of replies) {
         let parsed: any;
         try {
           parsed = JSON.parse(msg.content);
@@ -346,8 +435,8 @@ export const ThreadPanel: React.FC<ThreadPanelProps> = ({
     }
   };
 
-  if (messages.length > 0) loadFilePreviews();
-}, [messages]);
+  if (replies.length > 0) loadFilePreviews();
+}, [replies]);
 
 
   // ============================= PARENT MESSAGE PREVIEWS =============================
@@ -839,6 +928,7 @@ useEffect(() => {
       {/* Main message area */}
       <Box
         ref={messageListRef}
+        onScroll={onScroll}
         display="flex"
         flexDirection="column"
         flex={1}
@@ -1260,12 +1350,12 @@ useEffect(() => {
             })()}
 
             {/* --- Replies list --- */}
-            {messages.length === 0 ? (
+            {replies.length === 0 ? (
               <Typography align="center" color="text.secondary">
                 No replies yet
               </Typography>
             ) : (
-              messages.map((msg) => {
+              replies.map((msg) => {
                 const normalized = normalizeSender(msg.sender as string)
                 const displaySender =
                   nameMap.get(normalized) || normalized.slice(0, 10) + '...'

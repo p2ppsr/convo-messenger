@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { loadMessages } from '../utils/loadMessages'
 import { sendMessage } from '../utils/sendMessage'
+import { decodeOutputs } from '../utils/decodeOutputs'
 import { uploadEncryptedFile, downloadAndDecryptFile, getFileExpiry, renewFileHosting } from '../utils/fileEncryptor'
 import { IdentitySearchField } from '@bsv/identity-react'
 import {
@@ -19,6 +20,7 @@ import {
 } from '@mui/material'
 import FileUpload from './FileUpload'
 import type { DisplayableIdentity, WalletClient, WalletProtocol, LookupResolver } from '@bsv/sdk'
+import { Utils } from '@bsv/sdk'
 import type { MessagePayloadWithMetadata } from '../types/types'
 import { sendReaction } from '../utils/sendReaction'
 import AddReactionIcon from '@mui/icons-material/AddReaction'
@@ -121,6 +123,11 @@ export const Chat: React.FC<ChatProps> = ({
   const [showNewMessageAlert, setShowNewMessageAlert] = useState(false)
   const [incomingPreview, setIncomingPreview] = useState<string>("")
   const previewLoading = useRef<boolean>(false)
+  const BATCH_SIZE = 10
+const [hasMoreAbove, setHasMoreAbove] = useState(true)
+const [loadingMore, setLoadingMore] = useState(false)
+const oldestLoadedIndexRef = useRef(0)
+
 
   const chatEndRef = useRef<HTMLDivElement>(null)
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -152,53 +159,230 @@ export const Chat: React.FC<ChatProps> = ({
       }
     }
 
-  // Load messages (with batch reply counts)
-  useEffect(() => {
-    const fetchMessages = async () => {
-      const start = performance.now()
-      console.log("[Chat] fetchMessages START")
-      try {
-        const t0 = performance.now()
-        console.log('[Chat] Fetching messages for thread:', threadId)
-        const result = await loadMessages({ client, protocolID, keyID, topic: threadId, resolver })
-        console.log(`[Chat] loadMessages returned in ${(performance.now() - t0) * 1000} μs`)
-        if (!result || !('messages' in result)) throw new Error('Unexpected loadMessages result')
+    const loadOlderMessages = async () => {
+  if (!hasMoreAbove || loadingMore) return;
+  setLoadingMore(true);
 
-        const {
-          messages: loadedMessages,
-          reactions: loadedReactions,
-          nameMap: resolvedNames,
-          replyCounts: loadedReplyCounts,
-          latestReplyTimes: loadedLatestReplyTimes
-        } = result
+  try {
+    //
+    // 1. Determine next skip
+    //
+    const nextSkip = Math.max(0, oldestLoadedIndexRef.current - BATCH_SIZE);
 
-        console.log('[Chat] Loaded replyCounts:', loadedReplyCounts)
-        console.log('[Chat] Loaded latestReplyTimes:', loadedLatestReplyTimes)
-
-        setMessages(prev => mergeMessages(prev, loadedMessages))
-        setReactions(loadedReactions)
-        setNameMap(resolvedNames)
-        setReplyCounts(loadedReplyCounts || {})
-        setLatestReplyTimes(loadedLatestReplyTimes || {})
-
-        // Auto-restore recipients
-        if (loadedMessages.length > 0) {
-          const latest = loadedMessages[loadedMessages.length - 1]
-          if (latest.recipients?.length) setCurrentRecipients(latest.recipients)
-        }
-      } catch (err) {
-        console.error('[Chat] Failed to load messages:', err)
-      } finally {
-        setLoading(false)
-        scrollToBottom()
-        console.log(`[Chat] fetchMessages DONE (${(performance.now() - start) * 1000} μs)`)
+    //
+    // 2. Query backend for older page
+    //
+    const pageResp = await resolver.query({
+      service: "ls_convo",
+      query: {
+        type: "listThreadMessages",
+        threadId,
+        skip: nextSkip,
+        limit: BATCH_SIZE
       }
+    });
+
+    if (pageResp.type !== "output-list") {
+      throw new Error("Unexpected listThreadMessages response");
     }
 
-    setLoading(true)
-    fetchMessages()
-    scrollToBottom()
-  }, [threadId])
+    //
+    // 3. Convert raw overlay outputs → override format for loadMessages()
+    //
+    const overrideOutputs = pageResp.outputs.map(o => ({
+      beef: o.beef,
+      outputIndex: o.outputIndex,
+      context: o.context
+    }));
+
+    //
+    // 4. Use loadMessages() so older pages get:
+    //    - decrypted content
+    //    - reactions
+    //    - replyCounts
+    //    - latestReplyTimes
+    //    - nameMap
+    //
+    const {
+      messages: olderMessages,
+      reactions: olderReactions,
+      nameMap: olderNames,
+      replyCounts: olderReplyCounts,
+      latestReplyTimes: olderLatestReplyTimes
+    } = await loadMessages({
+      client,
+      protocolID,
+      keyID,
+      topic: threadId,
+      resolver,
+      overrideOutputs     // <-- this makes loadMessages use the paginated outputs
+    });
+
+    //
+    // 5. Preserve scroll position
+    //
+    const container = messageListRef.current;
+    const prevHeight = container?.scrollHeight ?? 0;
+
+    //
+    // 6. Insert older messages at the top
+    //
+    setMessages(prev => [...olderMessages, ...prev]);
+
+    //
+    // 7. Merge reaction state
+    //
+    setReactions(prev => ({ ...prev, ...olderReactions }));
+
+    //
+    // 8. Merge reply counts + latest reply timestamps
+    //
+    setReplyCounts(prev => ({ ...prev, ...olderReplyCounts }));
+    setLatestReplyTimes(prev => ({ ...prev, ...olderLatestReplyTimes }));
+
+    //
+    // 9. Merge display names
+    //
+    setNameMap(prev => new Map([...prev, ...olderNames]));
+
+    //
+    // 10. Restore scroll position after DOM updates
+    //
+    setTimeout(() => {
+      if (!container) return;
+      const newHeight = container.scrollHeight;
+      container.scrollTop = newHeight - prevHeight;
+    }, 0);
+
+    //
+    // 11. Update pagination pointers
+    //
+    oldestLoadedIndexRef.current = nextSkip;
+    setHasMoreAbove(nextSkip > 0);
+  } catch (err) {
+    console.error("[Chat] loadOlderMessages failed:", err);
+  } finally {
+    setLoadingMore(false);
+  }
+};
+
+
+  // Load messages (with batch reply counts)
+ useEffect(() => {
+  const fetchInitialPage = async () => {
+    setLoading(true);
+
+    try {
+      //
+      // 1. Ask backend how many total messages exist
+      //
+      const countResp = await resolver.query({
+        service: "ls_convo",
+        query: {
+          type: "countThreadMessages",
+          threadId
+        }
+      });
+
+      const total = parseInt(Utils.toUTF8(countResp.outputs?.[0]?.context ?? [])) || 0;
+      const skip = Math.max(0, total - BATCH_SIZE);
+
+      oldestLoadedIndexRef.current = skip;
+      setHasMoreAbove(skip > 0);
+
+      //
+      // 2. Fetch the most recent page
+      //
+      const pageResp = await resolver.query({
+        service: "ls_convo",
+        query: {
+          type: "listThreadMessages",
+          threadId,
+          skip,
+          limit: BATCH_SIZE
+        }
+      });
+
+      if (pageResp.type !== "output-list") {
+        throw new Error("Unexpected listThreadMessages response");
+      }
+
+      //
+      // 3. Convert overlay outputs into override format for loadMessages()
+      //
+      const overlayOutputs = pageResp.outputs.map(o => ({
+        beef: o.beef,
+        outputIndex: o.outputIndex,
+        context: o.context
+      }));
+
+      //
+      // 4. Fully decode/decrypt using loadMessages()
+      //
+      const {
+        messages: loadedMessages,
+        reactions,
+        nameMap,
+        replyCounts,
+        latestReplyTimes
+      } = await loadMessages({
+        client,
+        protocolID,
+        keyID,
+        topic: threadId,
+        resolver,
+        overrideOutputs: overlayOutputs   // ✔ correct variable
+      });
+
+      //
+      // 5. Replace current messages with the freshly loaded first page
+      //
+      setMessages(loadedMessages);
+      setReactions(reactions);
+      setNameMap(nameMap);
+      setReplyCounts(replyCounts || {});
+      setLatestReplyTimes(latestReplyTimes || {});
+
+      //
+      // 6. Restore recipients
+      //
+      if (loadedMessages.length > 0) {
+        const last = loadedMessages[loadedMessages.length - 1];
+        if (last.recipients?.length) {
+          setCurrentRecipients(last.recipients);
+        }
+      }
+
+      //
+      // 7. Scroll to bottom (only once on initial load)
+      //
+      setTimeout(scrollToBottom, 32);
+
+    } catch (err) {
+      console.error("[Chat] Initial pagination load failed:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  fetchInitialPage();
+}, [threadId]);
+
+
+useEffect(() => {
+  const el = messageListRef.current
+  if (!el) return
+
+  const handleScroll = () => {
+    if (el.scrollTop < 50 && hasMoreAbove && !loadingMore) {
+      loadOlderMessages()
+    }
+  }
+
+  el.addEventListener("scroll", handleScroll)
+  return () => el.removeEventListener("scroll", handleScroll)
+}, [hasMoreAbove, loadingMore])
+
 
   useEffect(() => {
     let interval: NodeJS.Timeout | undefined
@@ -877,7 +1061,12 @@ export const Chat: React.FC<ChatProps> = ({
         </motion.div>
       )}
     </AnimatePresence>
-      <Box flex={1} overflow="auto" mb={2}>
+      <Box
+        flex={1}
+        overflow="auto"
+        mb={2}
+        ref={messageListRef}
+      >
         {threadName && (
           <Box my={2} display="flex" justifyContent="center">
             <Paper elevation={3} sx={{

@@ -11,7 +11,7 @@ import {
 import { decodeOutputs } from '../utils/decodeOutputs'
 import { resolveDisplayNames } from '../utils/resolveDisplayNames'
 import type { WalletInterface, WalletProtocol } from '@bsv/sdk'
-import { addThreadSummary, getThreadSummary } from '../utils/threadCache'
+import { addThreadSummary, getThreadSummary, getAllThreadSummaries } from '../utils/threadCache'
 
 /**
  * ThreadSummary
@@ -26,6 +26,7 @@ interface ThreadSummary {
   displayNames: string[]
   recipientKeys: string[]
   lastTimestamp: number
+  isGroup: boolean
 }
 
 /**
@@ -73,112 +74,110 @@ const DirectMessageList = ({
    * Query overlay + rebuild the local thread summary list
    */
   const loadThreads = async () => {
-    try {
-      const response = await resolver.query({
-        service: 'ls_convo',
-        query: { type: 'findAll' }
-      })
-      if (response.type !== 'output-list') {
-        throw new Error(`Unexpected response type: ${response.type}`)
+  try {
+    const response = await resolver.query({
+      service: "ls_convo",
+      query: {
+        type: "listLatestMessages",
+        skip: 0,
+        limit: 10
       }
+    });
 
-      const toDecode = response.outputs.map((o) => ({
-        beef: o.beef,
-        outputIndex: o.outputIndex,
-        timestamp: parseInt(Utils.toUTF8(o.context ?? []))
-      }))
-
-      const decoded = await decodeOutputs(toDecode)
-      const grouped: Record<string, ThreadSummary & { isGroup: boolean }> = {}
-
-      for (let i = 0; i < decoded.length; i++) {
-        const msg = decoded[i]
-        if (msg.type !== 'message') continue
-
-        const base = toDecode[i]
-        const tx = Transaction.fromBEEF(base.beef)
-        const txid = tx.id('hex')
-        const lookupKey = `${txid}:${base.outputIndex}`
-
-        const {
-          threadId,
-          recipients = [],
-          createdAt,
-          threadName,
-          encryptedThreadNameHeader,
-          encryptedThreadNameCiphertext
-        } = msg
-
-        // Skip if this user is not a participant
-        if (!recipients.includes(identityKey)) continue
-
-        // Mark as group if there’s a thread name (plain or encrypted)
-        const isGroup =
-          !!threadName ||
-          (!!encryptedThreadNameHeader && !!encryptedThreadNameCiphertext)
-        if (isGroup) continue // skip group threads entirely
-
-        // Try lightweight cache first
-        const cached = getThreadSummary(threadId)
-        if (cached) {
-          if (!grouped[threadId]) {
-            grouped[threadId] = cached
-          } else {
-            grouped[threadId].lastTimestamp = Math.max(
-              grouped[threadId].lastTimestamp,
-              createdAt
-            )
-          }
-          continue
-        }
-
-        // Not cached — resolve names (exclude self)
-        const nameMap = await resolveDisplayNames(recipients, identityKey)
-        const displayNames = Array.from(nameMap.entries())
-          .filter(([pub]) => pub !== identityKey)
-          .map(([_, name]) => name)
-
-        // Build thread summary
-        if (!grouped[threadId]) {
-          grouped[threadId] = {
-            threadId,
-            recipientKeys: recipients,
-            displayNames,
-            lastTimestamp: createdAt,
-            isGroup: false
-          }
-        } else {
-          grouped[threadId].lastTimestamp = Math.max(
-            grouped[threadId].lastTimestamp,
-            createdAt
-          )
-        }
-
-        // Cache summary for next refresh
-        addThreadSummary({
-          threadId,
-          threadName: '',
-          recipientKeys: recipients,
-          displayNames,
-          lastTimestamp: createdAt,
-          isGroup: false
-        })
-      }
-
-      // Only keep direct (non-group) threads, newest first
-      const directThreads = Object.values(grouped)
-        .filter((t) => !t.isGroup)
-        .map(({ isGroup, ...rest }) => rest)
-        .sort((a, b) => b.lastTimestamp - a.lastTimestamp)
-
-      const hasChanged = JSON.stringify(threads) !== JSON.stringify(directThreads)
-      if (hasChanged) setThreads(directThreads)
-    } catch (err) {
-      console.error('[DirectMessageList] Failed to load threads:', err)
-    } finally {
-      setLoading(false)
+    if (response.type !== "output-list") {
+      throw new Error(`Unexpected response type: ${response.type}`);
     }
+
+    // Convert overlay outputs → decode-ready form
+    const toDecode = response.outputs.map((o) => ({
+      beef: o.beef,
+      outputIndex: o.outputIndex,
+      timestamp: parseInt(Utils.toUTF8(o.context ?? [])),
+    }));
+
+    const decoded = await decodeOutputs(toDecode);
+
+    const summaries: ThreadSummary[] = [];
+
+    for (let i = 0; i < decoded.length; i++) {
+      const msg = decoded[i];
+      if (msg.type !== "message") continue;
+
+      const {
+        threadId,
+        recipients = [],
+        createdAt,
+        threadName,
+        encryptedThreadNameHeader,
+        encryptedThreadNameCiphertext,
+      } = msg;
+
+      // Only include threads where *this wallet* participates
+      if (!recipients.includes(identityKey)) continue;
+
+      // Skip group threads (those go to ThreadList)
+      const isGroup =
+        !!threadName ||
+        (!!encryptedThreadNameHeader && !!encryptedThreadNameCiphertext);
+      if (isGroup) continue;
+
+      // -------------------------------------------------------
+      // 🔥 CACHE CHECK
+      // -------------------------------------------------------
+      const cached = getThreadSummary(threadId);
+
+      if (cached && cached.lastTimestamp >= createdAt) {
+        // Cache is fresh → reuse
+        summaries.push(cached);
+        continue;
+      }
+
+      // -------------------------------------------------------
+      // ❗ Cache miss → must compute fresh summary
+      // -------------------------------------------------------
+
+      const map = await resolveDisplayNames(recipients, identityKey);
+
+      // All participants except self
+      const displayNames = Array.from(map.entries())
+        .filter(([pub]) => pub !== identityKey)
+        .map(([_, name]) => name);
+
+      const summary: ThreadSummary = {
+        threadId,
+        recipientKeys: recipients,
+        displayNames,
+        lastTimestamp: createdAt,
+        isGroup: false
+      };
+
+      // -------------------------------------------------------
+      // 🔥 UPDATE CACHE
+      // -------------------------------------------------------
+      addThreadSummary(summary);
+
+      summaries.push(summary);
+    }
+
+    // Sort newest → oldest
+    summaries.sort((a, b) => b.lastTimestamp - a.lastTimestamp);
+
+    setThreads(summaries);
+
+  } catch (err) {
+    console.warn("[DirectMessageList] Lookup failed:", err);
+  } finally {
+    setLoading(false);
   }
+};
+
+
+
+//   useEffect(() => {
+//   if (!loading) {
+//     loadThreads()
+//   }
+// }, [loading])
 
   useEffect(() => {
     loadThreads()

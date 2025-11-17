@@ -16,7 +16,7 @@ import { decryptMessage } from '../utils/MessageDecryptor'
 import { resolveDisplayNames } from '../utils/resolveDisplayNames'
 import type { WalletInterface, WalletProtocol } from '@bsv/sdk'
 import { POLLING_ENABLED } from '../utils/constants'
-import { addThreadSummary, getThreadSummary } from '../utils/threadCache'
+import { addThreadSummary, getThreadSummary, getAllThreadSummaries } from '../utils/threadCache'
 import { lookup } from 'dns'
 
 /**
@@ -32,7 +32,8 @@ interface ThreadSummary {
   displayNames: string[]
   recipientKeys: string[]
   lastTimestamp: number
-  threadName: string
+  threadName?: string
+  isGroup: boolean
 }
 
 /**
@@ -84,121 +85,125 @@ const ThreadList = ({
   /**
    * Load all threads from overlay
    */
-  const loadThreads = async () => {
-    try {
-      const response = await resolver.query({
-        service: 'ls_convo',
-        query: { type: 'findAll' }
-      })
-      if (response.type !== 'output-list') {
-        throw new Error(`Unexpected response type: ${response.type}`)
+ const loadThreads = async () => {
+  try {
+    const response = await resolver.query({
+      service: 'ls_convo',
+      query: {
+        type: 'listLatestMessages',
+        skip: 0,
+        limit: 10
       }
+    })
 
-      const toDecode = response.outputs.map((o) => ({
-        beef: o.beef,
-        outputIndex: o.outputIndex,
-        timestamp: parseInt(Utils.toUTF8(o.context ?? []))
-      }))
-
-      const decoded = await decodeOutputs(toDecode)
-
-      const grouped: Record<string, ThreadSummary> = {}
-
-      for (let i = 0; i < decoded.length; i++) {
-        const msg = decoded[i]
-        if (msg.type !== 'message') continue
-
-        const base = toDecode[i]
-        const tx = Transaction.fromBEEF(base.beef)
-        const txid = tx.id('hex')
-        const lookupKey = `${txid}:${base.outputIndex}`
-
-        const {
-          threadId,
-          createdAt,
-          recipients = [],
-          threadName,
-          encryptedThreadNameHeader,
-          encryptedThreadNameCiphertext
-        } = msg
-
-        // Skip messages not intended for this identity
-        if (!recipients.includes(identityKey)) continue
-
-        const hasEncryptedName = !!(encryptedThreadNameHeader && encryptedThreadNameCiphertext)
-        const hasPlaintextName = !!(threadName && threadName.trim().length > 0)
-        if (!hasEncryptedName && !hasPlaintextName) continue // skip DMs
-
-        // Try lightweight thread cache first
-        const cached = getThreadSummary(threadId)
-        let name = cached?.threadName || (threadName?.trim() ?? '')
-
-        // If not cached and no plaintext name, decrypt just once here (safe)
-        if (!name && hasEncryptedName) {
-          try {
-            const result = await decryptMessage(
-              wallet,
-              encryptedThreadNameHeader!,
-              encryptedThreadNameCiphertext!,
-              protocolID,
-              keyID
-            )
-            if (result?.content) name = result.content.trim()
-          } catch (err) {
-            console.warn(`[ThreadList] Cannot decrypt thread name for ${threadId}:`, err)
-            // Keep thread visible but unnamed
-            name = ''
-          }
-        }
-
-        // Resolve names if not cached
-        let displayNames: string[]
-        if (cached?.displayNames?.length) {
-          displayNames = cached.displayNames
-        } else {
-          const map = await resolveDisplayNames(recipients, identityKey)
-          displayNames = Array.from(map.values())
-        }
-
-        // Build/update grouped summary
-        if (!grouped[threadId]) {
-          grouped[threadId] = {
-            threadId,
-            displayNames,
-            recipientKeys: recipients,
-            lastTimestamp: createdAt,
-            threadName: name
-          }
-        } else {
-          grouped[threadId].lastTimestamp = Math.max(
-            grouped[threadId].lastTimestamp,
-            createdAt
-          )
-          if (!grouped[threadId].threadName && name) grouped[threadId].threadName = name
-        }
-
-        addThreadSummary({
-          threadId,
-          threadName: name,
-          recipientKeys: recipients,
-          displayNames,
-          lastTimestamp: createdAt,
-          isGroup: true
-        })
-      }
-
-      const sortedThreads = Object.values(grouped)
-        // Keep even unnamed group threads — optional filter tweak:
-        .filter(t => t.threadName !== undefined)
-        .sort((a, b) => b.lastTimestamp - a.lastTimestamp)
-
-      setThreads(sortedThreads)
-    } catch (err) {
-      console.error('[ThreadList] Failed to load threads:', err)
-    } finally {
-      setLoading(false)
+    if (response.type !== 'output-list') {
+      throw new Error(`Unexpected response type: ${response.type}`)
     }
+
+    // Convert into decode-ready items
+    const toDecode = response.outputs.map((o) => ({
+      beef: o.beef,
+      outputIndex: o.outputIndex,
+      timestamp: parseInt(Utils.toUTF8(o.context ?? []))
+    }))
+
+    // Decode only these (<= 10)
+    const decoded = await decodeOutputs(toDecode)
+
+    const summaries: ThreadSummary[] = []
+
+    for (let i = 0; i < decoded.length; i++) {
+      const msg = decoded[i]
+      if (msg.type !== 'message') continue
+
+      const {
+        threadId,
+        recipients = [],
+        createdAt,
+        threadName,
+        encryptedThreadNameHeader,
+        encryptedThreadNameCiphertext
+      } = msg
+
+      // Only include threads you are part of
+      if (!recipients.includes(identityKey)) continue
+
+      // Detect if this is a group thread
+      const isGroup =
+        !!threadName ||
+        (!!encryptedThreadNameHeader && !!encryptedThreadNameCiphertext)
+
+      if (!isGroup) continue // ThreadList = group threads only
+
+      // -------------------------------------------------------
+      // 🔥 CACHE CHECK
+      // -------------------------------------------------------
+      const cached = getThreadSummary(threadId)
+
+      if (cached && cached.lastTimestamp >= createdAt) {
+        // Cache is up-to-date or newer → reuse it
+        summaries.push(cached)
+        continue
+      }
+
+      // -------------------------------------------------------
+      // ❗ Cache miss → must resolve identities + decrypt name
+      // -------------------------------------------------------
+
+      // Resolve display names
+      const nameMap = await resolveDisplayNames(recipients, identityKey)
+      const displayNames = Array.from(nameMap.values())
+
+      // Attempt to get plaintext threadName
+      let finalName = threadName?.trim() ?? ''
+      if (!finalName && encryptedThreadNameHeader && encryptedThreadNameCiphertext) {
+        try {
+          const res = await decryptMessage(
+            wallet,
+            encryptedThreadNameHeader,
+            encryptedThreadNameCiphertext,
+            protocolID,
+            keyID
+          )
+          finalName = res?.content?.trim() ?? ''
+        } catch (e) {
+          console.warn(`[ThreadList] Failed to decrypt group name`, e)
+        }
+      }
+
+      const summary: ThreadSummary = {
+        threadId,
+        threadName: finalName,
+        recipientKeys: recipients,
+        displayNames,
+        lastTimestamp: createdAt,
+        isGroup: true
+      }
+
+      // -------------------------------------------------------
+      // 🔥 UPDATE CACHE
+      // -------------------------------------------------------
+      addThreadSummary(summary)
+
+      summaries.push(summary)
+    }
+
+    // Sort newest → oldest
+    summaries.sort((a, b) => b.lastTimestamp - a.lastTimestamp)
+
+    setThreads(summaries)
+
+  } catch (err) {
+    console.error('[ThreadList] Failed to load threads:', err)
+  } finally {
+    setLoading(false)
   }
+}
+
+
+
+
+
 
   /**
    * Effect: load threads initially and whenever identity/wallet/protocolID/keyID changes

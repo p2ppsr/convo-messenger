@@ -20,6 +20,12 @@ export interface LoadMessagesOptions {
   keyID: string
   topic: string
   resolver: LookupResolver
+  overrideOutputs?: {
+    beef: number[]
+    outputIndex: number
+    context?: number[]
+    uniqueID?: string
+  }[]
 }
 
 interface OverlayOutput {
@@ -34,7 +40,10 @@ export async function loadMessages({
   protocolID,
   keyID,
   topic,
-  resolver
+  resolver,
+
+  // NEW:
+  overrideOutputs
 }: LoadMessagesOptions): Promise<{
   messages: MessagePayloadWithMetadata[]
   reactions: Record<string, any[]>
@@ -47,36 +56,54 @@ export async function loadMessages({
   console.log('[LoadMessages] Protocol ID:', protocolID)
   console.log('[LoadMessages] Key ID:', keyID)
 
-  let response
-  try {
-    response = await resolver.query({
-      service: 'ls_convo',
-      query: { type: 'findByThreadId', value: { threadId: topic } }
-    })
-    console.log('[LoadMessages] Overlay query succeeded.')
-  } catch (err) {
-    console.error('[LoadMessages] Overlay query failed:', err)
-    return {
-      messages: [],
-      reactions: {},
-      nameMap: new Map(),
-      replyCounts: {},
-      latestReplyTimes: {}
+  //
+  // NEW LOGIC BLOCK
+  //
+  let lookupSourceRaw: OverlayOutput[]
+
+  if (overrideOutputs && overrideOutputs.length > 0) {
+    console.log(`[LoadMessages] Using override outputs (${overrideOutputs.length})`)
+    lookupSourceRaw = overrideOutputs
+  } else {
+    //
+    // FALLBACK: DO THE OLD OVERLAY CALL
+    //
+    let response
+    try {
+      response = await resolver.query({
+        service: 'ls_convo',
+        query: { type: 'findByThreadId', value: { threadId: topic } }
+      })
+      console.log('[LoadMessages] Overlay query succeeded.')
+    } catch (err) {
+      console.error('[LoadMessages] Overlay query failed:', err)
+      return {
+        messages: [],
+        reactions: {},
+        nameMap: new Map(),
+        replyCounts: {},
+        latestReplyTimes: {}
+      }
     }
+
+    if (response.type !== 'output-list' || !Array.isArray(response.outputs)) {
+      console.warn('[LoadMessages] Unexpected overlay response type:', response.type)
+      return {
+        messages: [],
+        reactions: {},
+        nameMap: new Map(),
+        replyCounts: {},
+        latestReplyTimes: {}
+      }
+    }
+
+    lookupSourceRaw = response.outputs
   }
 
-  if (response.type !== 'output-list' || !Array.isArray(response.outputs)) {
-    console.warn('[LoadMessages] Unexpected overlay response type:', response.type)
-    return {
-      messages: [],
-      reactions: {},
-      nameMap: new Map(),
-      replyCounts: {},
-      latestReplyTimes: {}
-    }
-  }
-
-  const lookupResults = response.outputs.map((o: OverlayOutput) => {
+  //
+  // UNIFIED OUTPUT NORMALIZATION (same for override or overlay)
+  //
+  const lookupResults = lookupSourceRaw.map((o: OverlayOutput) => {
     let timestamp = Date.now()
     try {
       if (o.context) {
@@ -85,7 +112,13 @@ export async function loadMessages({
         if (!isNaN(parsed)) timestamp = parsed
       }
     } catch {}
-    return { beef: o.beef, outputIndex: o.outputIndex, timestamp, uniqueID: (o as any).uniqueID }
+
+    return {
+      beef: o.beef,
+      outputIndex: o.outputIndex,
+      timestamp,
+      uniqueID: (o as any).uniqueID
+    }
   })
 
   console.log(`[LoadMessages] Decoding and decrypting ${lookupResults.length} outputs...`)

@@ -183,6 +183,64 @@ export class ConvoLookupService implements LookupService {
       const all = [...replies, ...reactions]
       return this.formatAsLookupAnswers(all)
     }
+
+    if (query.type === 'listLatestMessages') {
+  const skip = query.skip ?? query.value?.skip ?? 0;
+  const limit = query.limit ?? query.value?.limit ?? 50;
+
+  const latest = await this.storage.listLatestMessages(skip, limit);
+  return this.formatAsLookupAnswers(latest);
+}
+
+if (query.type === 'listThreadMessages') {
+  const threadId = query.threadId ?? query.value?.threadId;
+  if (!threadId) throw new Error("threadId required");
+
+  const skip = query.skip ?? query.value?.skip ?? 0;
+  const limit = query.limit ?? query.value?.limit ?? 50;
+
+  const messages = await this.storage.listThreadMessages(threadId, skip, limit);
+  return this.formatAsLookupAnswers(messages);
+}
+
+if (query.type === "countThreadMessages") {
+  const threadId = query.threadId ?? query.value?.threadId;
+  if (!threadId) throw new Error("threadId required");
+
+  const count = await this.storage.countThreadMessages(threadId);
+
+  return [
+    {
+      txid: "count",
+      outputIndex: 0,
+      context: Utils.toArray(count.toString(), "utf8")
+    }
+  ];
+}
+
+if (query.type === "countReplies") {
+  const parent = query.parentMessageId ?? query.value?.parentMessageId;
+  const count = await this.storage.countReplies(parent);
+
+  return [
+    {
+      txid: "count",
+      outputIndex: 0,
+      context: Utils.toArray(count.toString(), "utf8")
+    }
+  ];
+}
+
+if (query.type === "listReplies") {
+  const parent = query.parentMessageId ?? query.value?.parentMessageId;
+  const skip = query.skip ?? query.value?.skip ?? 0;
+  const limit = query.limit ?? query.value?.limit ?? 50;
+
+  const replies = await this.storage.listReplies(parent, skip, limit);
+  return this.formatAsLookupAnswers(replies);
+}
+
+
     throw new Error(`Unsupported query type: "${query.type}"`)
   }
 
