@@ -19,8 +19,8 @@
   },
   "packageManager": "pnpm@8.0.0",
   "devDependencies": {
-    "@bsv/cars-cli": "^1.2.9",
-    "@bsv/lars": "^1.5.4"
+    "@p2ppsr/cars-cli": "^1.2.13",
+    "@p2ppsr/lars": "^1.5.11"
   },
   "dependencies": {
     "@bsv/message-box-client": "^1.4.2"
