@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Convo">
+  <defs>
+    <linearGradient id="bg" x1="18" y1="12" x2="112" y2="118" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7af0bd"/>
+      <stop offset="1" stop-color="#34c98c"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="34" fill="#0b1512"/>
+  <path d="M30 35c0-7.2 5.8-13 13-13h42c7.2 0 13 5.8 13 13v35c0 7.2-5.8 13-13 13H61L41 101V83c-6.2-.9-11-6.3-11-12.8V35Z" fill="url(#bg)"/>
+  <path d="M48 49h32M48 62h22" stroke="#0b1512" stroke-width="8" stroke-linecap="round"/>
+  <path d="M78 79v-8.5a8.5 8.5 0 0 0-17 0V79" fill="none" stroke="#0b1512" stroke-width="6" stroke-linecap="round"/>
+  <rect x="57" y="75" width="25" height="19" rx="6" fill="#0b1512"/>
+</svg>

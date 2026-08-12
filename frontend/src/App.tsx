@@ -1,87 +1,237 @@
-// frontend/src/App.tsx
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { AlertTriangle, LockKeyhole, RefreshCw, ShieldCheck, WifiOff, X } from 'lucide-react'
+import { ConversationPane } from './v2/components/ConversationPane'
+import { ConversationRail } from './v2/components/ConversationRail'
+import { ControlInbox } from './v2/components/ControlInbox'
+import type { ConversationSecret, ConversationView, MaterializedMessage } from './v2/domain/types'
+import type { PendingInvite, PendingMembershipUpdate } from './v2/realtime/messaging'
+import { AttachmentService } from './v2/services/attachments'
+import { ConversationService } from './v2/services/conversationService'
+import { useWalletSession } from './v2/hooks/useWalletSession'
 
-import { useEffect, useState } from 'react'
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
-import { WalletClient, SecurityLevel, LookupResolver } from '@bsv/sdk'
-import { ThemeProvider, CssBaseline } from '@mui/material'
-import theme from './theme'
+const NewConversationDialog = lazy(async () => {
+  const module = await import('./v2/components/NewConversationDialog')
+  return { default: module.NewConversationDialog }
+})
+const ConversationDetails = lazy(async () => {
+  const module = await import('./v2/components/ConversationDetails')
+  return { default: module.ConversationDetails }
+})
 
-import Home from './components/Home'
-import checkForMetaNetClient from './utils/checkForMetaNetClient'
+function sameMembers(left: string[], right: string[]): boolean {
+  return left.length === right.length && [...left].sort().every((value, index) => value === [...right].sort()[index])
+}
 
-import './App.scss'
+function currentEpoch(secret: ConversationSecret) {
+  const epoch = secret.epochs.find((item) => item.epoch === secret.currentEpoch)
+  if (!epoch) throw new Error('Current conversation key is unavailable')
+  return epoch
+}
 
-const App = () => {
-  const [walletClient, setWalletClient] = useState<WalletClient | null>(null)
-  const [identityKey, setIdentityKey] = useState<string | null>(null)
+function App() {
+  const { session, retry } = useWalletSession()
+  const [conversations, setConversations] = useState<ConversationSecret[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [view, setView] = useState<ConversationView | null>(null)
+  const [invites, setInvites] = useState<PendingInvite[]>([])
+  const [updates, setUpdates] = useState<PendingMembershipUpdate[]>([])
+  const [railOpen, setRailOpen] = useState(false)
+  const [newOpen, setNewOpen] = useState(false)
+  const [inboxOpen, setInboxOpen] = useState(false)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [online, setOnline] = useState(navigator.onLine)
+  const [liveState, setLiveState] = useState<'connecting' | 'live' | 'fallback'>('connecting')
 
-  const [resolver] = useState(
-    () =>
-      new LookupResolver({
-        networkPreset: window.location.hostname === 'localhost' ? 'local' : 'mainnet',
-      })
-  )
+  const service = useMemo(() => session.status === 'ready'
+    ? new ConversationService(session.client, session.identityKey)
+    : null, [session])
+  const attachments = useMemo(() => session.status === 'ready' ? new AttachmentService(session.client) : null, [session])
+  const activeSecret = conversations.find((conversation) => conversation.conversationId === activeId) ?? null
+
+  const refreshIndex = useCallback(async () => {
+    if (!service) return []
+    const latest = await service.list()
+    setConversations(latest)
+    setActiveId((current) => current && latest.some((item) => item.conversationId === current)
+      ? current
+      : (latest.find((item) => !item.preferences.archived)?.conversationId ?? null))
+    return latest
+  }, [service])
+
+  const refreshControl = useCallback(async () => {
+    if (!service) return
+    const pending = await service.pendingControl()
+    setInvites(pending.invites)
+    setUpdates(pending.updates)
+  }, [service])
+
+  const reloadActive = useCallback(async (secret: ConversationSecret, tailPages = 3) => {
+    if (!service) return
+    const nextView = await service.load(secret, tailPages)
+    setView(nextView)
+  }, [service])
+
+  const runBusy = useCallback(async <T,>(operation: () => Promise<T>): Promise<T> => {
+    setBusy(true)
+    setError('')
+    try {
+      return await operation()
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : 'The secure operation could not be completed'
+      setError(message)
+      throw reason
+    } finally {
+      setBusy(false)
+    }
+  }, [])
 
   useEffect(() => {
-    const init = async () => {
-      const client = new WalletClient('auto', 'localhost')
-      const status = await checkForMetaNetClient()
+    const onlineListener = () => setOnline(true)
+    const offlineListener = () => setOnline(false)
+    window.addEventListener('online', onlineListener)
+    window.addEventListener('offline', offlineListener)
+    return () => { window.removeEventListener('online', onlineListener); window.removeEventListener('offline', offlineListener) }
+  }, [])
 
-      if (status === 0) {
-        console.warn('[Convo] MetaNet client not detected (read-only mode).')
-      } else {
-        await client.waitForAuthentication()
-        console.log('[Convo] MetaNet client authenticated.')
+  useEffect(() => {
+    if (!service) return
+    let cancelled = false
+    let retrying = false
+    setLoading(true)
+    const synchronize = async () => {
+      if (retrying) return
+      retrying = true
+      try {
+        const results = await Promise.allSettled([service.flushOutbox(), service.flushControlOutbox()])
+        const latest = await refreshIndex()
+        await refreshControl().catch(() => undefined)
+        if (cancelled) return
+        const rejection = results.find((result) => result.status === 'rejected')
+        if (rejection?.status === 'rejected') setError(rejection.reason instanceof Error ? rejection.reason.message : 'Secure sync needs a retry')
+        else {
+          const pending = latest.reduce((count, conversation) => count + (conversation.pendingControl?.length ?? 0), 0)
+          if (pending > 0) setError(`${pending} encrypted control message${pending === 1 ? '' : 's'} will retry automatically.`)
+        }
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : 'Secure sync needs a retry')
+      } finally {
+        retrying = false
+        if (!cancelled) setLoading(false)
       }
-
-      // Use MetaNet Identity Key
-      const pubkey = await client.getPublicKey({ identityKey: true })
-      setWalletClient(client)
-      setIdentityKey(pubkey.publicKey)
     }
+    void synchronize()
+    const timer = setInterval(() => { void synchronize() }, 60_000)
+    return () => { cancelled = true; clearInterval(timer); void service.closeLive() }
+  }, [refreshControl, refreshIndex, service])
 
-    init()
-  }, [resolver])
+  useEffect(() => {
+    if (!service || !activeSecret) { setView(null); return }
+    let cancelled = false
+    setLoading(true)
+    setLiveState('connecting')
+    void reloadActive(activeSecret).then(async () => {
+      if (cancelled) return
+      setLoading(false)
+      await service.openLive(activeSecret, async () => {
+        if (!cancelled) await reloadActive(activeSecret)
+      }, (state) => { if (!cancelled) setLiveState(state) })
+    }).catch((reason: unknown) => {
+      if (!cancelled) { setError(reason instanceof Error ? reason.message : 'Could not open this conversation'); setLoading(false); setLiveState('fallback') }
+    })
+    return () => { cancelled = true; void service.closeLive() }
+  }, [activeSecret, reloadActive, service])
 
-  if (!walletClient || !identityKey) {
-    return <div className="loading">Connecting to MetaNet Client...</div>
+  if (session.status !== 'ready') {
+    return (
+      <main className="wallet-gate">
+        <div className="ambient-orb orb-one" /><div className="ambient-orb orb-two" />
+        <section className="wallet-card">
+          <div className="wallet-brand"><div className="brand-mark large"><LockKeyhole size={28} /></div><span>CONVO</span></div>
+          {session.status === 'connecting' ? <><span className="wallet-spinner" /><h1>Opening your private inbox</h1><p>{session.message}</p><div className="wallet-steps"><span className="is-active"><i />Wallet session</span><span><i />Private keys</span><span><i />Conversations</span></div></> : <><div className="gate-alert"><AlertTriangle size={27} /></div><h1>Metanet Client is required</h1><p>{session.message}</p><button className="primary-button gate-button" onClick={retry}><RefreshCw size={17} /> Try again</button><span className="gate-assurance"><ShieldCheck size={15} /> Convo cannot read messages without your wallet’s approval.</span></>}
+        </section>
+      </main>
+    )
   }
 
-  const protocolID: [SecurityLevel, string] = [2, 'convo']
-  const keyID = '1'
+  const afterMutation = async (secret?: ConversationSecret) => {
+    const latest = await refreshIndex()
+    const target = secret ? latest.find((item) => item.conversationId === secret.conversationId) : latest.find((item) => item.conversationId === activeId)
+    if (target) await reloadActive(target)
+  }
 
   return (
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <Router>
-        <Routes>
-          <Route
-            path="/"
-            element={
-              <Home
-                identityKey={identityKey}
-                walletClient={walletClient}
-                protocolID={protocolID}
-                keyID={keyID}
-                resolver={resolver}
-              />
-            }
-          />
-          <Route
-            path="/thread/:threadId"
-            element={
-              <Home
-                identityKey={identityKey}
-                walletClient={walletClient}
-                protocolID={protocolID}
-                keyID={keyID}
-                resolver={resolver}
-              />
-            }
-          />
-        </Routes>
-      </Router>
-    </ThemeProvider>
+    <div className="app-shell">
+      {!online && <div className="offline-banner"><WifiOff size={15} /> Offline. New messages remain encrypted in the durable outbox until connectivity returns.</div>}
+      {error && <div className="error-banner" role="alert"><AlertTriangle size={16} /><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss"><X size={16} /></button></div>}
+      <div className="app-grid">
+        <ConversationRail conversations={conversations} activeId={activeId} pendingCount={invites.length + updates.length} open={railOpen} onClose={() => setRailOpen(false)} onSelect={setActiveId} onNew={() => setNewOpen(true)} onOpenInvites={() => setInboxOpen(true)} />
+        {railOpen && <button className="rail-scrim" aria-label="Close conversations" onClick={() => setRailOpen(false)} />}
+        <ConversationPane
+          identityKey={session.identityKey}
+          secret={activeSecret}
+          view={view}
+          loading={loading}
+          busy={busy}
+          liveState={liveState}
+          onOpenRail={() => setRailOpen(true)}
+          onOpenDetails={() => setDetailsOpen(true)}
+          onLoadHistory={() => activeSecret ? runBusy(() => reloadActive(activeSecret, Number.MAX_SAFE_INTEGER)) : Promise.resolve()}
+          onSend={(body, files) => runBusy(async () => {
+            if (!service || !activeSecret || !attachments) return
+            const epoch = currentEpoch(activeSecret)
+            const uploaded = []
+            for (const file of files) uploaded.push(await attachments.upload(file, epoch))
+            await service.sendMessage(activeSecret, body, { attachments: uploaded })
+            await afterMutation(activeSecret)
+          })}
+          onEdit={(messageId, body) => runBusy(async () => { if (service && activeSecret) { await service.editMessage(activeSecret, messageId, body); await afterMutation(activeSecret) } })}
+          onDelete={(messageId) => runBusy(async () => { if (service && activeSecret) { await service.deleteMessage(activeSecret, messageId); await afterMutation(activeSecret) } })}
+          onReact={(messageId, emoji) => runBusy(async () => {
+            if (!service || !activeSecret) return
+            const removed = view?.messages.find((item) => item.id === messageId)?.reactions.some((reaction) => reaction.sender === session.identityKey && reaction.emoji === emoji) ?? false
+            await service.react(activeSecret, messageId, emoji, removed)
+            await afterMutation(activeSecret)
+          })}
+          onDownload={(message: MaterializedMessage, attachmentIndex) => runBusy(async () => {
+            if (!attachments || !activeSecret) return
+            const reference = message.attachments[attachmentIndex]
+            const epoch = activeSecret.epochs.find((item) => item.epoch === message.epoch)
+            if (!reference || !epoch) throw new Error('Attachment key is unavailable')
+            const blob = await attachments.download(reference, epoch)
+            const url = URL.createObjectURL(blob)
+            const anchor = document.createElement('a')
+            anchor.href = url; anchor.download = reference.name; anchor.click()
+            setTimeout(() => URL.revokeObjectURL(url), 1_000)
+          })}
+        />
+      </div>
+
+      {newOpen && <Suspense fallback={<div className="modal-backdrop"><span className="spinner" /></div>}><NewConversationDialog open busy={busy} wallet={session.client} onClose={() => setNewOpen(false)} onCreate={(title, members) => runBusy(async () => {
+        if (!service) return
+        const created = await service.create(title, members)
+        await refreshIndex(); setActiveId(created.conversationId); setNewOpen(false)
+        if (created.pendingControl?.length) setError(`${created.pendingControl.length} encrypted invitation${created.pendingControl.length === 1 ? '' : 's'} will retry automatically.`)
+      })} /></Suspense>}
+      <ControlInbox open={inboxOpen} busy={busy} invites={invites} updates={updates} onClose={() => setInboxOpen(false)} onAcceptInvite={(pending) => runBusy(async () => {
+        if (!service) return
+        const accepted = await service.acceptInvite(pending); await refreshControl(); await refreshIndex(); setActiveId(accepted.conversationId)
+      })} onDeclineInvite={(pending) => runBusy(async () => { if (service) { await service.declineInvite(pending); await refreshControl() } })} onAcceptUpdate={(pending) => runBusy(async () => {
+        if (!service) return
+        const accepted = await service.acceptMembershipUpdate(pending); await refreshControl(); await afterMutation(accepted)
+      })} />
+      {activeSecret && detailsOpen && <Suspense fallback={<div className="modal-backdrop"><span className="spinner" /></div>}><ConversationDetails open busy={busy} identityKey={session.identityKey} wallet={session.client} secret={activeSecret} onClose={() => setDetailsOpen(false)} onSave={(title, members, admins) => runBusy(async () => {
+        if (!service) return
+        let updated = activeSecret
+        if (title.trim() !== activeSecret.title) updated = await service.rename(updated, title)
+        const epoch = currentEpoch(updated)
+        if (!sameMembers(members, epoch.members) || !sameMembers(admins, epoch.admins)) updated = await service.changeMembership(updated, members, admins)
+        await afterMutation(updated); setDetailsOpen(false)
+        if (updated.pendingControl?.length) setError(`${updated.pendingControl.length} encrypted membership update${updated.pendingControl.length === 1 ? '' : 's'} will retry automatically.`)
+      })} /></Suspense>}
+    </div>
   )
 }
 

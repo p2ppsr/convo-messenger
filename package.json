@@ -1,28 +1,30 @@
 {
   "name": "convo-messenger",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Secure end-to-end encrypted 1:1 and group messaging app built on BSV overlays",
   "scripts": {
     "lars": "lars",
     "cars": "cars",
     "lars:config": "lars config",
     "start": "lars start",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "frontend:lint": "npm --prefix frontend run lint",
+    "frontend:test": "npm --prefix frontend run test",
+    "verify": "npm run frontend:lint && npm run frontend:test && npm run frontend:build",
     "build": "cars build 1",
-    "deploy": "cars deploy now 1"
+    "predeploy": "cars project ensure-balance 1 --min 1 --topup-to 235000",
+    "deploy": "cars release now 1"
   },
   "keywords": [],
   "author": "",
   "license": "SEE LICENSE IN LICENSE.txt",
   "engines": {
-    "node": ">=18.18 <21"
+    "node": ">=22"
   },
-  "packageManager": "pnpm@8.0.0",
   "devDependencies": {
-    "@p2ppsr/cars-cli": "^1.2.13",
-    "@p2ppsr/lars": "^1.5.11"
-  },
-  "dependencies": {
-    "@bsv/message-box-client": "^1.4.2"
+    "@p2ppsr/cars-cli": "^1.2.31",
+    "@p2ppsr/lars": "^1.5.12"
   }
 }

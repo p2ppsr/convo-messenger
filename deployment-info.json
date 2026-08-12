@@ -1,15 +1,6 @@
 {
   "schema": "bsv-app",
   "schemaVersion": "1.0",
-  "topicManagers": {
-    "tm_convo": "./backend/src/topic-managers/ConvoTopicManager.ts"
-  },
-  "lookupServices": {
-    "ls_convo": {
-      "serviceFactory": "./backend/src/lookup-services/ConvoLookupServiceFactory.ts",
-      "hydrateWith": "mongo"
-    }
-  },
   "frontend": {
     "language": "react",
     "sourceDirectory": "./frontend"
@@ -20,7 +11,6 @@
       "network": "mainnet",
       "provider": "LARS",
       "run": [
-        "backend",
         "frontend"
       ]
     },
@@ -32,8 +22,7 @@
       "projectID": "e7acb3c2bb3c958f7a29710e5cb67134",
       "frontendHostingMethod": "HTTPS",
       "deploy": [
-        "frontend",
-        "backend"
+        "frontend"
       ]
     }
   ]
