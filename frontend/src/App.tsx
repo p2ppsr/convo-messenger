@@ -1,10 +1,11 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, LockKeyhole, RefreshCw, ShieldCheck, WifiOff, X } from 'lucide-react'
 import { ConversationPane } from './v2/components/ConversationPane'
 import { ConversationRail } from './v2/components/ConversationRail'
 import { ControlInbox } from './v2/components/ControlInbox'
-import type { ConversationSecret, ConversationView, MaterializedMessage } from './v2/domain/types'
-import type { PendingInvite, PendingMembershipUpdate } from './v2/realtime/messaging'
+import { applyConversationEvent } from './v2/domain/materialize'
+import type { ConversationEvent, ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from './v2/domain/types'
+import type { PendingInvite, PendingMembershipUpdate, RealtimePeer, TypingPeer } from './v2/realtime/messaging'
 import { AttachmentService } from './v2/services/attachments'
 import { ConversationService } from './v2/services/conversationService'
 import { useWalletSession } from './v2/hooks/useWalletSession'
@@ -44,12 +45,19 @@ function App() {
   const [error, setError] = useState('')
   const [online, setOnline] = useState(navigator.onLine)
   const [liveState, setLiveState] = useState<'connecting' | 'live' | 'fallback'>('connecting')
+  const [onlinePeers, setOnlinePeers] = useState<RealtimePeer[]>([])
+  const [typingPeers, setTypingPeers] = useState<TypingPeer[]>([])
+  const [deliveryStates, setDeliveryStates] = useState<Record<string, MessageDeliveryState>>({})
+  const liveEventsRef = useRef(new Map<string, ConversationEvent>())
 
   const service = useMemo(() => session.status === 'ready'
     ? new ConversationService(session.client, session.identityKey)
     : null, [session])
   const attachments = useMemo(() => session.status === 'ready' ? new AttachmentService(session.client) : null, [session])
   const activeSecret = conversations.find((conversation) => conversation.conversationId === activeId) ?? null
+  const activeSecretRef = useRef(activeSecret)
+  activeSecretRef.current = activeSecret
+  const activeEpoch = activeSecret?.currentEpoch ?? null
 
   const refreshIndex = useCallback(async () => {
     if (!service) return []
@@ -70,9 +78,15 @@ function App() {
 
   const reloadActive = useCallback(async (secret: ConversationSecret, tailPages = 3) => {
     if (!service) return
-    const nextView = await service.load(secret, tailPages)
+    let nextView = await service.load(secret, tailPages)
+    for (const event of [...liveEventsRef.current.values()]
+      .filter((candidate) => candidate.conversationId === secret.conversationId)
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))) {
+      nextView = applyConversationEvent(nextView, secret, event)
+    }
     setView(nextView)
   }, [service])
+  const publishTyping = useCallback((active: boolean) => service?.publishTyping(active), [service])
 
   const runBusy = useCallback(async <T,>(operation: () => Promise<T>): Promise<T> => {
     setBusy(true)
@@ -128,21 +142,46 @@ function App() {
   }, [refreshControl, refreshIndex, service])
 
   useEffect(() => {
-    if (!service || !activeSecret) { setView(null); return }
+    const sessionSecret = activeSecretRef.current
+    if (!service || !activeId || activeEpoch === null || !sessionSecret || sessionSecret.conversationId !== activeId) {
+      liveEventsRef.current.clear()
+      setView(null); setOnlinePeers([]); setTypingPeers([])
+      return
+    }
     let cancelled = false
+    liveEventsRef.current.clear()
     setLoading(true)
     setLiveState('connecting')
-    void reloadActive(activeSecret).then(async () => {
+    setOnlinePeers([])
+    setTypingPeers([])
+    setDeliveryStates({})
+    void reloadActive(sessionSecret).then(async () => {
       if (cancelled) return
       setLoading(false)
-      await service.openLive(activeSecret, async () => {
-        if (!cancelled) await reloadActive(activeSecret)
-      }, (state) => { if (!cancelled) setLiveState(state) })
+      await service.openLive(sessionSecret, {
+        onSync: async () => { if (!cancelled) await reloadActive(sessionSecret) },
+        onState: (state) => { if (!cancelled) setLiveState(state) },
+        onEvent: (event) => {
+          if (cancelled) return
+          liveEventsRef.current.set(event.id, event)
+          if (liveEventsRef.current.size > 1_000) liveEventsRef.current.delete(liveEventsRef.current.keys().next().value!)
+          setView((current) => current ? applyConversationEvent(current, sessionSecret, event) : current)
+        },
+        onDelivery: (eventId, state) => {
+          if (!cancelled) setDeliveryStates((current) => {
+            const rank: Record<MessageDeliveryState, number> = { sending: 0, live: 1, retrying: 2, saved: 3 }
+            if (current[eventId] && rank[current[eventId]] > rank[state]) return current
+            return { ...current, [eventId]: state }
+          })
+        },
+        onPeersChange: (peers) => { if (!cancelled) setOnlinePeers(peers) },
+        onTypingChange: (peers) => { if (!cancelled) setTypingPeers(peers) },
+      })
     }).catch((reason: unknown) => {
       if (!cancelled) { setError(reason instanceof Error ? reason.message : 'Could not open this conversation'); setLoading(false); setLiveState('fallback') }
     })
     return () => { cancelled = true; void service.closeLive() }
-  }, [activeSecret, reloadActive, service])
+  }, [activeEpoch, activeId, reloadActive, service])
 
   if (session.status !== 'ready') {
     return (
@@ -176,9 +215,13 @@ function App() {
           loading={loading}
           busy={busy}
           liveState={liveState}
+          onlinePeers={onlinePeers}
+          typingPeers={typingPeers}
+          deliveryStates={deliveryStates}
           onOpenRail={() => setRailOpen(true)}
           onOpenDetails={() => setDetailsOpen(true)}
           onLoadHistory={() => activeSecret ? runBusy(() => reloadActive(activeSecret, Number.MAX_SAFE_INTEGER)) : Promise.resolve()}
+          onTyping={publishTyping}
           onSend={(body, files) => runBusy(async () => {
             if (!service || !activeSecret || !attachments) return
             const epoch = currentEpoch(activeSecret)

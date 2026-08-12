@@ -17,6 +17,7 @@ import type {
   MessageEvent,
   ReactionEvent,
   EventBase,
+  MessageDeliveryState,
   PendingControlDelivery,
 } from '../domain/types'
 import { GlobalConversationStore, overlayFor } from '../storage/globalConversationStore'
@@ -33,6 +34,8 @@ import {
   sendMembershipUpdate,
   type PendingInvite,
   type PendingMembershipUpdate,
+  type RealtimePeer,
+  type TypingPeer,
 } from '../realtime/messaging'
 import { safeWriteError } from '../storage/kvWriteRecovery'
 
@@ -86,6 +89,11 @@ export class ConversationService {
   readonly messageBox
   private transport: ConversationTransport | null = null
   private transportConversationId: string | null = null
+  private outboxFlushPromise: Promise<void> | null = null
+  private liveCallbacks: {
+    onEvent: (event: ConversationEvent) => void
+    onDelivery: (eventId: string, state: MessageDeliveryState) => void
+  } | null = null
 
   constructor(
     readonly wallet: WalletInterface,
@@ -377,55 +385,84 @@ export class ConversationService {
     return updated
   }
 
-  async openLive(secret: ConversationSecret, onSync: () => Promise<void>, onState: (state: 'connecting' | 'live' | 'fallback') => void): Promise<void> {
+  async openLive(secret: ConversationSecret, callbacks: {
+    onSync: () => Promise<void>
+    onState: (state: 'connecting' | 'live' | 'fallback') => void
+    onEvent: (event: ConversationEvent) => void
+    onDelivery: (eventId: string, state: MessageDeliveryState) => void
+    onPeersChange?: (peers: RealtimePeer[]) => void
+    onTypingChange?: (peers: TypingPeer[]) => void
+  }): Promise<void> {
     await this.closeLive()
-    this.transport = new ConversationTransport(
-      this.messageBox,
-      this.identityKey,
-      secret.conversationId,
-      currentEpoch(secret),
-      onSync,
-      onState,
-    )
+    this.liveCallbacks = { onEvent: callbacks.onEvent, onDelivery: callbacks.onDelivery }
+    this.transport = new ConversationTransport({
+      clientFactory: () => messageBoxFor(this.wallet),
+      identityKey: this.identityKey,
+      conversationId: secret.conversationId,
+      epoch: currentEpoch(secret),
+      onEvent: callbacks.onEvent,
+      onSyncRequested: callbacks.onSync,
+      onState: callbacks.onState,
+      onPeersChange: callbacks.onPeersChange,
+      onTypingChange: callbacks.onTypingChange,
+    })
     this.transportConversationId = secret.conversationId
     await this.transport.start()
+    void this.flushOutbox().catch(() => undefined)
   }
 
   async closeLive(): Promise<void> {
     const active = this.transport
     this.transport = null
     this.transportConversationId = null
+    this.liveCallbacks = null
     if (active) await active.stop()
   }
 
+  publishTyping(active: boolean): void {
+    this.transport?.publishTyping(active)
+  }
+
   async flushOutbox(): Promise<void> {
+    if (this.outboxFlushPromise !== null) {
+      await this.outboxFlushPromise
+      if (this.outbox.list().some((item) => item.state === 'queued' || item.state === 'writing')) {
+        return await this.flushOutbox()
+      }
+      return
+    }
+    this.outboxFlushPromise = this.flushOutboxOnce().finally(() => {
+      this.outboxFlushPromise = null
+    })
+    await this.outboxFlushPromise
+  }
+
+  private async flushOutboxOnce(): Promise<void> {
     for (const item of this.outbox.list()) {
       const secret = await this.secrets.get(item.conversationId)
       if (!secret) continue
       try {
-        this.outbox.update(item.id, { state: 'writing', attempts: item.attempts + 1, lastError: undefined })
         const event = this.outbox.decrypt(secret, item)
-        await this.store.append(secret, this.identityKey, event)
-        this.outbox.update(item.id, { state: 'confirmed' })
+        if (item.state !== 'confirmed') {
+          this.outbox.update(item.id, { state: 'writing', attempts: item.attempts + 1, lastError: undefined })
+          await this.store.append(secret, this.identityKey, event)
+          this.outbox.update(item.id, { state: 'confirmed' })
+          if (this.transportConversationId === secret.conversationId) this.liveCallbacks?.onDelivery(event.id, 'saved')
+        }
         const epoch = currentEpoch(secret)
         const transport = this.transport && this.transportConversationId === secret.conversationId
           ? this.transport
-          : new ConversationTransport(
-          this.messageBox,
-          this.identityKey,
-          secret.conversationId,
-          epoch,
-          async () => undefined,
-          () => undefined,
-        )
-        const delivered = await transport.notify(event.id)
+          : null
+        const delivered = transport ? await transport.publishEvent(event) : 0
         const expected = Math.max(0, epoch.members.length - 1)
         if (delivered === expected) {
           this.outbox.update(item.id, { state: 'notified' })
           this.outbox.remove(item.id)
+          if (this.transportConversationId === secret.conversationId) this.liveCallbacks?.onDelivery(event.id, 'saved')
         }
       } catch (error) {
         this.outbox.update(item.id, { state: 'failed', lastError: safeWriteError(error) })
+        if (this.transportConversationId === item.conversationId) this.liveCallbacks?.onDelivery(item.id, 'retrying')
         throw error
       }
     }
@@ -467,8 +504,21 @@ export class ConversationService {
 
   private async persistEvent(secret: ConversationSecret, event: ConversationEvent): Promise<void> {
     this.outbox.enqueue(secret, event)
-    await this.flushOutbox()
+    const activeTransport = this.transport && this.transportConversationId === secret.conversationId
+      ? this.transport
+      : null
+    if (activeTransport) {
+      this.liveCallbacks?.onEvent(event)
+      this.liveCallbacks?.onDelivery(event.id, 'sending')
+      const expected = Math.max(0, currentEpoch(secret).members.length - 1)
+      void activeTransport.publishEvent(event).then((delivered) => {
+        if (delivered === expected && this.transportConversationId === secret.conversationId) {
+          this.liveCallbacks?.onDelivery(event.id, 'live')
+        }
+      }).catch(() => undefined)
+    }
     const updated = { ...secret, updatedAt: event.createdAt }
     await this.secrets.save(updated)
+    void this.flushOutbox().catch(() => undefined)
   }
 }

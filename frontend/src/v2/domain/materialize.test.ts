@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ConversationEvent, ConversationSecret } from './types'
-import { materializeConversation } from './materialize'
+import { applyConversationEvent, materializeConversation } from './materialize'
 
 const alice = '02' + '11'.repeat(32)
 const bob = '03' + '22'.repeat(32)
@@ -49,5 +49,13 @@ describe('conversation materialization', () => {
       { ...base, sender: bob, type: 'message', id: 'collision', createdAt: 2, body: 'second' },
     ])
     expect(result.messages).toEqual([])
+  })
+
+  it('projects live events immediately and deduplicates the later durable copy', () => {
+    const initial = materializeConversation(secret, [])
+    const message = { ...base, type: 'message' as const, id: 'live-message', createdAt: 10, body: 'shown before chain confirmation' }
+    const optimistic = applyConversationEvent(initial, secret, message)
+    expect(optimistic.messages).toEqual([expect.objectContaining({ id: 'live-message', body: message.body })])
+    expect(applyConversationEvent(optimistic, secret, message)).toEqual(optimistic)
   })
 })

@@ -150,6 +150,8 @@ export interface ConversationView {
 
 export type DeliveryState = 'queued' | 'writing' | 'confirmed' | 'notified' | 'failed'
 
+export type MessageDeliveryState = 'sending' | 'live' | 'saved' | 'retrying'
+
 export interface OutboxItem {
   id: string
   conversationId: string
@@ -191,13 +193,4 @@ export interface PendingControlDelivery {
   id: string
   recipient: string
   body: ConversationInvite | MembershipUpdate
-}
-
-export interface LiveNotification {
-  type: 'convo-v2-event'
-  v: typeof CONVO_PROTOCOL_VERSION
-  conversationId: string
-  epoch: number
-  eventId: string
-  sentAt: number
 }

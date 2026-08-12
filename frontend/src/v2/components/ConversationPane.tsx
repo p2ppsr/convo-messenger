@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowDown, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, MoreHorizontal, Paperclip, Send, ShieldCheck, SmilePlus, Trash2 } from 'lucide-react'
-import type { ConversationSecret, ConversationView, MaterializedMessage } from '../domain/types'
+import type { ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from '../domain/types'
+import type { RealtimePeer, TypingPeer } from '../realtime/messaging'
 
 interface Props {
   identityKey: string
@@ -9,9 +10,13 @@ interface Props {
   loading: boolean
   busy: boolean
   liveState: 'connecting' | 'live' | 'fallback'
+  onlinePeers: RealtimePeer[]
+  typingPeers: TypingPeer[]
+  deliveryStates: Record<string, MessageDeliveryState>
   onOpenRail: () => void
   onOpenDetails: () => void
   onLoadHistory: () => Promise<void>
+  onTyping: (active: boolean) => void
   onSend: (body: string, files: File[]) => Promise<void>
   onEdit: (messageId: string, body: string) => Promise<void>
   onDelete: (messageId: string) => Promise<void>
@@ -28,7 +33,7 @@ function formatTime(timestamp: number): string {
 }
 
 export function ConversationPane(props: Props) {
-  const { identityKey, secret, view, loading, busy, liveState } = props
+  const { identityKey, secret, view, loading, busy, liveState, onlinePeers, typingPeers, deliveryStates, onTyping } = props
   const [draft, setDraft] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [editing, setEditing] = useState<string | null>(null)
@@ -36,8 +41,16 @@ export function ConversationPane(props: Props) {
   const fileInput = useRef<HTMLInputElement>(null)
   const timeline = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { setDraft(''); setFiles([]); setEditing(null) }, [secret?.conversationId])
-  useEffect(() => { timeline.current?.scrollTo({ top: timeline.current.scrollHeight }) }, [view?.messages.length, secret?.conversationId])
+  useEffect(() => {
+    setDraft(''); setFiles([]); setEditing(null)
+    return () => onTyping(false)
+  }, [secret?.conversationId, onTyping])
+  useEffect(() => {
+    const element = timeline.current
+    if (!element) return
+    if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight })
+    else element.scrollTop = element.scrollHeight
+  }, [view?.messages.length, secret?.conversationId])
 
   if (!secret) {
     return (
@@ -54,6 +67,7 @@ export function ConversationPane(props: Props) {
     const currentFiles = files
     setDraft('')
     setFiles([])
+    onTyping(false)
     try { await props.onSend(currentDraft, currentFiles) } catch { setDraft(currentDraft); setFiles(currentFiles) }
   }
 
@@ -62,7 +76,7 @@ export function ConversationPane(props: Props) {
       <header className="conversation-header">
         <button className="icon-button mobile-menu" onClick={props.onOpenRail} aria-label="Open conversations"><Menu size={21} /></button>
         <div className="header-avatar">{secret.title.slice(0, 2).toUpperCase()}</div>
-        <div className="header-copy"><h1>{view?.title || secret.title}</h1><span className={`presence ${liveState}`}><i />{liveState === 'live' ? 'Live private sync' : liveState === 'fallback' ? 'Secure polling fallback' : 'Connecting live sync'}</span></div>
+        <div className="header-copy"><h1>{view?.title || secret.title}</h1><span className={`presence ${liveState}`}><i />{liveState === 'live' ? `${onlinePeers.length > 0 ? `${onlinePeers.length + 1} active · ` : ''}Realtime private sync` : liveState === 'fallback' ? 'Secure reconciliation fallback' : 'Connecting realtime sync'}</span></div>
         <button className="header-details" onClick={props.onOpenDetails}><Info size={18} /><span>Details</span></button>
       </header>
 
@@ -88,6 +102,7 @@ export function ConversationPane(props: Props) {
                   {mine && !isEditing && <button onClick={() => { setEditing(message.id); setEditBody(message.body) }}><MoreHorizontal size={14} /> Edit</button>}
                   {mine && <button className="danger-text" onClick={() => window.confirm('Delete this message for everyone in the current conversation history?') && void props.onDelete(message.id)}><Trash2 size={14} /> Delete</button>}
                 </div>
+                {mine && deliveryStates[message.id] && <div className={`delivery-state ${deliveryStates[message.id]}`}><CheckCheck size={12} />{deliveryStates[message.id] === 'sending' ? 'Sending live…' : deliveryStates[message.id] === 'live' ? 'Delivered live · saving' : deliveryStates[message.id] === 'retrying' ? 'Saved locally · retrying' : 'Saved on-chain'}</div>}
               </div>
             </article>
           )
@@ -95,11 +110,16 @@ export function ConversationPane(props: Props) {
       </div>
 
       <footer className="composer-shell">
+        <div className={`typing-indicator ${typingPeers.length > 0 ? 'visible' : ''}`} aria-live="polite">
+          <span className="typing-avatars">{typingPeers.slice(0, 3).map((peer) => <i key={peer.identityKey}>{peer.identityKey.slice(2, 4).toUpperCase()}</i>)}</span>
+          <span>{typingPeers.length === 1 ? `${shortKey(typingPeers[0].identityKey)} is typing` : typingPeers.length === 2 ? 'Two people are typing' : typingPeers.length > 2 ? `${typingPeers.length} people are typing` : ''}</span>
+          {typingPeers.length > 0 && <b><i /><i /><i /></b>}
+        </div>
         {files.length > 0 && <div className="file-queue">{files.map((file) => <span key={`${file.name}:${file.size}`}><FileLock2 size={14} />{file.name}<button onClick={() => setFiles((current) => current.filter((item) => item !== file))}>×</button></span>)}</div>}
         <div className="composer">
           <input ref={fileInput} type="file" multiple hidden onChange={(event) => setFiles(Array.from(event.target.files ?? []))} />
           <button className="icon-button attach-button" onClick={() => fileInput.current?.click()} aria-label="Attach encrypted files"><Paperclip size={20} /></button>
-          <textarea value={draft} maxLength={20_000} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
+          <textarea value={draft} maxLength={20_000} onChange={(event) => { setDraft(event.target.value); onTyping(event.target.value.trim().length > 0) }} onBlur={() => onTyping(false)} onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit() }
           }} placeholder="Write a private message" rows={1} />
           <button className="send-button" disabled={busy || (!draft.trim() && files.length === 0)} onClick={() => void submit()} aria-label="Send message"><Send size={19} /></button>

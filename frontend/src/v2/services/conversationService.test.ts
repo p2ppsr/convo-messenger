@@ -43,6 +43,49 @@ class MemoryOutbox implements OutboxBackingStore {
 }
 
 describe('conversation control delivery', () => {
+  it('serializes burst outbox writes so wallet actions never overlap', async () => {
+    const alice = '02' + '31'.repeat(32)
+    const bob = '03' + '42'.repeat(32)
+    const secret: ConversationSecret = {
+      v: 2, conversationId: 'cd'.repeat(32), kind: 'direct', title: 'Burst', currentEpoch: 1,
+      epochs: [{ epoch: 1, rootKey: generateRootKey(), members: [alice, bob], admins: [alice], activatedAt: 1 }],
+      createdAt: 1, updatedAt: 1, preferences: { archived: false, favorite: false, muted: false, lastReadAt: 0 },
+    }
+    const repository = new ConversationSecretRepository(new MemoryPrivateStore())
+    await repository.save(secret)
+    const backing = new MemoryOutbox()
+    const outbox = new EncryptedOutbox(alice, backing)
+    for (const body of ['one', 'two']) {
+      outbox.enqueue(secret, {
+        v: 2, type: 'message', id: randomId(), conversationId: secret.conversationId,
+        epoch: 1, sender: alice, createdAt: Date.now(), body,
+      })
+    }
+    let inFlight = 0
+    let maxInFlight = 0
+    let writes = 0
+    const store = {
+      async append() {
+        inFlight += 1
+        maxInFlight = Math.max(maxInFlight, inFlight)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        writes += 1
+        inFlight -= 1
+      },
+    }
+    const service = new ConversationService({} as WalletInterface, alice, {
+      secrets: repository,
+      store: store as never,
+      outbox,
+      messageBox: {} as ReturnType<typeof messageBoxFor>,
+    })
+
+    await Promise.all([service.flushOutbox(), service.flushOutbox(), service.flushOutbox()])
+    expect(writes).toBe(2)
+    expect(maxInFlight).toBe(1)
+    expect(backing.items.every((item) => item.state === 'confirmed')).toBe(true)
+  })
+
   it('persists the exact private envelope and retries it after MessageBox failure', async () => {
     const alice = '02' + '11'.repeat(32)
     const bob = '03' + '22'.repeat(32)

@@ -1,12 +1,13 @@
 import { MessageBoxClient } from '@bsv/message-box-client'
 import { CurvePoint } from 'curvepoint'
 import { Utils, type WalletInterface, type WalletProtocol } from '@bsv/sdk'
-import { liveBoxName } from '../domain/crypto'
+import { decryptJson, encryptJson, liveBoxName, randomId } from '../domain/crypto'
+import { MAX_ATTACHMENT_BYTES } from '../services/attachments'
 import type {
+  ConversationEvent,
   ConversationEpoch,
   ConversationInvite,
   EpochCommitment,
-  LiveNotification,
   MembershipUpdate,
 } from '../domain/types'
 
@@ -147,102 +148,416 @@ function validCommitment(value: unknown): value is EpochCommitment {
     && typeof commitment.historyDigest === 'string' && /^[0-9a-f]{64}$/.test(commitment.historyDigest)
 }
 
-function isLiveNotification(value: unknown): value is LiveNotification {
+const PRESENCE_INTERVAL_MS = 8_000
+const PRESENCE_TIMEOUT_MS = 24_000
+const RECONCILE_INTERVAL_MS = 12_000
+const INBOX_DRAIN_INTERVAL_MS = 30_000
+const TYPING_REFRESH_MS = 2_000
+const TYPING_TIMEOUT_MS = 5_000
+const TYPING_IDLE_MS = 2_500
+const SOCKET_RECONNECT_BASE_MS = 1_000
+const SOCKET_RECONNECT_MAX_MS = 30_000
+
+export interface RealtimePeer {
+  identityKey: string
+  lastSeen: number
+}
+
+export interface TypingPeer extends RealtimePeer {
+  expiresAt: number
+}
+
+interface LiveEnvelope {
+  type: 'convo-v2-live'
+  v: 2
+  envelopeId: string
+  ciphertext: string
+}
+
+interface LivePayload {
+  conversationId: string
+  epoch: number
+  kind: 'event' | 'presence' | 'typing' | 'reconcile'
+  sentAt: number
+  event?: ConversationEvent
+  presence?: 'join' | 'ping' | 'leave'
+  typing?: boolean
+  expiresAt?: number
+}
+
+export interface ConversationTransportOptions {
+  clientFactory: () => MessageBoxClient
+  identityKey: string
+  conversationId: string
+  epoch: ConversationEpoch
+  onEvent: (event: ConversationEvent) => void | Promise<void>
+  onSyncRequested: () => Promise<void>
+  onState: (state: 'connecting' | 'live' | 'fallback') => void
+  onPeersChange?: (peers: RealtimePeer[]) => void
+  onTypingChange?: (peers: TypingPeer[]) => void
+}
+
+function isLiveEnvelope(value: unknown): value is LiveEnvelope {
   if (typeof value !== 'object' || value === null) return false
-  const notification = value as Partial<LiveNotification>
-  return notification.type === 'convo-v2-event'
-    && notification.v === 2
-    && typeof notification.conversationId === 'string'
-    && typeof notification.epoch === 'number'
-    && typeof notification.eventId === 'string'
-    && typeof notification.sentAt === 'number'
+  const envelope = value as Partial<LiveEnvelope>
+  return envelope.type === 'convo-v2-live'
+    && envelope.v === 2
+    && typeof envelope.envelopeId === 'string' && /^[0-9a-f]{64}$/.test(envelope.envelopeId)
+    && typeof envelope.ciphertext === 'string' && envelope.ciphertext.length > 0 && envelope.ciphertext.length <= 100_000
+}
+
+function isEvent(value: unknown, conversationId: string, epoch: ConversationEpoch, sender: string): value is ConversationEvent {
+  if (typeof value !== 'object' || value === null) return false
+  const event = value as Partial<ConversationEvent>
+  if (event.v !== 2
+    || typeof event.id !== 'string' || !/^[0-9a-f]{64}$/.test(event.id)
+    || event.conversationId !== conversationId
+    || event.epoch !== epoch.epoch
+    || event.sender !== sender
+    || typeof event.createdAt !== 'number' || !Number.isSafeInteger(event.createdAt)
+    || event.createdAt < epoch.activatedAt - 300_000
+    || event.createdAt > Date.now() + 300_000) return false
+  if (event.type === 'message') {
+    return typeof event.body === 'string' && event.body.length <= 20_000
+      && (event.replyTo === undefined || (typeof event.replyTo === 'string' && /^[0-9a-f]{64}$/.test(event.replyTo)))
+      && (event.attachments === undefined || (Array.isArray(event.attachments) && event.attachments.length <= 20
+        && event.attachments.every((attachment) => typeof attachment === 'object' && attachment !== null
+          && typeof attachment.id === 'string' && /^[0-9a-f]{64}$/.test(attachment.id)
+          && typeof attachment.handle === 'string' && attachment.handle.length > 0 && attachment.handle.length <= 2_048
+          && typeof attachment.name === 'string' && attachment.name.length > 0 && attachment.name.length <= 255
+          && typeof attachment.mimeType === 'string' && attachment.mimeType.length > 0 && attachment.mimeType.length <= 255
+          && Number.isSafeInteger(attachment.size) && attachment.size >= 0 && attachment.size <= MAX_ATTACHMENT_BYTES
+          && typeof attachment.digest === 'string' && /^[0-9a-f]{64}$/.test(attachment.digest))))
+  }
+  if (event.type === 'edit') return typeof event.targetId === 'string' && /^[0-9a-f]{64}$/.test(event.targetId)
+    && typeof event.body === 'string' && event.body.length <= 20_000
+  if (event.type === 'delete') return typeof event.targetId === 'string' && /^[0-9a-f]{64}$/.test(event.targetId)
+  if (event.type === 'reaction') return typeof event.targetId === 'string' && /^[0-9a-f]{64}$/.test(event.targetId)
+    && typeof event.emoji === 'string' && event.emoji.length > 0 && event.emoji.length <= 32
+  if (event.type === 'metadata') return epoch.admins.includes(sender)
+    && (event.title === undefined || (typeof event.title === 'string' && event.title.length > 0 && event.title.length <= 100))
+  if (event.type === 'membership') return epoch.admins.includes(sender)
+    && event.previousEpoch === epoch.epoch - 1
+    && Array.isArray(event.members) && event.members.length === epoch.members.length
+    && event.members.every((member, index) => member === epoch.members[index])
+    && Array.isArray(event.admins) && event.admins.length === epoch.admins.length
+    && event.admins.every((admin, index) => admin === epoch.admins[index])
+  return false
+}
+
+function isLivePayload(value: unknown, conversationId: string, epoch: ConversationEpoch, sender: string): value is LivePayload {
+  if (typeof value !== 'object' || value === null) return false
+  const payload = value as Partial<LivePayload>
+  if (payload.conversationId !== conversationId
+    || payload.epoch !== epoch.epoch
+    || typeof payload.sentAt !== 'number' || !Number.isFinite(payload.sentAt)) return false
+  if (payload.kind === 'event') return isEvent(payload.event, conversationId, epoch, sender)
+  if (payload.kind === 'presence') return payload.presence === 'join' || payload.presence === 'ping' || payload.presence === 'leave'
+  if (payload.kind === 'typing') return typeof payload.typing === 'boolean'
+    && typeof payload.expiresAt === 'number' && Number.isFinite(payload.expiresAt)
+  return payload.kind === 'reconcile'
 }
 
 export class ConversationTransport {
-  private timer: ReturnType<typeof setInterval> | null = null
+  private client: MessageBoxClient | null = null
+  private drainTimer: ReturnType<typeof setInterval> | null = null
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null
+  private presenceTimer: ReturnType<typeof setInterval> | null = null
+  private typingPruneTimer: ReturnType<typeof setInterval> | null = null
+  private typingIdleTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectAttempt = 0
+  private outboundTail: Promise<void> = Promise.resolve()
   private stopped = false
   private readonly processed = new Set<string>()
+  private readonly processedEvents = new Set<string>()
+  private readonly peers = new Map<string, RealtimePeer>()
+  private readonly typingPeers = new Map<string, TypingPeer>()
+  private localTyping = false
+  private lastTypingSentAt = 0
+  private readonly visibilityHandler = () => {
+    if (document.visibilityState === 'visible') {
+      void this.drain()
+      void this.options.onSyncRequested()
+    }
+  }
+  private readonly pageHideHandler = () => {
+    void this.publishPresence('leave')
+    void this.publishTyping(false)
+  }
 
-  constructor(
-    private readonly client: MessageBoxClient,
-    private readonly identityKey: string,
-    private readonly conversationId: string,
-    private readonly epoch: ConversationEpoch,
-    private readonly onSyncRequested: () => Promise<void>,
-    private readonly onState: (state: 'connecting' | 'live' | 'fallback') => void,
-  ) {}
+  constructor(private readonly options: ConversationTransportOptions) {}
 
   private boxFor(recipient: string): string {
-    return liveBoxName(this.epoch.rootKey, recipient)
+    return liveBoxName(this.options.epoch.rootKey, recipient)
   }
 
   async start(): Promise<void> {
     this.stopped = false
-    this.onState('connecting')
+    await this.connectLiveSocket()
+    await this.drain()
+    document.addEventListener('visibilitychange', this.visibilityHandler)
+    window.addEventListener('pagehide', this.pageHideHandler)
+    await this.publishPresence('join')
+    this.drainTimer = setInterval(() => { void this.drain() }, INBOX_DRAIN_INTERVAL_MS)
+    this.reconcileTimer = setInterval(() => {
+      void this.options.onSyncRequested()
+    }, RECONCILE_INTERVAL_MS)
+    this.presenceTimer = setInterval(() => {
+      void this.publishPresence('ping')
+      this.prunePeers()
+    }, PRESENCE_INTERVAL_MS)
+    this.typingPruneTimer = setInterval(() => this.pruneTyping(), 1_000)
+  }
+
+  private async connectLiveSocket(): Promise<void> {
+    if (this.stopped) return
+    this.options.onState('connecting')
+    const previous = this.client
+    const client = this.options.clientFactory()
+    this.client = client
+    if (previous && previous !== client) void previous.disconnectWebSocket().catch(() => undefined)
     try {
-      await this.client.listenForLiveMessages({
-        messageBox: this.boxFor(this.identityKey),
+      await client.listenForLiveMessages({
+        messageBox: this.boxFor(this.options.identityKey),
         overrideHost: MESSAGEBOX_HOST,
         onMessage: (message) => { void this.handle(message.messageId, message.sender, message.body) },
       })
-      this.onState('live')
+      if (this.stopped || this.client !== client) return
+      this.reconnectAttempt = 0
+      client.testSocket?.on('disconnect', () => {
+        if (this.stopped || this.client !== client) return
+        this.options.onState('fallback')
+        this.scheduleReconnect()
+      })
+      this.options.onState('live')
+      await this.publishPresence('join')
+      void this.options.onSyncRequested()
     } catch {
-      this.onState('fallback')
+      if (this.stopped || this.client !== client) return
+      this.options.onState('fallback')
+      this.scheduleReconnect()
     }
-    await this.drain()
-    this.timer = setInterval(() => { void this.drain() }, 30_000)
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.reconnectTimer !== null) return
+    const delay = Math.min(SOCKET_RECONNECT_BASE_MS * (2 ** this.reconnectAttempt), SOCKET_RECONNECT_MAX_MS)
+    this.reconnectAttempt += 1
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      void this.connectLiveSocket()
+    }, delay)
   }
 
   private async handle(messageId: string, sender: string, rawBody: unknown): Promise<void> {
-    if (this.stopped || this.processed.has(messageId) || !this.epoch.members.includes(sender)) return
+    if (this.stopped || this.processed.has(messageId)) return
     const body = typeof rawBody === 'string' ? safeJson(rawBody) : rawBody
-    if (!isLiveNotification(body)
-      || body.conversationId !== this.conversationId
-      || body.epoch !== this.epoch.epoch) return
+    if (!isLiveEnvelope(body)) {
+      await this.acknowledge(messageId)
+      return
+    }
+    let payload: LivePayload
+    try {
+      payload = decryptJson<LivePayload>(this.options.epoch.rootKey, `live:${body.envelopeId}`, body.ciphertext)
+    } catch {
+      await this.acknowledge(messageId)
+      return
+    }
+    if (!isLivePayload(payload, this.options.conversationId, this.options.epoch, sender)) {
+      await this.acknowledge(messageId)
+      return
+    }
     this.processed.add(messageId)
-    await this.onSyncRequested()
-    await this.client.acknowledgeMessage({ messageIds: [messageId], host: MESSAGEBOX_HOST }).catch(() => undefined)
+    this.trimSet(this.processed)
+    if (this.options.epoch.members.includes(sender)) await this.applyPayload(sender, payload)
+    await this.acknowledge(messageId)
+  }
+
+  private async acknowledge(messageId: string): Promise<void> {
+    await this.client?.acknowledgeMessage({ messageIds: [messageId], host: MESSAGEBOX_HOST }).catch(() => undefined)
+  }
+
+  private isFresh(sentAt: number): boolean {
+    const age = Date.now() - sentAt
+    return age >= -300_000 && age < PRESENCE_TIMEOUT_MS
+  }
+
+  private async applyPayload(sender: string, payload: LivePayload): Promise<void> {
+    if (payload.kind === 'event' && payload.event) {
+      if (this.processedEvents.has(payload.event.id)) return
+      this.processedEvents.add(payload.event.id)
+      this.trimSet(this.processedEvents)
+      if (this.isFresh(payload.sentAt)) this.notePeer(sender)
+      await this.options.onEvent(payload.event)
+      return
+    }
+    if (payload.kind === 'presence') {
+      if (!this.isFresh(payload.sentAt)) return
+      if (payload.presence === 'leave') {
+        this.peers.delete(sender)
+        this.typingPeers.delete(sender)
+      } else this.notePeer(sender)
+      this.emitActivity()
+      return
+    }
+    if (payload.kind === 'typing') {
+      if (!this.isFresh(payload.sentAt)) return
+      this.notePeer(sender)
+      if (payload.typing && (payload.expiresAt ?? 0) > Date.now()) {
+        this.typingPeers.set(sender, { identityKey: sender, lastSeen: Date.now(), expiresAt: payload.expiresAt as number })
+      } else this.typingPeers.delete(sender)
+      this.emitActivity()
+      return
+    }
+    if (payload.kind === 'reconcile') {
+      if (this.isFresh(payload.sentAt)) this.notePeer(sender)
+      await this.options.onSyncRequested()
+    }
   }
 
   async drain(): Promise<void> {
-    if (this.stopped) return
+    const client = this.client
+    if (this.stopped || client === null) return
     try {
-      const messages = await this.client.listMessages({ messageBox: this.boxFor(this.identityKey), host: MESSAGEBOX_HOST })
+      const messages = await client.listMessages({ messageBox: this.boxFor(this.options.identityKey), host: MESSAGEBOX_HOST })
       for (const message of messages) await this.handle(message.messageId, message.sender, message.body)
     } catch {
-      this.onState('fallback')
+      this.options.onState('fallback')
+      this.scheduleReconnect()
     }
   }
 
-  async notify(eventId: string): Promise<number> {
-    const notification: LiveNotification = {
-      type: 'convo-v2-event',
-      v: 2,
-      conversationId: this.conversationId,
-      epoch: this.epoch.epoch,
-      eventId,
+  async publishEvent(event: ConversationEvent): Promise<number> {
+    if (!isEvent(event, this.options.conversationId, this.options.epoch, this.options.identityKey)) {
+      throw new Error('Cannot publish an invalid realtime conversation event')
+    }
+    return await this.publishPayload({ kind: 'event', event })
+  }
+
+  publishTyping(active: boolean): void {
+    if (this.stopped) return
+    if (this.typingIdleTimer !== null) clearTimeout(this.typingIdleTimer)
+    if (active) {
+      const now = Date.now()
+      if (!this.localTyping || now - this.lastTypingSentAt >= TYPING_REFRESH_MS) {
+        this.localTyping = true
+        this.lastTypingSentAt = now
+        void this.publishPayload({ kind: 'typing', typing: true, expiresAt: now + TYPING_TIMEOUT_MS })
+      }
+      this.typingIdleTimer = setTimeout(() => this.publishTyping(false), TYPING_IDLE_MS)
+    } else if (this.localTyping) {
+      this.localTyping = false
+      void this.publishPayload({ kind: 'typing', typing: false, expiresAt: Date.now() })
+    }
+  }
+
+  private async publishPresence(presence: 'join' | 'ping' | 'leave'): Promise<number> {
+    return await this.publishPayload({ kind: 'presence', presence })
+  }
+
+  private async publishPayload(partial: Omit<LivePayload, 'conversationId' | 'epoch' | 'sentAt'>): Promise<number> {
+    const envelopeId = randomId()
+    const payload: LivePayload = {
+      ...partial,
+      conversationId: this.options.conversationId,
+      epoch: this.options.epoch.epoch,
       sentAt: Date.now(),
     }
+    const envelope: LiveEnvelope = {
+      type: 'convo-v2-live',
+      v: 2,
+      envelopeId,
+      ciphertext: encryptJson(this.options.epoch.rootKey, `live:${envelopeId}`, payload, 1_024),
+    }
     let delivered = 0
-    for (const recipient of this.epoch.members.filter((member) => member !== this.identityKey)) {
-      try {
-        await this.client.sendLiveMessage(
-          { recipient, messageBox: this.boxFor(recipient), body: notification },
-          MESSAGEBOX_HOST,
-        )
-        delivered += 1
-      } catch {
-        // Durable overlay state is authoritative; the encrypted outbox retries notification.
-      }
+    for (const recipient of this.options.epoch.members.filter((member) => member !== this.options.identityKey)) {
+      if (await this.sendPrepared(recipient, envelope)) delivered += 1
     }
     return delivered
   }
 
+  private async sendPrepared(recipient: string, envelope: LiveEnvelope): Promise<boolean> {
+    let delivered = false
+    const queued = this.outboundTail.then(async () => {
+      const client = this.client
+      if (client === null || this.stopped) return
+      try {
+        await client.sendLiveMessage({ recipient, messageBox: this.boxFor(recipient), body: envelope }, MESSAGEBOX_HOST)
+        delivered = true
+      } catch {
+        this.options.onState('fallback')
+        this.scheduleReconnect()
+      }
+    })
+    this.outboundTail = queued.catch(() => undefined)
+    await queued
+    return delivered
+  }
+
+  private notePeer(identityKey: string): void {
+    if (identityKey === this.options.identityKey) return
+    this.peers.set(identityKey, { identityKey, lastSeen: Date.now() })
+    this.emitActivity()
+  }
+
+  private prunePeers(): void {
+    const now = Date.now()
+    for (const [identityKey, peer] of this.peers) {
+      if (now - peer.lastSeen >= PRESENCE_TIMEOUT_MS) {
+        this.peers.delete(identityKey)
+        this.typingPeers.delete(identityKey)
+      }
+    }
+    this.emitActivity()
+  }
+
+  private pruneTyping(): void {
+    const now = Date.now()
+    let changed = false
+    for (const [identityKey, peer] of this.typingPeers) {
+      if (peer.expiresAt <= now) {
+        this.typingPeers.delete(identityKey)
+        changed = true
+      }
+    }
+    if (changed) this.emitActivity()
+  }
+
+  private emitActivity(): void {
+    this.options.onPeersChange?.([...this.peers.values()])
+    this.options.onTypingChange?.([...this.typingPeers.values()])
+  }
+
+  private trimSet(set: Set<string>): void {
+    while (set.size > 1_000) {
+      const oldest = set.values().next().value as string | undefined
+      if (oldest === undefined) break
+      set.delete(oldest)
+    }
+  }
+
   async stop(): Promise<void> {
+    await this.publishPresence('leave').catch(() => undefined)
+    this.publishTyping(false)
     this.stopped = true
-    if (this.timer) clearInterval(this.timer)
-    this.timer = null
-    await this.client.leaveRoom(this.boxFor(this.identityKey)).catch(() => undefined)
-    await this.client.disconnectWebSocket().catch(() => undefined)
+    document.removeEventListener('visibilitychange', this.visibilityHandler)
+    window.removeEventListener('pagehide', this.pageHideHandler)
+    if (this.drainTimer) clearInterval(this.drainTimer)
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer)
+    if (this.presenceTimer) clearInterval(this.presenceTimer)
+    if (this.typingPruneTimer) clearInterval(this.typingPruneTimer)
+    if (this.typingIdleTimer) clearTimeout(this.typingIdleTimer)
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.drainTimer = null
+    this.reconcileTimer = null
+    this.presenceTimer = null
+    this.typingPruneTimer = null
+    this.typingIdleTimer = null
+    this.reconnectTimer = null
+    const client = this.client
+    this.client = null
+    await client?.leaveRoom(this.boxFor(this.options.identityKey)).catch(() => undefined)
+    await client?.disconnectWebSocket().catch(() => undefined)
   }
 }
