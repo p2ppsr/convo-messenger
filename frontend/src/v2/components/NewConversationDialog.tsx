@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { WalletInterface } from '@bsv/sdk'
 import { Check, LockKeyhole, Users, X } from 'lucide-react'
 import { IdentitySearch, type IdentityChoice } from './IdentitySearch'
@@ -19,6 +19,7 @@ export function NewConversationDialog({ open, busy, wallet, onClose, onCreate }:
   const [title, setTitle] = useState('')
   const [members, setMembers] = useState<IdentityChoice[]>([])
   const [error, setError] = useState('')
+  const submitting = useRef(false)
 
   useEffect(() => {
     if (!open) { setTitle(''); setMembers([]); setError('') }
@@ -52,12 +53,16 @@ export function NewConversationDialog({ open, busy, wallet, onClose, onCreate }:
             ))}
             {members.length === 0 && <p className="field-hint">Search by identity name, then select at least one person.</p>}
           </div>
-          <div className="privacy-callout"><LockKeyhole size={18} /><span><strong>Private by construction.</strong> The public overlay receives encrypted pages at secret-derived locations—not this roster.</span></div>
+          <div className="privacy-callout"><LockKeyhole size={18} /><span><strong>Private by construction.</strong> The public overlay receives encrypted events at secret-derived locations—not this roster.</span></div>
           {error && <p className="form-error" role="alert">{error}</p>}
         </div>
         <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy || members.length === 0} onClick={() => {
           setError('')
-          void onCreate(title, members.map((member) => member.identityKey)).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Could not create conversation'))
+          if (submitting.current) return
+          submitting.current = true
+          void onCreate(title, members.map((member) => member.identityKey))
+            .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Could not create conversation'))
+            .finally(() => { submitting.current = false })
         }}>{busy ? 'Creating…' : 'Create securely'}</button></div>
       </section>
     </div>

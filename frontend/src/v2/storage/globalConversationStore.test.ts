@@ -1,20 +1,28 @@
 import { describe, expect, it } from 'vitest'
 import type { ConversationEvent, ConversationSecret } from '../domain/types'
-import { epochHistoryDigest, eventDigest, generateRootKey, manifestLocator, pageLocator } from '../domain/crypto'
-import { GlobalConversationStore, type ConversationOverlay, type OverlayEntry } from './globalConversationStore'
+import { epochHistoryDigest, eventDigest, eventLocator, eventTag, generateRootKey, pageLocator } from '../domain/crypto'
+import { GlobalConversationStore, type ConversationOverlay, type OverlayEntry, type OverlayQuery } from './globalConversationStore'
 
 class SharedOverlayState {
   entries = new Map<string, OverlayEntry>()
-  publicWrites: Array<{ controller: string; key: string; value: string }> = []
+  publicWrites: Array<{ controller: string; key: string; value: string; tags?: string[] }> = []
 }
 
 class MemoryOverlay implements ConversationOverlay {
   constructor(private state: SharedOverlayState, private controller: string) {}
-  async get(query: { key: string; controller: string }) { return this.state.entries.get(`${query.controller}:${query.key}`) }
-  async set(key: string, value: string) {
+  async get(query: OverlayQuery) {
+    if (query.key && query.controller) return this.state.entries.get(`${query.controller}:${query.key}`)
+    const entries = [...this.state.entries.entries()]
+      .filter(([compound, entry]) => (!query.controller || compound.startsWith(`${query.controller}:`))
+        && (!query.tags || query.tags.every((tag) => entry.tags?.includes(tag))))
+      .map(([, entry]) => entry)
+    const ordered = query.sortOrder === 'desc' ? entries.reverse() : entries
+    return ordered.slice(query.skip ?? 0, (query.skip ?? 0) + (query.limit ?? ordered.length))
+  }
+  async set(key: string, value: string, options?: { tags?: string[] }) {
     const token = { txid: `${this.state.publicWrites.length}`.padStart(64, '0'), outputIndex: 0 }
-    this.state.entries.set(`${this.controller}:${key}`, { value, token })
-    this.state.publicWrites.push({ controller: this.controller, key, value })
+    this.state.entries.set(`${this.controller}:${key}`, { key, value, tags: options?.tags, token })
+    this.state.publicWrites.push({ controller: this.controller, key, value, tags: options?.tags })
     return `${token.txid}.${token.outputIndex}`
   }
 }
@@ -46,10 +54,11 @@ describe('GlobalKVStore private page model', () => {
     expect(publicRepresentation).not.toContain(secret.title)
     expect(publicRepresentation).not.toContain('private payload')
     expect(publicRepresentation).not.toContain(bob)
-    expect(state.publicWrites.map((item) => item.key)).toEqual(expect.arrayContaining([
-      pageLocator(secret.epochs[0].rootKey, alice, 0),
-      manifestLocator(secret.epochs[0].rootKey, alice),
-    ]))
+    expect(state.publicWrites).toHaveLength(1)
+    expect(state.publicWrites[0]).toMatchObject({
+      key: eventLocator(secret.epochs[0].rootKey, alice, 'event-1'),
+      tags: [eventTag(secret.epochs[0].rootKey, alice)],
+    })
     expect((await store.read(secret)).events).toHaveLength(1)
   })
 
@@ -87,9 +96,24 @@ describe('GlobalKVStore private page model', () => {
     const removedMembersCopy = await new GlobalConversationStore(new MemoryOverlay(state, bob)).read(first, { tailPages: 10 })
     const currentMembersCopy = await aliceStore.read(rotated, { tailPages: 10 })
     // A removed wallet can still mutate its own obsolete local view because it knows epoch one.
-    expect(removedMembersCopy.events.map((event) => event.id)).toEqual(['event-1', 'event-3'])
+    expect(removedMembersCopy.events.map((event) => event.id).sort()).toEqual(['event-1', 'event-3'])
     expect(currentMembersCopy.events.map((event) => event.id)).toEqual(expect.arrayContaining(['event-1', 'event-2']))
     expect(currentMembersCopy.events.map((event) => event.id)).not.toContain('event-3')
     expect(pageLocator(first.epochs[0].rootKey, alice, 0)).not.toBe(pageLocator(rotated.epochs[1].rootKey, alice, 0))
+  })
+
+  it('uses independent immutable tokens so sibling appends cannot overwrite each other', async () => {
+    const state = new SharedOverlayState()
+    const secret = baseSecret(generateRootKey())
+    const store = new GlobalConversationStore(new MemoryOverlay(state, alice))
+    const first = message(secret, alice, 'event-10', 'first')
+    await Promise.all([
+      store.append(secret, alice, first),
+      store.append(secret, alice, message(secret, alice, 'event-11', 'second')),
+    ])
+    await store.append(secret, alice, first)
+    expect(new Set(state.publicWrites.map((write) => write.key)).size).toBe(2)
+    expect(state.publicWrites).toHaveLength(2)
+    expect((await store.read(secret)).events.map((event) => event.id).sort()).toEqual(['event-10', 'event-11'])
   })
 })

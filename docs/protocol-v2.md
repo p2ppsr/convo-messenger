@@ -16,7 +16,7 @@ An epoch contains:
 - its activation time; and
 - once superseded, a local digest map for every accepted event plus its aggregate history commitment.
 
-The secret record is written before its ID is added to the private index. Exact invitation and membership envelopes remain in that wallet-private record until their encrypted MessageBox sends succeed, so retries never generate divergent keys. Incoming control messages are acknowledged only after the secret is persisted and at least one encrypted page read has succeeded.
+The secret record is written before its ID is added to the private index. Exact invitation and membership envelopes remain in that wallet-private record until their encrypted MessageBox sends succeed, so retries never generate divergent keys. A control envelope records the local event it depends upon and is not transmitted until that immutable event is confirmed in GlobalKVStore. Incoming control messages are acknowledged only after the secret is persisted and an encrypted event read has succeeded.
 
 ## Invitations and key rotation
 
@@ -37,18 +37,18 @@ Removed members receive nothing. Newly added members have no prior epoch key and
 
 ## GlobalKVStore layout
 
-Every value is independently owned by its writer. For root key `K`, member identity `I`, page `P`, and domain string `convo:v2`:
+Every value is independently owned by its writer. For root key `K`, member identity `I`, event ID `E`, and domain string `convo:v2`:
 
 ```text
-manifest locator = HMAC-SHA256(K, "convo:v2:locator:manifest:" + I)
-page locator     = HMAC-SHA256(K, "convo:v2:locator:page:" + I + ":" + P)
+event tag        = HMAC-SHA256(K, "convo:v2:locator:events:" + I)
+event locator    = HMAC-SHA256(K, "convo:v2:locator:event:" + I + ":" + E)
 content key      = HMAC-SHA256(K, "convo:v2:content:" + purpose)
 live box         = "convo-v2-" + HMAC-SHA256(K, "convo:v2:locator:live:" + recipient)[0:40]
 ```
 
-Manifests are padded to 512-byte plaintext blocks. Pages are padded to 1,024-byte plaintext blocks and roll at 32 events or 24,000 plaintext bytes. Each page is encrypted with its purpose-specific symmetric key. Reads always specify both locator and expected controller; there is no global scan, public thread query, or latest-messages endpoint.
+Each event is padded to a 1,024-byte plaintext block and encrypted with its purpose-specific symmetric key. Readers query a secret-derived tag together with the expected controller and validate that every decrypted event ID reproduces its opaque locator. Tags paginate in bounded batches; there is no global scan, public thread query, or latest-messages endpoint. The former per-writer manifest/page layout remains read-only so events written immediately before this change are still visible.
 
-The client verifies decrypted page scope, writer identity, epoch number, conversation ID, event shape, event size, and any closed-epoch digest before materialization.
+The client verifies the event locator, query controller, writer identity, epoch number, conversation ID, event shape, event size, and any closed-epoch digest before materialization.
 
 ## Events
 
@@ -56,9 +56,9 @@ The append log supports message, edit, delete, reaction, private metadata, and m
 
 ## Delivery and recovery
 
-Before a global write, the event is purpose-encrypted in a local durable outbox. State advances through `queued`, `writing`, `confirmed`, and `notified`. A retry may safely append the same ID again. Failed invitation and membership sends retain their exact wallet-private envelopes and retry at startup, on subsequent mutations, and during periodic synchronization.
+Before a global write, the event is purpose-encrypted in a local durable outbox. State advances through `queued`, `writing`, `confirmed`, and `notified`. A retry uses the same event ID and locator, decrypts any indexed winner, and accepts it only when the complete event digest matches, so randomized encryption remains semantically idempotent without another spend. Failed invitation and membership sends retain their exact wallet-private envelopes and retry at startup, on subsequent mutations, and during periodic synchronization; prerequisite gating prevents a recipient from learning an epoch whose membership event has not become durable.
 
-Writes are serialized per conversation/epoch/writer using the Web Locks API with an in-process fallback. On a wallet `WERR_REVIEW_ACTIONS` double-spend, Convo reads the current encrypted value. It accepts a matching winner or retries with bounded delay; logs contain only stable error/status names, never competing transactions.
+Writes are serialized per conversation/epoch/writer and membership mutations are serialized per conversation using the Web Locks API with in-process fallbacks. The production build preserves wallet error class names so the SDK can rebroadcast the competing BEEF, query the fresh token, and retry natively. Convo then waits for overlay indexing, accepts an identical indexed winner, retries with bounded delay, and performs a final delayed verification. Logs contain only stable error/status names, never competing transactions. Because different events never update the same token, a retry cannot replace an unrelated winning event.
 
 MessageBox live notifications carry complete conversation events, presence, typing, reconciliation requests, and targeted call signaling inside recipient-specific encrypted boxes. The outer envelope is padded and exposes none of the conversation ID, epoch, event, call metadata, SDP, sender roster, or recipient roster. GlobalKVStore remains authoritative. If the socket is unavailable, Convo drains the box over HTTP every 30 seconds and reconciles durable state independently.
 

@@ -5,6 +5,7 @@ interface Props {
   conversations: ConversationSecret[]
   activeId: string | null
   pendingCount: number
+  loading: boolean
   open: boolean
   onClose: () => void
   onSelect: (conversationId: string) => void
@@ -16,7 +17,7 @@ function initials(title: string): string {
   return title.split(/\s+/).filter(Boolean).slice(0, 2).map((word) => word[0]).join('').toUpperCase() || 'C'
 }
 
-export function ConversationRail({ conversations, activeId, pendingCount, open, onClose, onSelect, onNew, onOpenInvites }: Props) {
+export function ConversationRail({ conversations, activeId, pendingCount, loading, open, onClose, onSelect, onNew, onOpenInvites }: Props) {
   return (
     <aside className={`conversation-rail ${open ? 'is-open' : ''}`} aria-label="Conversations">
       <div className="rail-brand">
@@ -25,7 +26,7 @@ export function ConversationRail({ conversations, activeId, pendingCount, open, 
         <button className="icon-button rail-close" onClick={onClose} aria-label="Close conversations"><X size={20} /></button>
       </div>
 
-      <button className="new-conversation" onClick={onNew}><Plus size={18} /> New conversation</button>
+      <button className="new-conversation" disabled={loading} onClick={onNew}><Plus size={18} /> New conversation</button>
       <button className="inbox-button" onClick={onOpenInvites}>
         <span><Inbox size={18} /> Private invitations</span>
         {pendingCount > 0 && <b>{pendingCount}</b>}
@@ -63,7 +64,10 @@ export function ConversationRail({ conversations, activeId, pendingCount, open, 
             </button>
           )
         })}
-        {conversations.length === 0 && (
+        {loading && conversations.length === 0 && (
+          <div className="rail-empty rail-loading" role="status"><span className="spinner" /><p>Loading private conversations…</p><span>Opening your wallet-encrypted index.</span></div>
+        )}
+        {!loading && conversations.length === 0 && (
           <div className="rail-empty"><ShieldCheck size={24} /><p>No conversations yet.</p><span>Create one without publishing its member list.</span></div>
         )}
       </div>

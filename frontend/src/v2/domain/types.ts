@@ -193,4 +193,5 @@ export interface PendingControlDelivery {
   id: string
   recipient: string
   body: ConversationInvite | MembershipUpdate
+  prerequisiteEventId?: string
 }

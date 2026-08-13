@@ -1,4 +1,5 @@
-const DEFAULT_RETRY_DELAYS_MS = [300, 750, 1_500]
+const DEFAULT_RETRY_DELAYS_MS = [500, 1_000, 2_000]
+const DEFAULT_FINAL_VERIFICATION_DELAY_MS = 2_000
 
 interface ReviewActionResult {
   status?: unknown
@@ -54,7 +55,9 @@ export async function recoverGlobalKvWrite(options: {
   write: () => Promise<string>
   readCurrent: () => Promise<CurrentKvValue>
   intendedValue: string
+  acceptCurrent?: (current: CurrentKvValue) => boolean
   retryDelaysMs?: number[]
+  finalVerificationDelayMs?: number
   sleep?: (delayMs: number) => Promise<void>
 }): Promise<string> {
   const sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => globalThis.setTimeout(resolve, delayMs)))
@@ -70,7 +73,7 @@ export async function recoverGlobalKvWrite(options: {
     await sleep(delay)
     try {
       const current = await options.readCurrent()
-      if (current.value === options.intendedValue && current.outpoint) return current.outpoint
+      if (current.outpoint && (current.value === options.intendedValue || options.acceptCurrent?.(current) === true)) return current.outpoint
     } catch {
       // The fresh write below surfaces actionable failures.
     }
@@ -80,6 +83,13 @@ export async function recoverGlobalKvWrite(options: {
       if (!isDoubleSpendReviewError(error)) throw error
       lastConflict = error
     }
+  }
+  await sleep(options.finalVerificationDelayMs ?? DEFAULT_FINAL_VERIFICATION_DELAY_MS)
+  try {
+    const current = await options.readCurrent()
+    if (current.outpoint && (current.value === options.intendedValue || options.acceptCurrent?.(current) === true)) return current.outpoint
+  } catch {
+    // Preserve the compact wallet conflict below.
   }
   throw new ConversationWriteConflictError(lastConflict)
 }

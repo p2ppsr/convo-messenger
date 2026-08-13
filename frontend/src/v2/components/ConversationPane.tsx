@@ -59,7 +59,9 @@ export function ConversationPane(props: Props) {
     return (
       <main className="conversation-pane empty-pane">
         <button className="icon-button mobile-menu" onClick={props.onOpenRail} aria-label="Open conversations"><Menu size={21} /></button>
-        <div className="empty-hero"><div className="hero-lock"><LockKeyhole size={34} /></div><span className="eyebrow">Convo protocol v2</span><h1>Group chat without a public group.</h1><p>Conversation locators, member lists, titles, and messages stay secret. Pick a conversation or create a new one.</p><div className="security-pills"><span><ShieldCheck size={15} /> End-to-end encrypted</span><span><FileLock2 size={15} /> Wallet-private keys</span></div></div>
+        {loading
+          ? <div className="empty-hero" role="status"><span className="wallet-spinner" /><span className="eyebrow">Wallet-private index</span><h1>Loading your conversations…</h1><p>Decrypting group titles and membership locally. Nothing in the public overlay reveals your roster.</p></div>
+          : <div className="empty-hero"><div className="hero-lock"><LockKeyhole size={34} /></div><span className="eyebrow">Convo protocol v2</span><h1>Group chat without a public group.</h1><p>Conversation locators, member lists, titles, and messages stay secret. Pick a conversation or create a new one.</p><div className="security-pills"><span><ShieldCheck size={15} /> End-to-end encrypted</span><span><FileLock2 size={15} /> Wallet-private keys</span></div></div>}
       </main>
     )
   }
@@ -109,9 +111,9 @@ export function ConversationPane(props: Props) {
         <button className="header-details" onClick={props.onOpenDetails}><Info size={18} /><span>Details</span></button>
       </header>
 
-      {view?.partial && <button className="history-banner" onClick={() => void props.onLoadHistory()}><ArrowDown size={16} /> Older encrypted pages are available. Load full history.</button>}
+      {view?.partial && <button className="history-banner" onClick={() => void props.onLoadHistory()}><ArrowDown size={16} /> Older encrypted events are available. Load full history.</button>}
       <div className="message-timeline" ref={timeline} aria-live="polite">
-        {loading && <div className="timeline-state"><span className="spinner" /> Opening encrypted pages…</div>}
+        {loading && <div className="timeline-state"><span className="spinner" /> Opening encrypted history…</div>}
         {!loading && view?.messages.length === 0 && <div className="timeline-empty"><ShieldCheck size={27} /><h2>This conversation is ready</h2><p>Send the first end-to-end encrypted message.</p></div>}
         {view?.messages.map((message) => {
           const mine = message.sender === identityKey

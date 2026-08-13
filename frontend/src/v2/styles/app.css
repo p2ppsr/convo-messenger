@@ -65,6 +65,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .rail-empty svg { color: var(--accent); }
 .rail-empty p { margin: 11px 0 5px; color: var(--muted-bright); font-weight: 650; }
 .rail-empty span { font-size: 12px; line-height: 1.5; }
+.rail-loading .spinner { margin: 0 auto 12px; }
 .archived-note { display: flex; align-items: center; justify-content: center; gap: 6px; padding-top: 10px; color: #667b72; font-size: 11px; }
 
 .conversation-pane { position: relative; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: linear-gradient(145deg, rgba(18, 31, 26, .78), rgba(8, 14, 12, .96)); }

@@ -2,7 +2,7 @@ import { CompletedProtoWallet, PrivateKey, type WalletInterface } from '@bsv/sdk
 import { describe, expect, it } from 'vitest'
 import { generateRootKey, randomId } from '../domain/crypto'
 import type { ConversationEvent, ConversationInvite, ConversationSecret, OutboxItem } from '../domain/types'
-import type { ConversationOverlay, OverlayEntry } from '../storage/globalConversationStore'
+import type { ConversationOverlay, OverlayEntry, OverlayQuery } from '../storage/globalConversationStore'
 import { GlobalConversationStore } from '../storage/globalConversationStore'
 import { EncryptedOutbox, type OutboxBackingStore } from '../storage/outbox'
 import { ConversationSecretRepository, type PrivateKeyValueStore } from '../storage/privateConversationStore'
@@ -28,10 +28,18 @@ class SharedOverlayState {
 
 class MemoryOverlay implements ConversationOverlay {
   constructor(private readonly state: SharedOverlayState, private readonly controller: string) {}
-  async get(query: { key: string; controller: string }) { return this.state.entries.get(`${query.controller}:${query.key}`) }
-  async set(key: string, value: string) {
+  async get(query: OverlayQuery) {
+    if (query.key && query.controller) return this.state.entries.get(`${query.controller}:${query.key}`)
+    const entries = [...this.state.entries.entries()]
+      .filter(([compound, entry]) => (!query.controller || compound.startsWith(`${query.controller}:`))
+        && (!query.tags || query.tags.every((tag) => entry.tags?.includes(tag))))
+      .map(([, entry]) => entry)
+    const ordered = query.sortOrder === 'desc' ? entries.reverse() : entries
+    return ordered.slice(query.skip ?? 0, (query.skip ?? 0) + (query.limit ?? ordered.length))
+  }
+  async set(key: string, value: string, options?: { tags?: string[] }) {
     const token = { txid: `${this.state.writes++}`.padStart(64, '0'), outputIndex: 0 }
-    this.state.entries.set(`${this.controller}:${key}`, { value, token })
+    this.state.entries.set(`${this.controller}:${key}`, { key, value, tags: options?.tags, token })
     return `${token.txid}.0`
   }
 }
@@ -43,6 +51,41 @@ class MemoryOutbox implements OutboxBackingStore {
 }
 
 describe('conversation control delivery', () => {
+  it('withholds group invitations until the prerequisite GlobalKV event is durable', async () => {
+    const wallets = [new CompletedProtoWallet(PrivateKey.fromRandom()), new CompletedProtoWallet(PrivateKey.fromRandom())]
+    const [alice, bob] = await Promise.all(wallets.map(async (wallet) => (await wallet.getPublicKey({ identityKey: true })).publicKey))
+    const repository = new ConversationSecretRepository(new MemoryPrivateStore())
+    const backing = new MemoryOutbox()
+    const sent: unknown[] = []
+    let conflict = true
+    const store = {
+      async append() {
+        if (conflict) throw {
+          name: 'WERR_REVIEW_ACTIONS', code: 5, isError: true,
+          reviewActionResults: [{ status: 'doubleSpend', competingTxs: ['private'] }],
+        }
+        return 'confirmed.0'
+      },
+    }
+    const messageBox = { async sendMessage(request: { body: unknown }) { sent.push(request.body) } } as unknown as ReturnType<typeof messageBoxFor>
+    const service = new ConversationService(wallets[0] as unknown as WalletInterface, alice, {
+      secrets: repository,
+      store: store as never,
+      outbox: new EncryptedOutbox(alice, backing),
+      messageBox,
+    })
+
+    await expect(service.create('Conflict-safe group', [bob])).rejects.toThrow('awaiting wallet review')
+    expect(sent).toEqual([])
+    expect((await repository.list())[0].pendingControl).toHaveLength(1)
+
+    conflict = false
+    await service.flushOutbox()
+    await service.flushControlOutbox()
+    expect(sent).toHaveLength(1)
+    expect((await repository.list())[0].pendingControl).toEqual([])
+  })
+
   it('keeps wallet review details private while preserving the failed encrypted outbox item', async () => {
     const alice = '02' + '31'.repeat(32)
     const bob = '03' + '42'.repeat(32)
@@ -217,5 +260,54 @@ describe('conversation control delivery', () => {
     expect(accepted.kind).toBe('group')
     expect(accepted.epochs[0].closure).toMatchObject({ eventCount: 2, historyDigest: delivery.body.previousEpochCommitment.historyDigest })
     expect(Object.keys(accepted.epochs[0].closure?.eventDigests ?? {})).toHaveLength(2)
+  })
+
+  it('creates a group and idempotently adds and removes multiple members in one rotation', async () => {
+    const wallets = [0, 1, 2, 3].map(() => new CompletedProtoWallet(PrivateKey.fromRandom()))
+    const [alice, bob, carol, dave] = await Promise.all(wallets.map(async (wallet) => (await wallet.getPublicKey({ identityKey: true })).publicKey))
+    const repository = new ConversationSecretRepository(new MemoryPrivateStore())
+    const state = new SharedOverlayState()
+    const controlBodies: Array<{ type?: string; members?: string[]; epoch?: number }> = []
+    const messageBox = {
+      async sendMessage(request: { body: { type?: string; members?: string[]; epoch?: number } }) {
+        controlBodies.push(request.body)
+      },
+    } as unknown as ReturnType<typeof messageBoxFor>
+    const service = new ConversationService(wallets[0] as unknown as WalletInterface, alice, {
+      secrets: repository,
+      store: new GlobalConversationStore(new MemoryOverlay(state, alice)),
+      outbox: new EncryptedOutbox(alice, new MemoryOutbox()),
+      messageBox,
+    })
+
+    const created = await service.create('Test Chat', [bob])
+    expect(created.epochs[0].members).toEqual([alice, bob])
+    expect(created.pendingControl).toEqual([])
+
+    const desiredMembers = [alice, bob, carol, dave]
+    const [added, duplicateAdd] = await Promise.all([
+      service.changeMembership(created, desiredMembers, [alice]),
+      service.changeMembership(created, desiredMembers, [alice]),
+    ])
+    expect(added.currentEpoch).toBe(2)
+    expect(duplicateAdd.currentEpoch).toBe(2)
+    expect(added.epochs[1].members).toEqual(desiredMembers)
+    expect(added.pendingControl).toEqual([])
+
+    const [removed, duplicateRemove] = await Promise.all([
+      service.changeMembership(added, [alice, bob], [alice]),
+      service.changeMembership(added, [alice, bob], [alice]),
+    ])
+    expect(removed.currentEpoch).toBe(3)
+    expect(duplicateRemove.currentEpoch).toBe(3)
+    expect(removed.epochs[2].members).toEqual([alice, bob])
+    expect((await repository.get(created.conversationId))?.currentEpoch).toBe(3)
+    expect(controlBodies.map((body) => `${body.type}:${body.epoch}`)).toEqual([
+      'convo-v2-invite:1',
+      'convo-v2-membership:2',
+      'convo-v2-invite:2',
+      'convo-v2-invite:2',
+      'convo-v2-membership:3',
+    ])
   })
 })

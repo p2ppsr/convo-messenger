@@ -116,6 +116,7 @@ function validPendingControl(
 ): boolean {
   const body = delivery.body
   if (!/^[0-9a-f]{64}$/.test(delivery.id)
+    || (delivery.prerequisiteEventId !== undefined && !/^[0-9a-f]{64}$/.test(delivery.prerequisiteEventId))
     || !/^(02|03)[0-9a-f]{64}$/i.test(delivery.recipient)
     || !current.members.includes(delivery.recipient)
     || body.v !== 2

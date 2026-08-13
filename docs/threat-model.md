@@ -17,11 +17,11 @@ Convo protects message content, attachment content and metadata, conversation ti
 
 - A public crawler cannot enumerate Convo conversations because there is no Convo lookup service and locators require an epoch secret.
 - Stored values reveal neither plaintext nor the exact length of small payloads because values are encrypted and block padded.
-- A member cannot impersonate another writer inside a page; decrypted events must match the page controller.
+- A member cannot impersonate another writer inside an event token; decrypted events must match the query controller and reproduce their secret-derived locator.
 - Replayed writes deduplicate by event ID.
 - A removed member’s later old-key insertion or modification is excluded by the prior-epoch digest commitment distributed under the new epoch.
 - An unauthorized wallet cannot decrypt the CurvePoint epoch envelope.
-- Concurrent GlobalKVStore spends are read back and retried without leaking transaction details into application logs.
+- Concurrent GlobalKVStore spends are resolved against fresh token state, indexed readback, and a final delayed verification without leaking transaction details into application logs. Unrelated events use different immutable tokens, so conflict recovery cannot overwrite a sibling event.
 - A failed live socket does not lose durable messages because recipients poll and senders retain encrypted outbox state. Failed invitations and rotations retain their exact envelopes in wallet-private storage for retry.
 - A signaling-box observer cannot read call participants, media type, SDP, candidates, or call identifiers because targeted signals are epoch-encrypted and padded.
 - A signaling attacker cannot enable local camera or microphone media: every peer receives its own cloned tracks, which remain disabled until BRC-103 proves that expected member identity and binds the exact meeting and conversation over the WebRTC data channel.

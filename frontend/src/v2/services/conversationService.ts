@@ -55,6 +55,31 @@ function uniqueIdentities(identities: string[]): string[] {
   return [...new Set(identities.filter((identity) => /^(02|03)[0-9a-f]{64}$/i.test(identity)))]
 }
 
+function sameIdentities(left: string[], right: string[]): boolean {
+  return left.length === right.length
+    && [...left].sort().every((identity, index) => identity === [...right].sort()[index])
+}
+
+const mutationLocks = new Map<string, Promise<void>>()
+
+async function withConversationMutationLock<T>(conversationId: string, operation: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== 'undefined' && navigator.locks) {
+    return await navigator.locks.request(`convo-v2:mutation:${conversationId}`, operation)
+  }
+  const previous = mutationLocks.get(conversationId) ?? Promise.resolve()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const current = previous.catch(() => undefined).then(() => gate)
+  mutationLocks.set(conversationId, current)
+  await previous.catch(() => undefined)
+  try {
+    return await operation()
+  } finally {
+    release()
+    if (mutationLocks.get(conversationId) === current) mutationLocks.delete(conversationId)
+  }
+}
+
 function currentEpoch(secret: ConversationSecret): ConversationEpoch {
   const epoch = secret.epochs.find((candidate) => candidate.epoch === secret.currentEpoch)
   if (!epoch) throw new Error('Conversation current epoch is missing')
@@ -172,11 +197,12 @@ export class ConversationService {
       admins: epoch.admins,
       createdAt: now,
     }
+    const metadataEvent = { ...this.baseEvent(secret), type: 'metadata' as const, title: secret.title }
     secret.pendingControl = members.filter((member) => member !== this.identityKey).map((recipient) => ({
-      id: randomId(), recipient, body: invite,
+      id: randomId(), recipient, body: invite, prerequisiteEventId: metadataEvent.id,
     }))
     await this.secrets.save(secret)
-    await this.persistEvent(secret, { ...this.baseEvent(secret), type: 'metadata', title: secret.title })
+    await this.persistEvent(secret, metadataEvent, true)
     return await this.deliverPendingControl(secret)
   }
 
@@ -303,10 +329,19 @@ export class ConversationService {
     membersInput: string[],
     adminsInput: string[],
   ): Promise<ConversationSecret> {
-    const previous = currentEpoch(secret)
+    return await withConversationMutationLock(secret.conversationId, async () => {
+      return await this.changeMembershipLocked(secret, membersInput, adminsInput)
+    })
+  }
+
+  private async changeMembershipLocked(
+    callerSecret: ConversationSecret,
+    membersInput: string[],
+    adminsInput: string[],
+  ): Promise<ConversationSecret> {
+    let secret = await this.secrets.get(callerSecret.conversationId) ?? callerSecret
+    let previous = currentEpoch(secret)
     if (!previous.admins.includes(this.identityKey)) throw new Error('Only an administrator can change membership')
-    if (secret.pendingControl?.length) throw new Error('Pending membership delivery must finish before another rotation')
-    await this.flushOutbox()
     const members = uniqueIdentities(membersInput)
     const admins = uniqueIdentities(adminsInput)
     if (members.length < 2) throw new Error('A conversation requires at least two members')
@@ -314,8 +349,17 @@ export class ConversationService {
     if (!members.includes(this.identityKey) || admins.some((admin) => !members.includes(admin)) || admins.length === 0) {
       throw new Error('Membership must retain the current administrator and at least one administrator')
     }
+    await this.flushOutbox()
+    secret = await this.secrets.get(secret.conversationId) ?? secret
+    if (secret.pendingControl?.length) secret = await this.deliverPendingControl(secret)
+    previous = currentEpoch(secret)
+    if (sameIdentities(members, previous.members) && sameIdentities(admins, previous.admins)) return secret
+    if (secret.pendingControl?.length) {
+      throw new Error('The previous encrypted membership update is still syncing. It will retry automatically.')
+    }
+    if (!previous.admins.includes(this.identityKey)) throw new Error('Only an administrator can change membership')
     const snapshot = await this.store.read(secret, { tailPages: Number.MAX_SAFE_INTEGER })
-    if (snapshot.partial) throw new Error('Cannot rotate membership until every encrypted history page is available')
+    if (snapshot.partial) throw new Error('Cannot rotate membership until the complete encrypted history is available')
     const closedAt = Date.now()
     const closure = closeEpoch(snapshot.events, previous, closedAt)
     const closedPrevious: ConversationEpoch = { ...previous, closure }
@@ -351,11 +395,19 @@ export class ConversationService {
         historyDigest: closure.historyDigest,
       },
     }
+    const membershipEvent: MembershipEvent = {
+      ...this.baseEvent(updated),
+      type: 'membership',
+      members,
+      admins,
+      previousEpoch: previous.epoch,
+    }
     updated = {
       ...updated,
       pendingControl: members.filter((member) => member !== this.identityKey).map((recipient): PendingControlDelivery => ({
         id: randomId(),
         recipient,
+        prerequisiteEventId: membershipEvent.id,
         body: previous.members.includes(recipient) ? update : {
           type: 'convo-v2-invite',
           v: 2,
@@ -371,14 +423,7 @@ export class ConversationService {
       })),
     }
     await this.secrets.save(updated)
-    const membershipEvent: MembershipEvent = {
-      ...this.baseEvent(updated),
-      type: 'membership',
-      members,
-      admins,
-      previousEpoch: previous.epoch,
-    }
-    await this.persistEvent(updated, membershipEvent)
+    await this.persistEvent(updated, membershipEvent, true)
     return await this.deliverPendingControl(updated)
   }
 
@@ -562,6 +607,10 @@ export class ConversationService {
   private async deliverPendingControl(secret: ConversationSecret): Promise<ConversationSecret> {
     let updated = secret
     for (const delivery of secret.pendingControl ?? []) {
+      const prerequisite = delivery.prerequisiteEventId
+        ? this.outbox.list().find((item) => item.id === delivery.prerequisiteEventId)
+        : undefined
+      if (prerequisite && prerequisite.state !== 'confirmed' && prerequisite.state !== 'notified') continue
       try {
         if (delivery.body.type === 'convo-v2-invite') await sendInvite(this.messageBox, delivery.recipient, delivery.body)
         else await sendMembershipUpdate(this.messageBox, delivery.recipient, delivery.body)
@@ -589,7 +638,7 @@ export class ConversationService {
     }
   }
 
-  private async persistEvent(secret: ConversationSecret, event: ConversationEvent): Promise<void> {
+  private async persistEvent(secret: ConversationSecret, event: ConversationEvent, awaitDurable = false): Promise<void> {
     this.outbox.enqueue(secret, event)
     const activeTransport = this.transport && this.transportConversationId === secret.conversationId
       ? this.transport
@@ -606,6 +655,7 @@ export class ConversationService {
     }
     const updated = { ...secret, updatedAt: event.createdAt }
     await this.secrets.save(updated)
-    void this.flushOutbox().catch(() => undefined)
+    if (awaitDurable) await this.flushOutbox()
+    else void this.flushOutbox().catch(() => undefined)
   }
 }

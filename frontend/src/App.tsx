@@ -43,7 +43,7 @@ function App() {
   const [newOpen, setNewOpen] = useState(false)
   const [inboxOpen, setInboxOpen] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [online, setOnline] = useState(navigator.onLine)
@@ -228,7 +228,7 @@ function App() {
       {!online && <div className="offline-banner"><WifiOff size={15} /> Offline. New messages remain encrypted in the durable outbox until connectivity returns.</div>}
       {error && <div className="error-banner" role="alert"><AlertTriangle size={16} /><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss"><X size={16} /></button></div>}
       <div className="app-grid">
-        <ConversationRail conversations={conversations} activeId={activeId} pendingCount={invites.length + updates.length} open={railOpen} onClose={() => setRailOpen(false)} onSelect={setActiveId} onNew={() => setNewOpen(true)} onOpenInvites={() => setInboxOpen(true)} />
+        <ConversationRail conversations={conversations} activeId={activeId} pendingCount={invites.length + updates.length} loading={loading && conversations.length === 0} open={railOpen} onClose={() => setRailOpen(false)} onSelect={setActiveId} onNew={() => setNewOpen(true)} onOpenInvites={() => setInboxOpen(true)} />
         {railOpen && <button className="rail-scrim" aria-label="Close conversations" onClick={() => setRailOpen(false)} />}
         <ConversationPane
           identityKey={session.identityKey}

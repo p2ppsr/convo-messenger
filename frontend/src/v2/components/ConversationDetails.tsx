@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { WalletInterface } from '@bsv/sdk'
 import { Crown, LockKeyhole, ShieldCheck, UserMinus, X } from 'lucide-react'
 import type { ConversationSecret } from '../domain/types'
@@ -24,6 +24,7 @@ export function ConversationDetails({ open, busy, identityKey, wallet, secret, o
   const [members, setMembers] = useState<string[]>(epoch.members)
   const [admins, setAdmins] = useState<string[]>(epoch.admins)
   const [error, setError] = useState('')
+  const submitting = useRef(false)
   const canAdmin = epoch.admins.includes(identityKey)
   const onlineSet = new Set(onlinePeers.map((peer) => peer.identityKey))
 
@@ -66,12 +67,16 @@ export function ConversationDetails({ open, busy, identityKey, wallet, secret, o
               )
             })}
           </div>
-          <div className="privacy-callout"><LockKeyhole size={18} /><span>Saving a roster change creates a fresh random epoch key. Removed members cannot locate or decrypt new pages.</span></div>
+          <div className="privacy-callout"><LockKeyhole size={18} /><span>Saving a roster change creates a fresh random epoch key. Removed members cannot locate or decrypt new events.</span></div>
           {error && <p className="form-error" role="alert">{error}</p>}
         </div>
         <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Close</button>{canAdmin && <button className="primary-button" disabled={busy} onClick={() => {
           setError('')
-          void onSave(title, members, admins).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Could not save changes'))
+          if (submitting.current) return
+          submitting.current = true
+          void onSave(title, members, admins)
+            .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Could not save changes'))
+            .finally(() => { submitting.current = false })
         }}>{busy ? 'Securing changes…' : 'Save securely'}</button>}</div>
       </section>
     </div>

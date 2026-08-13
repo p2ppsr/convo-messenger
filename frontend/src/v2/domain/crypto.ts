@@ -52,6 +52,15 @@ export function pageLocator(rootKey: string, identityKey: string, page: number):
   return deriveLocator(rootKey, `page:${identityKey}:${page}`)
 }
 
+/** Immutable event entries share only a secret-derived tag, never a public roster identifier. */
+export function eventTag(rootKey: string, identityKey: string): string {
+  return deriveLocator(rootKey, `events:${identityKey}`)
+}
+
+export function eventLocator(rootKey: string, identityKey: string, eventId: string): string {
+  return deriveLocator(rootKey, `event:${identityKey}:${eventId}`)
+}
+
 export function liveBoxName(rootKey: string, recipientIdentity: string): string {
   return `convo-v2-${deriveLocator(rootKey, `live:${recipientIdentity}`).slice(0, 40)}`
 }

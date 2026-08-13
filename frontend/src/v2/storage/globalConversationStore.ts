@@ -1,5 +1,5 @@
 import { GlobalKVStore, Utils, type WalletInterface } from '@bsv/sdk'
-import { decryptJson, encryptJson, eventDigest, manifestLocator, pageLocator } from '../domain/crypto'
+import { decryptJson, encryptJson, eventDigest, eventLocator, eventTag, manifestLocator, pageLocator } from '../domain/crypto'
 import type {
   ConversationEpoch,
   ConversationEvent,
@@ -13,16 +13,29 @@ import { recoverGlobalKvWrite } from './kvWriteRecovery'
 const MAX_PAGE_EVENTS = 32
 const MAX_PAGE_PLAINTEXT_BYTES = 24_000
 const MAX_PAGES_PER_MEMBER = 10_000
+const MAX_EVENTS_PER_MEMBER = MAX_PAGES_PER_MEMBER * MAX_PAGE_EVENTS
+const EVENT_QUERY_PAGE_SIZE = 100
 const OVERLAY_LOOKUP_HOSTS = ['https://backend.2b63ed8575c49054dd0ac65c61e7e6c6.projects.babbage.systems']
 
 export interface OverlayEntry {
+  key?: string
   value: string
+  tags?: string[]
   token?: { txid: string; outputIndex: number }
 }
 
+export interface OverlayQuery {
+  key?: string
+  controller?: string
+  tags?: string[]
+  limit?: number
+  skip?: number
+  sortOrder?: 'asc' | 'desc'
+}
+
 export interface ConversationOverlay {
-  get(query: { key: string; controller: string }, options?: { includeToken?: boolean }): Promise<OverlayEntry | undefined>
-  set(key: string, value: string): Promise<string>
+  get(query: OverlayQuery, options?: { includeToken?: boolean }): Promise<OverlayEntry | OverlayEntry[] | undefined>
+  set(key: string, value: string, options?: { tags?: string[] }): Promise<string>
 }
 
 interface TaggedBeef {
@@ -98,6 +111,19 @@ function manifestPurpose(epoch: number, writer: string): string {
   return `manifest:${epoch}:${writer}`
 }
 
+function eventPurpose(epoch: number, writer: string, key: string): string {
+  return `event:${epoch}:${writer}:${key}`
+}
+
+function oneEntry(result: OverlayEntry | OverlayEntry[] | undefined): OverlayEntry | undefined {
+  return Array.isArray(result) ? result[0] : result
+}
+
+function manyEntries(result: OverlayEntry | OverlayEntry[] | undefined): OverlayEntry[] {
+  if (!result) return []
+  return Array.isArray(result) ? result : [result]
+}
+
 function validEvent(event: unknown, epoch: ConversationEpoch, writer: string): event is ConversationEvent {
   if (typeof event !== 'object' || event === null) return false
   const candidate = event as Partial<ConversationEvent>
@@ -134,31 +160,12 @@ function validEvent(event: unknown, epoch: ConversationEpoch, writer: string): e
   return false
 }
 
-async function writeValue(
-  overlay: ConversationOverlay,
-  key: string,
-  controller: string,
-  value: string,
-): Promise<string> {
-  return await recoverGlobalKvWrite({
-    intendedValue: value,
-    write: async () => await overlay.set(key, value),
-    readCurrent: async () => {
-      const entry = await overlay.get({ key, controller }, { includeToken: true })
-      return {
-        value: entry?.value,
-        outpoint: entry?.token ? `${entry.token.txid}.${entry.token.outputIndex}` : undefined,
-      }
-    },
-  })
-}
-
 export class GlobalConversationStore {
   constructor(private readonly overlay: ConversationOverlay) {}
 
   async readManifest(epoch: ConversationEpoch, member: string): Promise<MemberManifest | null> {
     const key = manifestLocator(epoch.rootKey, member)
-    const entry = await this.overlay.get({ key, controller: member })
+    const entry = oneEntry(await this.overlay.get({ key, controller: member }))
     if (!entry) return null
     if (entry.value.length > 10_000) throw new Error('Manifest ciphertext is too large')
     const manifest = decryptJson<MemberManifest>(epoch.rootKey, manifestPurpose(epoch.epoch, member), entry.value)
@@ -171,7 +178,7 @@ export class GlobalConversationStore {
 
   async readPage(epoch: ConversationEpoch, member: string, index: number): Promise<EventPage | null> {
     const key = pageLocator(epoch.rootKey, member, index)
-    const entry = await this.overlay.get({ key, controller: member })
+    const entry = oneEntry(await this.overlay.get({ key, controller: member }))
     if (!entry) return null
     if (entry.value.length > 100_000) throw new Error('Page ciphertext is too large')
     const page = decryptJson<EventPage>(epoch.rootKey, pagePurpose(epoch.epoch, member, index), entry.value)
@@ -187,50 +194,70 @@ export class GlobalConversationStore {
     if (Utils.toArray(JSON.stringify(event), 'utf8').length > MAX_PAGE_PLAINTEXT_BYTES) throw new Error('Event is too large for an encrypted page')
 
     return await withWriteLock(`${secret.conversationId}:${event.epoch}:${identityKey}`, async () => {
-      let manifest = await this.readManifest(epoch, identityKey) ?? {
-        v: 2,
-        epoch: epoch.epoch,
-        writer: identityKey,
-        currentPage: 0,
-        pageCount: 1,
-        eventCount: 0,
-        updatedAt: 0,
-      }
-      let page = await this.readPage(epoch, identityKey, manifest.currentPage) ?? {
-        v: 2,
-        epoch: epoch.epoch,
-        writer: identityKey,
-        index: manifest.currentPage,
-        sealed: false,
-        events: [],
-      }
-      if (page.events.some((existing) => existing.id === event.id)) return 'already-persisted'
-
-      const candidateEvents = [...page.events, event]
-      const candidateSize = Utils.toArray(JSON.stringify(candidateEvents), 'utf8').length
-      if (page.events.length > 0 && (candidateEvents.length > MAX_PAGE_EVENTS || candidateSize > MAX_PAGE_PLAINTEXT_BYTES)) {
-        page = { ...page, sealed: true }
-        const sealedValue = encryptJson(epoch.rootKey, pagePurpose(epoch.epoch, identityKey, page.index), page, 1024)
-        await writeValue(this.overlay, pageLocator(epoch.rootKey, identityKey, page.index), identityKey, sealedValue)
-        page = {
-          v: 2,
-          epoch: epoch.epoch,
-          writer: identityKey,
-          index: page.index + 1,
-          sealed: false,
-          events: [event],
+      // Every event owns an immutable token. A wallet/overlay retry can therefore
+      // only re-submit the exact same ciphertext; it can never replace a sibling
+      // event that won a competing spend.
+      const key = eventLocator(epoch.rootKey, identityKey, event.id)
+      const tag = eventTag(epoch.rootKey, identityKey)
+      const matchesEvent = (ciphertext: string | undefined): boolean => {
+        if (!ciphertext) return false
+        try {
+          const stored = decryptJson<ConversationEvent>(epoch.rootKey, eventPurpose(epoch.epoch, identityKey, key), ciphertext)
+          return validEvent(stored, epoch, identityKey) && eventDigest(stored) === eventDigest(event)
+        } catch {
+          return false
         }
-        manifest = { ...manifest, currentPage: page.index, pageCount: page.index + 1 }
-      } else {
-        page = { ...page, events: candidateEvents }
       }
-
-      const pageValue = encryptJson(epoch.rootKey, pagePurpose(epoch.epoch, identityKey, page.index), page, 1024)
-      await writeValue(this.overlay, pageLocator(epoch.rootKey, identityKey, page.index), identityKey, pageValue)
-      manifest = { ...manifest, eventCount: manifest.eventCount + 1, updatedAt: event.createdAt }
-      const manifestValue = encryptJson(epoch.rootKey, manifestPurpose(epoch.epoch, identityKey), manifest, 512)
-      return await writeValue(this.overlay, manifestLocator(epoch.rootKey, identityKey), identityKey, manifestValue)
+      const existing = oneEntry(await this.overlay.get({ key, controller: identityKey }, { includeToken: true }))
+      if (existing) {
+        if (!matchesEvent(existing.value)) throw new Error('An immutable event locator already contains different data')
+        return existing.token ? `${existing.token.txid}.${existing.token.outputIndex}` : 'already-persisted'
+      }
+      const value = encryptJson(epoch.rootKey, eventPurpose(epoch.epoch, identityKey, key), event, 1024)
+      return await recoverGlobalKvWrite({
+        intendedValue: value,
+        acceptCurrent: (current) => matchesEvent(current.value),
+        write: async () => await this.overlay.set(key, value, { tags: [tag] }),
+        readCurrent: async () => {
+          const entry = oneEntry(await this.overlay.get({ key, controller: identityKey }, { includeToken: true }))
+          return {
+            value: entry?.value,
+            outpoint: entry?.token ? `${entry.token.txid}.${entry.token.outputIndex}` : undefined,
+          }
+        },
+      })
     })
+  }
+
+  private async readImmutableEvents(epoch: ConversationEpoch, member: string, eventLimit: number): Promise<{
+    events: ConversationEvent[]
+    partial: boolean
+    loaded: number
+  }> {
+    const events: ConversationEvent[] = []
+    const tag = eventTag(epoch.rootKey, member)
+    let skip = 0
+    let rejected = false
+    while (skip < eventLimit) {
+      const limit = Math.min(EVENT_QUERY_PAGE_SIZE, eventLimit - skip)
+      const entries = manyEntries(await this.overlay.get({ controller: member, tags: [tag], limit, skip, sortOrder: 'desc' }))
+      for (const entry of entries) {
+        if (!entry.key || entry.value.length > 100_000) throw new Error('Immutable event entry is invalid')
+        const event = decryptJson<ConversationEvent>(epoch.rootKey, eventPurpose(epoch.epoch, member, entry.key), entry.value)
+        if (entry.key !== eventLocator(epoch.rootKey, member, event.id) || !validEvent(event, epoch, member)) {
+          throw new Error('Immutable event scope mismatch')
+        }
+        const expectedDigest = epoch.closure?.eventDigests[event.id]
+        if (epoch.closure && (!expectedDigest || expectedDigest !== eventDigest(event))) {
+          rejected = true
+          continue
+        }
+        events.push(event)
+      }
+      skip += entries.length
+      if (entries.length < limit) return { events, partial: rejected, loaded: entries.length === 0 ? 0 : Math.ceil(skip / EVENT_QUERY_PAGE_SIZE) }
+    }
+    return { events, partial: true, loaded: Math.ceil(skip / EVENT_QUERY_PAGE_SIZE) }
   }
 
   async read(secret: ConversationSecret, options: { tailPages?: number } = {}): Promise<{
@@ -242,9 +269,17 @@ export class GlobalConversationStore {
     let partial = false
     let loadedPages = 0
     const tailPages = Math.max(1, Math.min(MAX_PAGES_PER_MEMBER, Math.floor(options.tailPages ?? 3)))
+    const eventLimit = Math.min(MAX_EVENTS_PER_MEMBER, tailPages * MAX_PAGE_EVENTS)
 
     await Promise.all(secret.epochs.flatMap((epoch) => epoch.members.map(async (member) => {
       try {
+        const immutable = await this.readImmutableEvents(epoch, member, eventLimit)
+        events.push(...immutable.events)
+        loadedPages += immutable.loaded
+        if (immutable.partial) partial = true
+
+        // Read the original paged layout as a migration bridge. All new writes
+        // use immutable entries, so this path never participates in contention.
         const manifest = await this.readManifest(epoch, member)
         if (!manifest) return
         const start = Math.max(0, manifest.currentPage - tailPages + 1)
