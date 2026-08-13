@@ -7,7 +7,7 @@ import { CallOverlay } from './v2/components/CallOverlay'
 import { applyConversationEvent } from './v2/domain/materialize'
 import type { ConversationEvent, ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from './v2/domain/types'
 import type { PendingInvite, PendingMembershipUpdate, RealtimePeer, TypingPeer } from './v2/realtime/messaging'
-import { idleCallSnapshot, type CallSnapshot } from './v2/realtime/meetingCalling'
+import { idleCallSnapshot, type CallSnapshot, type MeetingRoomSnapshot } from './v2/realtime/meetingCalling'
 import { AttachmentService } from './v2/services/attachments'
 import { ConversationService } from './v2/services/conversationService'
 import { useWalletSession } from './v2/hooks/useWalletSession'
@@ -52,6 +52,7 @@ function App() {
   const [typingPeers, setTypingPeers] = useState<TypingPeer[]>([])
   const [deliveryStates, setDeliveryStates] = useState<Record<string, MessageDeliveryState>>({})
   const [call, setCall] = useState<CallSnapshot>(idleCallSnapshot)
+  const [meetingRoom, setMeetingRoom] = useState<MeetingRoomSnapshot | null>(null)
   const liveEventsRef = useRef(new Map<string, ConversationEvent>())
 
   const service = useMemo(() => session.status === 'ready'
@@ -75,10 +76,11 @@ function App() {
       ...typingPeers.map((peer) => peer.identityKey),
       ...(call.peerIdentityKey ? [call.peerIdentityKey] : []),
       ...call.participants.filter((participant) => participant.status === 'connecting' || participant.status === 'authenticating' || participant.status === 'active').map((participant) => participant.identityKey),
+      ...(meetingRoom?.memberIdentityKeys ?? []),
       ...invites.map((invite) => invite.sender),
       ...updates.map((update) => update.sender),
     ])]
-  }, [activeSecret, call.participants, call.peerIdentityKey, conversations, invites, onlinePeers, session, typingPeers, updates, view?.messages])
+  }, [activeSecret, call.participants, call.peerIdentityKey, conversations, invites, meetingRoom?.memberIdentityKeys, onlinePeers, session, typingPeers, updates, view?.messages])
   const identityProfiles = useIdentityProfiles(session.status === 'ready' ? session.client : undefined, identityKeys)
 
   const refreshIndex = useCallback(async () => {
@@ -167,7 +169,7 @@ function App() {
     const sessionSecret = activeSecretRef.current
     if (!service || !activeId || activeEpoch === null || !sessionSecret || sessionSecret.conversationId !== activeId) {
       liveEventsRef.current.clear()
-      setView(null); setOnlinePeers([]); setTypingPeers([]); setCall(idleCallSnapshot())
+      setView(null); setOnlinePeers([]); setTypingPeers([]); setCall(idleCallSnapshot()); setMeetingRoom(null)
       return
     }
     let cancelled = false
@@ -178,6 +180,7 @@ function App() {
     setTypingPeers([])
     setDeliveryStates({})
     setCall(idleCallSnapshot())
+    setMeetingRoom(null)
     void reloadActive(sessionSecret).then(async () => {
       if (cancelled) return
       setLoading(false)
@@ -200,6 +203,7 @@ function App() {
         onPeersChange: (peers) => { if (!cancelled) setOnlinePeers(peers) },
         onTypingChange: (peers) => { if (!cancelled) setTypingPeers(peers) },
         onCallChange: (nextCall) => { if (!cancelled) setCall(nextCall) },
+        onRoomChange: (nextRoom) => { if (!cancelled) setMeetingRoom(nextRoom) },
       })
     }).catch((reason: unknown) => {
       if (!cancelled) { setError(reason instanceof Error ? reason.message : 'Could not open this conversation'); setLoading(false); setLiveState('fallback') }
@@ -244,6 +248,7 @@ function App() {
           deliveryStates={deliveryStates}
           identityProfiles={identityProfiles}
           callActive={call.status !== 'idle' && call.status !== 'ended' && call.status !== 'error'}
+          meetingRoom={meetingRoom}
           onOpenRail={() => setRailOpen(true)}
           onOpenDetails={() => setDetailsOpen(true)}
           onLoadHistory={() => activeSecret ? runBusy(() => reloadActive(activeSecret, Number.MAX_SAFE_INTEGER)) : Promise.resolve()}
@@ -253,6 +258,12 @@ function App() {
             setError('')
             try { await service.startCall(peers, media) }
             catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not start the meeting'); throw reason }
+          }}
+          onJoinMeetingRoom={async () => {
+            if (!service) return
+            setError('')
+            try { await service.joinMeetingRoom() }
+            catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not join the meeting room'); throw reason }
           }}
           onSend={(body, files) => runBusy(async () => {
             if (!service || !activeSecret || !attachments) return

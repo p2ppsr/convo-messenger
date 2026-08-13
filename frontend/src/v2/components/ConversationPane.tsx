@@ -6,7 +6,7 @@ import { identityInitials, identityName, type IdentityProfileMap } from '../hook
 import { conversationName } from '../domain/presentation'
 import { activeMentionDraft, displayMessageText, insertMention, mentionedIdentities, MENTION_PATTERN, type MentionDraft } from '../domain/mentions'
 import { isInlineAudio, isInlineImage, MAX_ATTACHMENT_BYTES } from '../domain/attachmentValidation'
-import { MAX_MEETING_PARTICIPANTS } from '../realtime/meetingCalling'
+import { MAX_MEETING_PARTICIPANTS, type MeetingRoomSnapshot } from '../realtime/meetingCalling'
 import type { CallMedia, RealtimePeer, TypingPeer } from '../realtime/messaging'
 import { IdentityAvatar } from './IdentityAvatar'
 import { EncryptedMediaAttachment } from './EncryptedImageAttachment'
@@ -48,11 +48,13 @@ interface Props {
   deliveryStates: Record<string, MessageDeliveryState>
   identityProfiles: IdentityProfileMap
   callActive: boolean
+  meetingRoom: MeetingRoomSnapshot | null
   onOpenRail: () => void
   onOpenDetails: () => void
   onLoadHistory: () => Promise<void>
   onTyping: (active: boolean) => void
   onCall: (identityKeys: string[], media: CallMedia) => Promise<void>
+  onJoinMeetingRoom: () => Promise<void>
   onSend: (body: string, files: File[]) => Promise<void>
   onEdit: (messageId: string, body: string) => Promise<void>
   onDelete: (messageId: string) => Promise<void>
@@ -192,12 +194,14 @@ export function ConversationPane(props: Props) {
   const members = view?.members ?? secret.epochs.find((epoch) => epoch.epoch === secret.currentEpoch)?.members ?? []
   const otherMembers = members.filter((member) => member !== identityKey)
   const onlineSet = new Set(onlinePeers.map((peer) => peer.identityKey))
-  const directPeer = otherMembers.length === 1 ? otherMembers[0] : null
+  const directPeer = secret.kind === 'direct' && otherMembers.length === 1 ? otherMembers[0] : null
   const displayTitle = conversationName(secret, identityKey, props.identityProfiles)
   const beginCall = (media: CallMedia) => {
     if (directPeer) void props.onCall([directPeer], media)
     else {
-      setSelectedCallMembers(otherMembers.filter((member) => onlineSet.has(member)).slice(0, MAX_MEETING_PARTICIPANTS - 1))
+      setSelectedCallMembers([...otherMembers]
+        .sort((left, right) => Number(onlineSet.has(right)) - Number(onlineSet.has(left)))
+        .slice(0, MAX_MEETING_PARTICIPANTS - 1))
       setCallMenu(media)
     }
   }
@@ -246,24 +250,25 @@ export function ConversationPane(props: Props) {
           : <div className="header-avatar">{displayTitle.slice(0, 2).toUpperCase()}</div>}
         <div className="header-copy"><h1>{displayTitle}</h1><span className={`presence ${liveState}`}><i />{liveState === 'live' ? (directPeer ? `${onlineSet.has(directPeer) ? 'Online' : 'Offline'} · Realtime private sync` : `${onlinePeers.length + 1} of ${members.length} online · Realtime private sync`) : liveState === 'fallback' ? 'Secure reconciliation fallback' : 'Connecting realtime sync'}</span></div>
         <div className="header-call-actions">
-          <button className="header-call" disabled={props.callActive || liveState !== 'live' || onlinePeers.length === 0} onClick={() => beginCall('audio')} aria-label={directPeer ? 'Start voice call' : 'Start group audio meeting'} title={onlinePeers.length === 0 ? 'No other members are online' : directPeer ? 'Start voice call' : 'Start group audio meeting'}><Phone size={17} /></button>
-          <button className="header-call" disabled={props.callActive || liveState !== 'live' || onlinePeers.length === 0} onClick={() => beginCall('video')} aria-label={directPeer ? 'Start video call' : 'Start group video meeting'} title={onlinePeers.length === 0 ? 'No other members are online' : directPeer ? 'Start video call' : 'Start group video meeting'}><Video size={18} /></button>
+          <button className="header-call" disabled={props.callActive || Boolean(props.meetingRoom) || liveState !== 'live' || Boolean(directPeer && onlinePeers.length === 0)} onClick={() => beginCall('audio')} aria-label={directPeer ? 'Start voice call' : 'Open group audio meeting room'} title={directPeer && onlinePeers.length === 0 ? 'This person is offline' : props.meetingRoom ? 'A meeting room is already open' : directPeer ? 'Start voice call' : 'Open an audio room now'}><Phone size={17} /></button>
+          <button className="header-call" disabled={props.callActive || Boolean(props.meetingRoom) || liveState !== 'live' || Boolean(directPeer && onlinePeers.length === 0)} onClick={() => beginCall('video')} aria-label={directPeer ? 'Start video call' : 'Open group video meeting room'} title={directPeer && onlinePeers.length === 0 ? 'This person is offline' : props.meetingRoom ? 'A meeting room is already open' : directPeer ? 'Start video call' : 'Open a video room now'}><Video size={18} /></button>
           {callMenu && <div className="call-member-menu" role="dialog" aria-label={`Choose participants for ${callMenu} meeting`}>
             <div><span><strong>{callMenu === 'video' ? 'Video' : 'Audio'} meeting</strong><small>Select up to {MAX_MEETING_PARTICIPANTS - 1} people</small></span><button onClick={() => setCallMenu(null)} aria-label="Close call menu"><X size={15} /></button></div>
-            {otherMembers.filter((member) => onlineSet.has(member)).map((member) => {
-              const online = true
+            {otherMembers.map((member) => {
+              const online = onlineSet.has(member)
               const selected = selectedCallMembers.includes(member)
               const atCapacity = selectedCallMembers.length >= MAX_MEETING_PARTICIPANTS - 1
-              return <button className={`call-member ${selected ? 'selected' : ''}`} key={member} disabled={!online || (!selected && atCapacity)} onClick={() => setSelectedCallMembers((current) => selected ? current.filter((identityKey) => identityKey !== member) : [...current, member])}><i className={online ? 'online' : ''} /><span><strong>{identityName(props.identityProfiles, member)}</strong><small>{online ? (selected ? 'Included in meeting' : 'Online now') : 'Offline'}</small></span><b aria-hidden="true">{selected ? '✓' : ''}</b></button>
+              return <button className={`call-member ${selected ? 'selected' : ''}`} key={member} disabled={!selected && atCapacity} onClick={() => setSelectedCallMembers((current) => selected ? current.filter((identityKey) => identityKey !== member) : [...current, member])}><i className={online ? 'online' : ''} /><span><strong>{identityName(props.identityProfiles, member)}</strong><small>{online ? (selected ? 'Can join this room' : 'Online now') : selected ? 'Can join when online' : 'Offline · still selectable'}</small></span><b aria-hidden="true">{selected ? '✓' : ''}</b></button>
             })}
-            <button className="call-menu-start" disabled={selectedCallMembers.length === 0} onClick={() => { const selected = selectedCallMembers; setCallMenu(null); void props.onCall(selected, callMenu) }}>{callMenu === 'video' ? <Video size={16} /> : <Phone size={16} />} Start meeting <span>{selectedCallMembers.length + 1}</span></button>
+            <button className="call-menu-start" disabled={selectedCallMembers.length === 0} onClick={() => { const selected = selectedCallMembers; setCallMenu(null); void props.onCall(selected, callMenu) }}>{callMenu === 'video' ? <Video size={16} /> : <Phone size={16} />} Open room <span>{selectedCallMembers.length + 1}</span></button>
           </div>}
         </div>
         <button className={`header-call ${searchOpen ? 'is-active' : ''}`} onClick={() => { setSearchOpen((current) => !current); if (searchOpen) setSearchQuery('') }} aria-label="Search this conversation" title="Search this conversation"><Search size={18} /></button>
         <button className="header-details" onClick={props.onOpenDetails}><Info size={18} /><span>Details</span></button>
       </header>
 
-      {(searchOpen || view?.partial) && <div className="conversation-tools">
+      {(props.meetingRoom || searchOpen || view?.partial) && <div className="conversation-tools">
+        {props.meetingRoom && <div className="meeting-room-banner" role="status"><span className="meeting-room-pulse"><Video size={17} /></span><span><strong>{identityName(props.identityProfiles, props.meetingRoom.hostIdentityKey)} opened a {props.meetingRoom.media} room</strong><small>Join now · media starts only after you approve access</small></span><button onClick={() => void props.onJoinMeetingRoom()}>{props.meetingRoom.media === 'video' ? <Video size={16} /> : <Phone size={16} />} Join room</button></div>}
         {searchOpen && <label className="message-search"><Search size={16} /><input autoFocus type="search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search decrypted messages" /><span>{cleanSearch ? `${visibleMessages.length} result${visibleMessages.length === 1 ? '' : 's'}` : 'On this device'}</span><button onClick={() => { setSearchOpen(false); setSearchQuery('') }} aria-label="Close message search"><X size={15} /></button></label>}
         {view?.partial && <button className="history-banner" onClick={() => void props.onLoadHistory()}><ArrowDown size={16} /> Older encrypted events are available. Load full history.</button>}
       </div>}

@@ -6,6 +6,8 @@ import type { CallMedia, CallSignal, MeetingCallSignal } from './messaging'
 
 const AUTH_CHANNEL = 'convo-brc103-auth-v1'
 const MEETING_INVITE_TIMEOUT_MS = 60_000
+const ROOM_ANNOUNCEMENT_INTERVAL_MS = 30_000
+const ROOM_ANNOUNCEMENT_TTL_MS = 75_000
 const DISCONNECT_GRACE_MS = 10_000
 export const MAX_MEETING_PARTICIPANTS = 8
 
@@ -36,6 +38,14 @@ export interface CallSnapshot {
   message?: string
   isGroup: boolean
   participants: CallParticipantSnapshot[]
+}
+
+export interface MeetingRoomSnapshot {
+  callId: string
+  hostIdentityKey: string
+  media: CallMedia
+  memberIdentityKeys: string[]
+  expiresAt: number
 }
 
 export const idleCallSnapshot = (): CallSnapshot => ({
@@ -76,6 +86,7 @@ interface ActiveMeeting {
   memberIdentityKeys: string[]
   media: CallMedia
   direction: 'incoming' | 'outgoing'
+  room: boolean
   participants: Map<string, MeetingParticipant>
   links: Map<string, PeerLink>
   pendingCandidates: Map<string, RTCIceCandidateInit[]>
@@ -83,6 +94,8 @@ interface ActiveMeeting {
   audioEnabled: boolean
   videoEnabled: boolean
   inviteTimer?: ReturnType<typeof setTimeout>
+  roomAnnouncementTimer?: ReturnType<typeof setInterval>
+  roomAnnouncementBusy?: boolean
   startedAt?: number
   iceServers?: RTCIceServer[]
 }
@@ -94,6 +107,8 @@ export interface CallManagerOptions {
   epoch: ConversationEpoch
   sendSignal: (recipient: string, signal: CallSignal) => Promise<boolean>
   onChange: (snapshot: CallSnapshot) => void
+  isGroupConversation?: boolean
+  onRoomChange?: (room: MeetingRoomSnapshot | null) => void
   iceServers?: RTCIceServer[]
   getIceServers?: () => Promise<RTCIceServer[]>
   createPeerConnection?: (configuration: RTCConfiguration) => RTCPeerConnection
@@ -109,6 +124,9 @@ export interface CallManagerOptions {
  */
 export class AuthenticatedCallManager {
   private call: ActiveMeeting | null = null
+  private availableRoom: MeetingRoomSnapshot | null = null
+  private availableRoomTimer?: ReturnType<typeof setTimeout>
+  private readonly closedRoomIds = new Set<string>()
   private snapshot: CallSnapshot = idleCallSnapshot()
   private stopped = false
 
@@ -121,7 +139,7 @@ export class AuthenticatedCallManager {
     if (this.call) throw new Error('Another meeting is already in progress')
     const recipients = [...new Set(Array.isArray(peerIdentityKeys) ? peerIdentityKeys : [peerIdentityKeys])]
     for (const identityKey of recipients) this.assertPeer(identityKey)
-    if (recipients.length === 0) throw new Error('At least one online conversation member is required to start a meeting')
+    if (recipients.length === 0) throw new Error('Choose at least one conversation member for the meeting room')
     if (recipients.length + 1 > MAX_MEETING_PARTICIPANTS) {
       throw new Error(`Convo meetings currently support up to ${MAX_MEETING_PARTICIPANTS} participants`)
     }
@@ -133,6 +151,7 @@ export class AuthenticatedCallManager {
       memberIdentityKeys,
       media,
       direction: 'outgoing',
+      room: Boolean(this.options.isGroupConversation),
       participants: new Map(),
       links: new Map(),
       pendingCandidates: new Map(),
@@ -146,7 +165,14 @@ export class AuthenticatedCallManager {
       call.localStream = await this.acquireMedia(media)
       if (this.call !== call) return
       this.applyLocalPreviewState(call)
-      this.emit(call, 'outgoing', recipients.length > 1 ? 'Opening private meeting…' : 'Calling securely…')
+      this.emit(call, 'outgoing', call.room ? 'Opening private meeting room…' : 'Calling securely…')
+      if (call.room) {
+        call.startedAt = Date.now()
+        this.emit(call, 'active', 'Meeting room is open · waiting for others to join')
+        await this.announceRoom(call)
+        this.startRoomAnnouncements(call)
+        return
+      }
       const expiresAt = Date.now() + MEETING_INVITE_TIMEOUT_MS
       const deliveries = await Promise.all(recipients.map(async (recipient) => await this.sendTo(call, recipient, {
         v: 2,
@@ -159,10 +185,58 @@ export class AuthenticatedCallManager {
       })))
       if (!deliveries.some(Boolean)) throw new Error('No participant is reachable over realtime signaling')
       call.startedAt = Date.now()
-      this.emit(call, 'active', recipients.length > 1 ? 'Waiting for people to join' : 'Ringing…')
+      this.emit(call, 'active', 'Ringing…')
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : 'Could not start the meeting'
       await this.finish(message, 'error', false)
+      throw reason
+    }
+  }
+
+  async joinRoom(): Promise<void> {
+    if (this.stopped) throw new Error('The realtime meeting session is closed')
+    if (this.call) throw new Error('Another meeting is already in progress')
+    const room = this.availableRoom
+    if (!room || room.expiresAt <= Date.now()) {
+      this.clearAvailableRoom()
+      throw new Error('That meeting room is no longer available')
+    }
+    const call: ActiveMeeting = {
+      callId: room.callId,
+      inviterIdentityKey: room.hostIdentityKey,
+      memberIdentityKeys: room.memberIdentityKeys,
+      media: room.media,
+      direction: 'incoming',
+      room: true,
+      participants: new Map(),
+      links: new Map(),
+      pendingCandidates: new Map(),
+      audioEnabled: true,
+      videoEnabled: room.media === 'video',
+    }
+    for (const identityKey of room.memberIdentityKeys) {
+      if (identityKey !== this.options.identityKey) call.participants.set(identityKey, this.participant(identityKey, 'invited', room.media))
+    }
+    this.call = call
+    this.clearAvailableRoom(room.callId)
+    try {
+      call.localStream = await this.acquireMedia(call.media)
+      if (this.call !== call) return
+      call.startedAt = Date.now()
+      this.applyLocalPreviewState(call)
+      this.emit(call, 'connecting', 'Joining the private meeting room…')
+      const deliveries = await Promise.all(this.otherMembers(call).map(async (recipient) => await this.sendTo(call, recipient, {
+        v: 2,
+        type: 'join',
+        callId: call.callId,
+        to: recipient,
+        media: call.media,
+      }).catch(() => false)))
+      if (!deliveries.some(Boolean)) throw new Error('The meeting room is no longer reachable')
+      this.emit(call, 'active', 'Waiting for authenticated participants')
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : 'Could not join the meeting room'
+      await this.finish(message, 'error', true)
       throw reason
     }
   }
@@ -242,6 +316,14 @@ export class AuthenticatedCallManager {
     if (signal.v !== 2) return
     try {
       if (this.stopped || !this.options.epoch.members.includes(sender) || sender === this.options.identityKey) return
+      if (signal.type === 'room-open') {
+        this.handleRoomOpen(sender, signal)
+        return
+      }
+      if (signal.type === 'room-close') {
+        await this.handleRoomClose(sender, signal.callId, signal.reason)
+        return
+      }
       if (signal.type === 'invite') {
         await this.handleInvite(sender, signal)
         return
@@ -276,7 +358,65 @@ export class AuthenticatedCallManager {
   async stop(): Promise<void> {
     this.stopped = true
     if (this.call) await this.finish('Meeting ended', 'ended', true)
+    this.clearAvailableRoom()
     this.snapshot = idleCallSnapshot()
+  }
+
+  private handleRoomOpen(sender: string, signal: MeetingCallSignal & { type: 'room-open' }): void {
+    if (!this.options.isGroupConversation
+      || signal.expiresAt <= Date.now()
+      || this.closedRoomIds.has(signal.callId)
+      || !signal.participants.includes(sender)
+      || !signal.participants.includes(this.options.identityKey)
+      || signal.participants.some((identityKey) => !this.options.epoch.members.includes(identityKey))) return
+    if (this.call?.callId === signal.callId || this.call) return
+    if (this.availableRoom
+      && this.availableRoom.callId !== signal.callId
+      && this.availableRoom.expiresAt > Date.now()
+      && this.availableRoom.callId < signal.callId) return
+    this.availableRoom = {
+      callId: signal.callId,
+      hostIdentityKey: sender,
+      media: signal.media,
+      memberIdentityKeys: signal.participants,
+      expiresAt: signal.expiresAt,
+    }
+    if (this.availableRoomTimer) clearTimeout(this.availableRoomTimer)
+    this.availableRoomTimer = setTimeout(() => this.clearAvailableRoom(signal.callId), Math.max(1_000, signal.expiresAt - Date.now()))
+    this.options.onRoomChange?.(this.availableRoom)
+  }
+
+  private async handleRoomClose(sender: string, callId: string, reason?: string): Promise<void> {
+    const room = this.availableRoom
+    if (room?.callId === callId && room.hostIdentityKey === sender) {
+      this.closedRoomIds.add(callId)
+      this.trimClosedRooms()
+      this.clearAvailableRoom(callId)
+    }
+    const call = this.call
+    if (call?.room && call.callId === callId && call.inviterIdentityKey === sender) {
+      this.closedRoomIds.add(callId)
+      this.trimClosedRooms()
+      await this.finish(reason || 'Meeting room closed', 'ended', false)
+    }
+  }
+
+  private clearAvailableRoom(callId?: string): void {
+    if (callId && this.availableRoom?.callId !== callId) return
+    if (this.availableRoomTimer) clearTimeout(this.availableRoomTimer)
+    this.availableRoomTimer = undefined
+    if (this.availableRoom) {
+      this.availableRoom = null
+      this.options.onRoomChange?.(null)
+    }
+  }
+
+  private trimClosedRooms(): void {
+    while (this.closedRoomIds.size > 64) {
+      const oldest = this.closedRoomIds.values().next().value as string | undefined
+      if (!oldest) return
+      this.closedRoomIds.delete(oldest)
+    }
   }
 
   private async handleInvite(sender: string, invite: MeetingCallSignal & { type: 'invite' }): Promise<void> {
@@ -312,6 +452,7 @@ export class AuthenticatedCallManager {
       memberIdentityKeys: invite.participants,
       media: invite.media,
       direction: 'incoming',
+      room: invite.participants.length > 2,
       participants: new Map(),
       links: new Map(),
       pendingCandidates: new Map(),
@@ -558,6 +699,36 @@ export class AuthenticatedCallManager {
     }
   }
 
+  private startRoomAnnouncements(call: ActiveMeeting): void {
+    if (!call.room
+      || call.inviterIdentityKey !== this.options.identityKey
+      || this.call !== call
+      || call.roomAnnouncementTimer) return
+    call.roomAnnouncementTimer = setInterval(() => { void this.announceRoom(call) }, ROOM_ANNOUNCEMENT_INTERVAL_MS)
+  }
+
+  private async announceRoom(call: ActiveMeeting): Promise<void> {
+    if (this.call !== call
+      || !call.room
+      || call.inviterIdentityKey !== this.options.identityKey
+      || call.roomAnnouncementBusy) return
+    call.roomAnnouncementBusy = true
+    const expiresAt = Date.now() + ROOM_ANNOUNCEMENT_TTL_MS
+    try {
+      await Promise.all(this.otherMembers(call).map(async (recipient) => await this.sendTo(call, recipient, {
+        v: 2,
+        type: 'room-open',
+        callId: call.callId,
+        to: recipient,
+        media: call.media,
+        participants: call.memberIdentityKeys,
+        expiresAt,
+      }).catch(() => false)))
+    } finally {
+      call.roomAnnouncementBusy = false
+    }
+  }
+
   private async sendTo(call: ActiveMeeting, recipient: string, signal: MeetingCallSignal): Promise<boolean> {
     if (this.call !== call) return false
     return await this.options.sendSignal(recipient, signal)
@@ -633,16 +804,23 @@ export class AuthenticatedCallManager {
   private async finish(message: string, status: 'ended' | 'error', notify: boolean): Promise<void> {
     const call = this.call
     if (!call) return
+    const closeRoom = call.room
+      && call.inviterIdentityKey === this.options.identityKey
+      && call.links.size === 0
     if (notify) {
       await Promise.all(this.otherMembers(call).map(async (recipient) => {
         await this.options.sendSignal(recipient, {
           v: 2,
-          type: 'leave',
+          type: closeRoom ? 'room-close' : 'leave',
           callId: call.callId,
           to: recipient,
           reason: message,
         }).catch(() => false)
       }))
+    }
+    if (closeRoom) {
+      this.closedRoomIds.add(call.callId)
+      this.trimClosedRooms()
     }
     const participants = this.snapshotParticipants(call)
     const peerIdentityKey = call.inviterIdentityKey === this.options.identityKey
@@ -668,8 +846,10 @@ export class AuthenticatedCallManager {
   }
 
   private async handleParticipantLeave(call: ActiveMeeting, sender: string, reason?: string): Promise<void> {
+    const hostLeft = call.room && call.inviterIdentityKey === sender
     this.removeLink(call, sender)
     call.participants.delete(sender)
+    if (hostLeft) this.electRoomHost(call)
     if (!this.isGroup(call)) await this.finish(reason || 'Call ended', 'ended', false)
     else {
       const count = this.activeParticipantCount(call)
@@ -678,7 +858,9 @@ export class AuthenticatedCallManager {
   }
 
   private async handlePeerFailure(call: ActiveMeeting, identityKey: string, message: string): Promise<void> {
+    const hostFailed = call.room && call.inviterIdentityKey === identityKey
     this.removeLink(call, identityKey)
+    if (hostFailed) this.electRoomHost(call)
     this.updateParticipant(call, identityKey, 'unavailable')
     if (!this.isGroup(call)) await this.finish(message, 'error', false)
     else this.emit(call, 'active', `${this.shortIdentity(identityKey)} could not connect`)
@@ -695,8 +877,19 @@ export class AuthenticatedCallManager {
     for (const track of link.remoteStream.getTracks()) track.stop()
   }
 
+  private electRoomHost(call: ActiveMeeting): void {
+    if (!call.room || this.call !== call) return
+    const nextHost = [this.options.identityKey, ...call.links.keys()].sort()[0]
+    call.inviterIdentityKey = nextHost
+    if (nextHost === this.options.identityKey) {
+      void this.announceRoom(call)
+      this.startRoomAnnouncements(call)
+    }
+  }
+
   private cleanup(call: ActiveMeeting): void {
     if (call.inviteTimer) clearTimeout(call.inviteTimer)
+    if (call.roomAnnouncementTimer) clearInterval(call.roomAnnouncementTimer)
     for (const identityKey of [...call.links.keys()]) this.removeLink(call, identityKey)
     for (const track of call.localStream?.getTracks() ?? []) track.stop()
     call.pendingCandidates.clear()
@@ -745,7 +938,7 @@ export class AuthenticatedCallManager {
   }
 
   private isGroup(call: ActiveMeeting): boolean {
-    return call.memberIdentityKeys.length > 2
+    return call.room || call.memberIdentityKeys.length > 2
   }
 
   private shortIdentity(identityKey: string): string {

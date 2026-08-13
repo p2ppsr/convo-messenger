@@ -14,6 +14,47 @@ import type {
 export const MESSAGEBOX_HOST = 'https://messagebox.babbage.systems'
 export const INVITES_BOX = 'convo-v2-invites'
 const PROTOCOL_ID: WalletProtocol = [2, 'Convo Messenger']
+const MESSAGEBOX_SEND_SPACING_MS = 300
+const CONTROL_RATE_LIMIT_RETRIES = 3
+let messageBoxSendTail = Promise.resolve()
+let nextMessageBoxSendAt = 0
+
+function delay(duration: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, duration))
+}
+
+async function pacedMessageBoxSend<T>(operation: () => Promise<T>): Promise<T> {
+  const queued = messageBoxSendTail.catch(() => undefined).then(async () => {
+    const wait = import.meta.env.MODE === 'test' ? 0 : Math.max(0, nextMessageBoxSendAt - Date.now())
+    if (wait > 0) await delay(wait)
+    try {
+      return await operation()
+    } finally {
+      nextMessageBoxSendAt = import.meta.env.MODE === 'test' ? 0 : Date.now() + MESSAGEBOX_SEND_SPACING_MS
+    }
+  })
+  messageBoxSendTail = queued.then(() => undefined, () => undefined)
+  return await queued
+}
+
+function isRateLimited(reason: unknown): boolean {
+  const candidate = reason as { status?: unknown; code?: unknown; message?: unknown }
+  return candidate?.status === 429
+    || candidate?.code === 'ERR_RATE_LIMITED'
+    || (typeof candidate?.message === 'string' && /(?:HTTP\s*429|ERR_RATE_LIMITED|too many requests)/i.test(candidate.message))
+}
+
+async function sendControlWithBackoff(operation: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await pacedMessageBoxSend(operation)
+      return
+    } catch (reason) {
+      if (!isRateLimited(reason) || attempt >= CONTROL_RATE_LIMIT_RETRIES) throw reason
+      await delay(1_000 * (2 ** attempt))
+    }
+  }
+}
 
 export interface PendingInvite {
   messageId: string
@@ -66,7 +107,7 @@ export async function sendInvite(
   recipient: string,
   invite: ConversationInvite,
 ): Promise<void> {
-  await client.sendMessage({ recipient, messageBox: INVITES_BOX, body: invite }, MESSAGEBOX_HOST)
+  await sendControlWithBackoff(async () => { await client.sendMessage({ recipient, messageBox: INVITES_BOX, body: invite }, MESSAGEBOX_HOST) })
 }
 
 export async function sendMembershipUpdate(
@@ -74,7 +115,7 @@ export async function sendMembershipUpdate(
   recipient: string,
   update: MembershipUpdate,
 ): Promise<void> {
-  await client.sendMessage({ recipient, messageBox: INVITES_BOX, body: update }, MESSAGEBOX_HOST)
+  await sendControlWithBackoff(async () => { await client.sendMessage({ recipient, messageBox: INVITES_BOX, body: update }, MESSAGEBOX_HOST) })
 }
 
 export async function listControlMessages(client: MessageBoxClient): Promise<{
@@ -148,9 +189,9 @@ function validCommitment(value: unknown): value is EpochCommitment {
     && typeof commitment.historyDigest === 'string' && /^[0-9a-f]{64}$/.test(commitment.historyDigest)
 }
 
-const PRESENCE_INTERVAL_MS = 8_000
-const PRESENCE_TIMEOUT_MS = 24_000
-const RECONCILE_INTERVAL_MS = 12_000
+const PRESENCE_INTERVAL_MS = 30_000
+const PRESENCE_TIMEOUT_MS = 95_000
+const RECONCILE_INTERVAL_MS = 60_000
 const INBOX_DRAIN_INTERVAL_MS = 30_000
 const TYPING_REFRESH_MS = 2_000
 const TYPING_TIMEOUT_MS = 5_000
@@ -171,12 +212,13 @@ export interface TypingPeer extends RealtimePeer {
 export type CallMedia = 'audio' | 'video'
 export type CallSignal =
   | { v: 2; type: 'invite'; callId: string; to: string; media: CallMedia; participants: string[]; expiresAt: number }
+  | { v: 2; type: 'room-open'; callId: string; to: string; media: CallMedia; participants: string[]; expiresAt: number }
   | { v: 2; type: 'join' | 'ready'; callId: string; to: string; media: CallMedia }
   | { v: 2; type: 'offer'; callId: string; to: string; media: CallMedia; sdp: string }
   | { v: 2; type: 'answer'; callId: string; to: string; sdp: string }
   | { v: 2; type: 'ice'; callId: string; to: string; candidate: RTCIceCandidateInit }
   | { v: 2; type: 'media-state'; callId: string; to: string; audioEnabled: boolean; videoEnabled: boolean }
-  | { v: 2; type: 'ringing' | 'decline' | 'busy' | 'leave'; callId: string; to: string; reason?: string }
+  | { v: 2; type: 'ringing' | 'decline' | 'busy' | 'leave' | 'room-close'; callId: string; to: string; reason?: string }
 
 export type MeetingCallSignal = CallSignal
 
@@ -259,7 +301,7 @@ function isCallSignal(value: unknown, recipient: string): value is CallSignal {
   if (typeof signal.callId !== 'string' || !/^[0-9a-f]{64}$/.test(signal.callId)
     || signal.to !== recipient) return false
   if (signal.v !== 2) return false
-  if (signal.type === 'invite') return (signal.media === 'audio' || signal.media === 'video')
+  if (signal.type === 'invite' || signal.type === 'room-open') return (signal.media === 'audio' || signal.media === 'video')
     && Array.isArray(signal.participants) && signal.participants.length >= 2 && signal.participants.length <= 8
     && new Set(signal.participants).size === signal.participants.length && signal.participants.includes(recipient)
     && signal.participants.every((identityKey) => typeof identityKey === 'string' && /^(02|03)[0-9a-f]{64}$/i.test(identityKey))
@@ -272,7 +314,7 @@ function isCallSignal(value: unknown, recipient: string): value is CallSignal {
     && signal.sdp.length > 0 && signal.sdp.length <= 50_000
   if (signal.type === 'ice') return isIceCandidate(signal.candidate)
   if (signal.type === 'media-state') return typeof signal.audioEnabled === 'boolean' && typeof signal.videoEnabled === 'boolean'
-  return (signal.type === 'ringing' || signal.type === 'decline' || signal.type === 'busy' || signal.type === 'leave')
+  return (signal.type === 'ringing' || signal.type === 'decline' || signal.type === 'busy' || signal.type === 'leave' || signal.type === 'room-close')
     && (signal.reason === undefined || (typeof signal.reason === 'string' && signal.reason.length <= 160))
 }
 
@@ -338,7 +380,6 @@ export class ConversationTransport {
     await this.drain()
     document.addEventListener('visibilitychange', this.visibilityHandler)
     window.addEventListener('pagehide', this.pageHideHandler)
-    await this.publishPresence('join')
     this.drainTimer = setInterval(() => { void this.drain() }, INBOX_DRAIN_INTERVAL_MS)
     this.reconcileTimer = setInterval(() => {
       void this.options.onSyncRequested()
@@ -553,7 +594,7 @@ export class ConversationTransport {
       const client = this.client
       if (client === null || this.stopped) return
       try {
-        await client.sendLiveMessage({ recipient, messageBox: this.boxFor(recipient), body: envelope }, MESSAGEBOX_HOST)
+        await pacedMessageBoxSend(async () => await client.sendLiveMessage({ recipient, messageBox: this.boxFor(recipient), body: envelope }, MESSAGEBOX_HOST))
         delivered = true
       } catch {
         this.options.onState('fallback')

@@ -41,7 +41,7 @@ import {
   type CallMedia,
 } from '../realtime/messaging'
 import { defaultIceServers } from '../realtime/calling'
-import { AuthenticatedCallManager, type CallSnapshot } from '../realtime/meetingCalling'
+import { AuthenticatedCallManager, type CallSnapshot, type MeetingRoomSnapshot } from '../realtime/meetingCalling'
 import { safeWriteError } from '../storage/kvWriteRecovery'
 
 const defaultPreferences = () => ({ archived: false, favorite: false, muted: false, lastReadAt: 0 })
@@ -458,6 +458,7 @@ export class ConversationService {
     onPeersChange?: (peers: RealtimePeer[]) => void
     onTypingChange?: (peers: TypingPeer[]) => void
     onCallChange?: (call: CallSnapshot) => void
+    onRoomChange?: (room: MeetingRoomSnapshot | null) => void
   }): Promise<void> {
     await this.closeLive()
     this.liveCallbacks = { onEvent: callbacks.onEvent, onDelivery: callbacks.onDelivery }
@@ -480,6 +481,8 @@ export class ConversationService {
       epoch: currentEpoch(secret),
       sendSignal: async (recipient, signal) => await this.transport?.publishCallSignal(recipient, signal) ?? false,
       onChange: callbacks.onCallChange ?? (() => undefined),
+      isGroupConversation: secret.kind === 'group',
+      onRoomChange: callbacks.onRoomChange,
       getIceServers: async () => await this.resolveIceServers(),
     })
     this.transportConversationId = secret.conversationId
@@ -508,6 +511,10 @@ export class ConversationService {
   }
 
   async acceptCall(): Promise<void> { await this.callManager?.accept() }
+  async joinMeetingRoom(): Promise<void> {
+    if (!this.callManager) throw new Error('Open a conversation before joining a meeting room')
+    await this.callManager.joinRoom()
+  }
   async declineCall(): Promise<void> { await this.callManager?.decline() }
   async hangupCall(): Promise<void> { await this.callManager?.hangup() }
   dismissCall(): void { this.callManager?.dismiss() }

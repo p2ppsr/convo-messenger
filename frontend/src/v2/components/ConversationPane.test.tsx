@@ -5,6 +5,7 @@ import { ConversationPane } from './ConversationPane'
 
 const alice = `02${'11'.repeat(32)}`
 const bob = `03${'22'.repeat(32)}`
+const carol = `02${'33'.repeat(32)}`
 const messageId = 'aa'.repeat(32)
 const secret: ConversationSecret = {
   v: 2,
@@ -66,6 +67,7 @@ describe('ConversationPane realtime experience', () => {
     render(<ConversationPane
       identityKey={alice} secret={secret} view={view} loading={false} busy={false} liveState="live"
       onlinePeers={[]} typingPeers={[]} deliveryStates={{}} identityProfiles={{}} callActive={false}
+      meetingRoom={null} onJoinMeetingRoom={vi.fn(async () => undefined)}
       onOpenRail={vi.fn()} onOpenDetails={vi.fn()} onLoadHistory={vi.fn(async () => undefined)} onTyping={vi.fn()}
       onCall={vi.fn(async () => undefined)} onSend={onSend} onEdit={vi.fn(async () => undefined)}
       onDelete={vi.fn(async () => undefined)} onReact={vi.fn(async () => undefined)}
@@ -102,11 +104,13 @@ describe('ConversationPane realtime experience', () => {
       deliveryStates={{ [messageId]: 'live' }}
       identityProfiles={{ [bob]: { identityKey: bob, name: 'Bob Builder' } }}
       callActive={false}
+      meetingRoom={null}
       onOpenRail={vi.fn()}
       onOpenDetails={vi.fn()}
       onLoadHistory={vi.fn(async () => undefined)}
       onTyping={onTyping}
       onCall={vi.fn(async () => undefined)}
+      onJoinMeetingRoom={vi.fn(async () => undefined)}
       onSend={vi.fn(async () => undefined)}
       onEdit={vi.fn(async () => undefined)}
       onDelete={vi.fn(async () => undefined)}
@@ -136,11 +140,13 @@ describe('ConversationPane realtime experience', () => {
       deliveryStates={{}}
       identityProfiles={{ [alice]: { identityKey: alice, name: 'Alice Admin' }, [bob]: { identityKey: bob, name: 'Bob Builder' } }}
       callActive={false}
+      meetingRoom={null}
       onOpenRail={vi.fn()}
       onOpenDetails={vi.fn()}
       onLoadHistory={vi.fn(async () => undefined)}
       onTyping={vi.fn()}
       onCall={vi.fn(async () => undefined)}
+      onJoinMeetingRoom={vi.fn(async () => undefined)}
       onSend={onSend}
       onEdit={vi.fn(async () => undefined)}
       onDelete={vi.fn(async () => undefined)}
@@ -178,11 +184,13 @@ describe('ConversationPane realtime experience', () => {
       deliveryStates={{}}
       identityProfiles={{}}
       callActive={false}
+      meetingRoom={null}
       onOpenRail={vi.fn()}
       onOpenDetails={vi.fn()}
       onLoadHistory={vi.fn(async () => undefined)}
       onTyping={vi.fn()}
       onCall={onCall}
+      onJoinMeetingRoom={vi.fn(async () => undefined)}
       onSend={vi.fn(async () => undefined)}
       onEdit={vi.fn(async () => undefined)}
       onDelete={vi.fn(async () => undefined)}
@@ -206,11 +214,13 @@ describe('ConversationPane realtime experience', () => {
       deliveryStates={{}}
       identityProfiles={{}}
       callActive={false}
+      meetingRoom={null}
       onOpenRail={vi.fn()}
       onOpenDetails={vi.fn()}
       onLoadHistory={vi.fn(async () => undefined)}
       onTyping={vi.fn()}
       onCall={onCall}
+      onJoinMeetingRoom={vi.fn(async () => undefined)}
       onSend={vi.fn(async () => undefined)}
       onEdit={vi.fn(async () => undefined)}
       onDelete={vi.fn(async () => undefined)}
@@ -221,5 +231,46 @@ describe('ConversationPane realtime experience', () => {
 
     fireEvent.click(getByRole('button', { name: 'Start voice call' }))
     expect(onCall).toHaveBeenCalledWith([bob], 'audio')
+  })
+
+  it('opens an empty group room for offline members and offers a late-join banner', () => {
+    const groupSecret: ConversationSecret = {
+      ...secret,
+      kind: 'group',
+      title: 'Design room',
+      epochs: [{ ...secret.epochs[0], members: [alice, bob, carol] }],
+    }
+    const groupView: ConversationView = { ...view, title: 'Design room', members: [alice, bob, carol] }
+    const onCall = vi.fn(async () => undefined)
+    const onJoinMeetingRoom = vi.fn(async () => undefined)
+    const { rerender } = render(<ConversationPane
+      identityKey={alice} secret={groupSecret} view={groupView} loading={false} busy={false} liveState="live"
+      onlinePeers={[]} typingPeers={[]} deliveryStates={{}} identityProfiles={{ [bob]: { identityKey: bob, name: 'Bob Builder' } }}
+      callActive={false} meetingRoom={null}
+      onOpenRail={vi.fn()} onOpenDetails={vi.fn()} onLoadHistory={vi.fn(async () => undefined)} onTyping={vi.fn()}
+      onCall={onCall} onJoinMeetingRoom={onJoinMeetingRoom} onSend={vi.fn(async () => undefined)}
+      onEdit={vi.fn(async () => undefined)} onDelete={vi.fn(async () => undefined)} onReact={vi.fn(async () => undefined)}
+      onDownload={vi.fn(async () => undefined)} onOpenAttachment={vi.fn(async () => new Blob())}
+    />)
+
+    const openVideo = screen.getByRole('button', { name: 'Open group video meeting room' })
+    expect(openVideo).toBeEnabled()
+    fireEvent.click(openVideo)
+    expect(screen.getAllByText('Can join when online')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: /Open room/ }))
+    expect(onCall).toHaveBeenCalledWith([bob, carol], 'video')
+
+    rerender(<ConversationPane
+      identityKey={alice} secret={groupSecret} view={groupView} loading={false} busy={false} liveState="live"
+      onlinePeers={[]} typingPeers={[]} deliveryStates={{}} identityProfiles={{ [bob]: { identityKey: bob, name: 'Bob Builder' } }}
+      callActive={false} meetingRoom={{ callId: 'ab'.repeat(32), hostIdentityKey: bob, media: 'video', memberIdentityKeys: [alice, bob, carol], expiresAt: Date.now() + 60_000 }}
+      onOpenRail={vi.fn()} onOpenDetails={vi.fn()} onLoadHistory={vi.fn(async () => undefined)} onTyping={vi.fn()}
+      onCall={onCall} onJoinMeetingRoom={onJoinMeetingRoom} onSend={vi.fn(async () => undefined)}
+      onEdit={vi.fn(async () => undefined)} onDelete={vi.fn(async () => undefined)} onReact={vi.fn(async () => undefined)}
+      onDownload={vi.fn(async () => undefined)} onOpenAttachment={vi.fn(async () => new Blob())}
+    />)
+    expect(screen.getByText('Bob Builder opened a video room')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Join room' }))
+    expect(onJoinMeetingRoom).toHaveBeenCalled()
   })
 })

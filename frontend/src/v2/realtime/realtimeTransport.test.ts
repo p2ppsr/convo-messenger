@@ -137,10 +137,10 @@ describe('private realtime conversation transport', () => {
     await aliceTransport.start()
 
     aliceTransport.publishTyping(true)
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(peersChanged).toHaveBeenCalledWith([expect.objectContaining({ identityKey: alice })])
-    expect(typingChanged).toHaveBeenCalledWith([expect.objectContaining({ identityKey: alice })])
+    await vi.waitFor(() => {
+      expect(peersChanged).toHaveBeenCalledWith([expect.objectContaining({ identityKey: alice })])
+      expect(typingChanged).toHaveBeenCalledWith([expect.objectContaining({ identityKey: alice })])
+    }, { timeout: 1_000 })
 
     await vi.advanceTimersByTimeAsync(2_500)
     expect(typingChanged).toHaveBeenLastCalledWith([])

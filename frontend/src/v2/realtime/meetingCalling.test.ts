@@ -1,6 +1,6 @@
 import { CompletedProtoWallet, PrivateKey } from '@bsv/sdk'
 import { describe, expect, it, vi } from 'vitest'
-import { AuthenticatedCallManager, MAX_MEETING_PARTICIPANTS, type CallSnapshot } from './meetingCalling'
+import { AuthenticatedCallManager, MAX_MEETING_PARTICIPANTS, type CallManagerOptions, type CallSnapshot, type MeetingRoomSnapshot } from './meetingCalling'
 import type { CallSignal } from './messaging'
 
 const aliceKey = PrivateKey.fromRandom()
@@ -79,6 +79,8 @@ function manager(options: {
   sendSignal?: (recipient: string, signal: CallSignal) => Promise<boolean>
   snapshots?: CallSnapshot[]
   connections?: ReturnType<typeof fakePeerConnection>[]
+  isGroupConversation?: boolean
+  onRoomChange?: CallManagerOptions['onRoomChange']
 }) {
   const identityKey = options.identityKey ?? alice
   const privateKey = options.privateKey ?? aliceKey
@@ -98,6 +100,8 @@ function manager(options: {
       },
       sendSignal: options.sendSignal ?? vi.fn(async () => true),
       onChange: (snapshot) => { options.snapshots?.push(snapshot) },
+      isGroupConversation: options.isGroupConversation ?? true,
+      onRoomChange: options.onRoomChange,
       getUserMedia: vi.fn(async (constraints) => {
         const selected = constraints.video ? media : fakeStream('audio')
         return selected.stream
@@ -114,7 +118,7 @@ function manager(options: {
 }
 
 describe('authenticated group meeting mesh', () => {
-  it('invites a bounded private roster and exposes no SDP before someone joins', async () => {
+  it('opens a bounded private room and exposes no SDP before someone joins', async () => {
     const signals: Array<{ recipient: string; signal: CallSignal }> = []
     const snapshots: CallSnapshot[] = []
     const { call } = manager({ snapshots, sendSignal: vi.fn(async (recipient, signal) => {
@@ -125,12 +129,54 @@ describe('authenticated group meeting mesh', () => {
     await call.startCall([bob, carol], 'video')
 
     expect(signals).toHaveLength(2)
-    expect(signals.every(({ signal }) => signal.v === 2 && signal.type === 'invite')).toBe(true)
+    expect(signals.every(({ signal }) => signal.v === 2 && signal.type === 'room-open')).toBe(true)
     expect(signals.every(({ signal }) => signal.type !== 'offer')).toBe(true)
     expect(signals[0].signal).toEqual(expect.objectContaining({ participants: [alice, bob, carol] }))
     expect(snapshots.at(-1)).toEqual(expect.objectContaining({ status: 'active', isGroup: true }))
     expect(snapshots.at(-1)?.participants).toHaveLength(2)
     await call.stop()
+  })
+
+  it('keeps the host in an empty room and lets a member join from a private room announcement', async () => {
+    const hostSnapshots: CallSnapshot[] = []
+    const { call: host } = manager({
+      snapshots: hostSnapshots,
+      sendSignal: vi.fn(async () => false),
+    })
+    await host.startCall([bob, carol], 'video')
+    expect(host.current()).toEqual(expect.objectContaining({
+      status: 'active',
+      isGroup: true,
+      message: 'Meeting room is open · waiting for others to join',
+    }))
+
+    const rooms: Array<MeetingRoomSnapshot | null> = []
+    const joinSignals: CallSignal[] = []
+    const { call: guest } = manager({
+      identityKey: bob,
+      privateKey: bobKey,
+      onRoomChange: (room) => rooms.push(room),
+      sendSignal: vi.fn(async (_recipient, signal) => { joinSignals.push(signal); return true }),
+    })
+    const callId = 'ab'.repeat(32)
+    await guest.handleSignal(alice, {
+      v: 2,
+      type: 'room-open',
+      callId,
+      to: bob,
+      media: 'video',
+      participants: [alice, bob, carol],
+      expiresAt: Date.now() + 60_000,
+    })
+    expect(rooms[0]).toEqual(expect.objectContaining({ callId, hostIdentityKey: alice, media: 'video' }))
+    expect(guest.current().status).toBe('idle')
+
+    await guest.joinRoom()
+    expect(rooms.at(-1)).toBeNull()
+    expect(guest.current()).toEqual(expect.objectContaining({ status: 'active', isGroup: true, callId }))
+    expect(joinSignals.some((signal) => signal.type === 'join')).toBe(true)
+    await guest.stop()
+    await host.stop()
   })
 
   it('uses one deterministic offerer per pair and gates cloned outbound tracks until authentication', async () => {
@@ -139,7 +185,7 @@ describe('authenticated group meeting mesh', () => {
     const low = [alice, bob].sort()[0]
     const high = low === alice ? bob : alice
     const privateKey = low === alice ? aliceKey : bobKey
-    const { call } = manager({ identityKey: low, privateKey, connections, sendSignal: vi.fn(async (_recipient, signal) => {
+    const { call } = manager({ identityKey: low, privateKey, connections, isGroupConversation: false, sendSignal: vi.fn(async (_recipient, signal) => {
       signals.push(signal)
       return true
     }) })

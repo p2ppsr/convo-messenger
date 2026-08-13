@@ -223,6 +223,39 @@ describe('conversation control delivery', () => {
     expect(attempts).toEqual([invite, invite])
   })
 
+  it('backs off and completes an invitation when MessageBox rate limits the first attempt', async () => {
+    const alice = '02' + '15'.repeat(32)
+    const bob = '03' + '26'.repeat(32)
+    const invite: ConversationInvite = {
+      type: 'convo-v2-invite', v: 2, conversationId: 'ad'.repeat(32), title: 'Rate-safe group', kind: 'direct',
+      epoch: 1, envelope: 'sealed-once', members: [alice, bob], admins: [alice], createdAt: 1,
+    }
+    const secret: ConversationSecret = {
+      v: 2, conversationId: invite.conversationId, kind: invite.kind, title: invite.title, currentEpoch: 1,
+      epochs: [{ epoch: 1, rootKey: generateRootKey(), members: invite.members, admins: invite.admins, activatedAt: 1 }],
+      createdAt: 1, updatedAt: 1, preferences: { archived: false, favorite: false, muted: false, lastReadAt: 0 },
+      pendingControl: [{ id: randomId(), recipient: bob, body: invite }],
+    }
+    const repository = new ConversationSecretRepository(new MemoryPrivateStore())
+    await repository.save(secret)
+    let attempts = 0
+    const messageBox = {
+      async sendMessage() {
+        attempts += 1
+        if (attempts === 1) throw new Error('Received HTTP 429: ERR_RATE_LIMITED Too many requests')
+      },
+    } as unknown as ReturnType<typeof messageBoxFor>
+    const service = new ConversationService({} as WalletInterface, alice, {
+      secrets: repository,
+      store: new GlobalConversationStore(unusedOverlay),
+      messageBox,
+    })
+
+    await service.flushControlOutbox()
+    expect(attempts).toBe(2)
+    expect((await repository.get(secret.conversationId))?.pendingControl).toEqual([])
+  })
+
   it('rotates a group with a constant-size commitment that another member independently verifies', async () => {
     const wallets = [0, 1, 2].map(() => new CompletedProtoWallet(PrivateKey.fromRandom()))
     const identities = await Promise.all(wallets.map(async (wallet) => (await wallet.getPublicKey({ identityKey: true })).publicKey))
