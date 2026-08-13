@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@bsv/message-box-client": "2.3.0",
-    "@bsv/sdk": "2.3.1",
+    "@bsv/sdk": "^2.4.0",
     "curvepoint": "^1.0.5",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",

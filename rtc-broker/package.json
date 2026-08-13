@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@bsv/auth-express-middleware": "2.2.1",
-    "@bsv/sdk": "2.3.1",
+    "@bsv/sdk": "^2.4.0",
     "express": "4.22.2"
   }
 }
