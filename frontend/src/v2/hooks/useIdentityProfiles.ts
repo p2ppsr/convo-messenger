@@ -4,6 +4,7 @@ import { IdentityClient, type WalletInterface } from '@bsv/sdk'
 export interface IdentityProfile {
   identityKey: string
   name: string
+  avatarURL?: string
   badgeLabel?: string
 }
 
@@ -19,6 +20,16 @@ function safeName(value: unknown, identityKey: string, abbreviatedKey?: string):
   }).join('').trim().slice(0, 100)
   if (!name || name === identityKey || name === abbreviatedKey) return null
   return name
+}
+
+function safeAvatarURL(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 2_048) return undefined
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' ? url.toString() : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function resolveCached(wallet: WalletInterface, identityKey: string): Promise<IdentityProfile | null> {
@@ -38,6 +49,7 @@ function resolveCached(wallet: WalletInterface, identityKey: string): Promise<Id
     return identity && name ? {
       identityKey,
       name,
+      avatarURL: safeAvatarURL(identity.avatarURL),
       badgeLabel: safeName(identity.badgeLabel, identityKey) ?? undefined,
     } : null
   }).catch(() => null)

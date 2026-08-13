@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDown, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, MoreHorizontal, Paperclip, Phone, Send, ShieldCheck, SmilePlus, Trash2, Video, X } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { ArrowDown, AtSign, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, MoreHorizontal, Paperclip, Phone, Search, Send, ShieldCheck, SmilePlus, Trash2, Video, X } from 'lucide-react'
 import type { ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from '../domain/types'
 import { identityInitials, identityName, type IdentityProfileMap } from '../hooks/useIdentityProfiles'
+import { conversationName } from '../domain/presentation'
+import { activeMentionDraft, displayMessageText, insertMention, mentionedIdentities, MENTION_PATTERN, type MentionDraft } from '../domain/mentions'
 import { MAX_MEETING_PARTICIPANTS } from '../realtime/meetingCalling'
 import type { CallMedia, RealtimePeer, TypingPeer } from '../realtime/messaging'
+import { IdentityAvatar } from './IdentityAvatar'
 
 interface Props {
   identityKey: string
@@ -33,6 +37,20 @@ function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(timestamp)
 }
 
+function messageBody(body: string, profiles: IdentityProfileMap): ReactNode[] {
+  const output: ReactNode[] = []
+  let cursor = 0
+  for (const match of body.matchAll(new RegExp(MENTION_PATTERN.source, MENTION_PATTERN.flags))) {
+    const start = match.index
+    if (start > cursor) output.push(body.slice(cursor, start))
+    const identityKey = match[1]
+    output.push(<span className="message-mention" title={identityKey} key={`${start}:${identityKey}`}><AtSign size={13} />{identityName(profiles, identityKey)}</span>)
+    cursor = start + match[0].length
+  }
+  if (cursor < body.length) output.push(body.slice(cursor))
+  return output
+}
+
 export function ConversationPane(props: Props) {
   const { identityKey, secret, view, loading, busy, liveState, onlinePeers, typingPeers, deliveryStates, onTyping } = props
   const [draft, setDraft] = useState('')
@@ -41,11 +59,16 @@ export function ConversationPane(props: Props) {
   const [editBody, setEditBody] = useState('')
   const [callMenu, setCallMenu] = useState<CallMedia | null>(null)
   const [selectedCallMembers, setSelectedCallMembers] = useState<string[]>([])
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [mentionDraft, setMentionDraft] = useState<MentionDraft | null>(null)
+  const [mentionSelection, setMentionSelection] = useState(0)
   const fileInput = useRef<HTMLInputElement>(null)
+  const composerInput = useRef<HTMLTextAreaElement>(null)
   const timeline = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    setDraft(''); setFiles([]); setEditing(null); setCallMenu(null); setSelectedCallMembers([])
+    setDraft(''); setFiles([]); setEditing(null); setCallMenu(null); setSelectedCallMembers([]); setSearchOpen(false); setSearchQuery(''); setMentionDraft(null)
     return () => onTyping(false)
   }, [secret?.conversationId, onTyping])
   useEffect(() => {
@@ -70,12 +93,38 @@ export function ConversationPane(props: Props) {
   const otherMembers = members.filter((member) => member !== identityKey)
   const onlineSet = new Set(onlinePeers.map((peer) => peer.identityKey))
   const directPeer = otherMembers.length === 1 ? otherMembers[0] : null
+  const displayTitle = conversationName(secret, identityKey, props.identityProfiles)
   const beginCall = (media: CallMedia) => {
     if (directPeer) void props.onCall([directPeer], media)
     else {
       setSelectedCallMembers(otherMembers.filter((member) => onlineSet.has(member)).slice(0, MAX_MEETING_PARTICIPANTS - 1))
       setCallMenu(media)
     }
+  }
+
+  const mentionCandidates = mentionDraft
+    ? members.filter((member) => member !== identityKey).filter((member) => {
+      const searchable = `${identityName(props.identityProfiles, member)} ${member}`.toLocaleLowerCase()
+      return !mentionDraft.query || searchable.includes(mentionDraft.query)
+    }).slice(0, 8)
+    : []
+  const cleanSearch = searchQuery.trim().toLocaleLowerCase()
+  const visibleMessages = !cleanSearch ? (view?.messages ?? []) : (view?.messages ?? []).filter((message) => (
+    displayMessageText(message.body, props.identityProfiles).toLocaleLowerCase().includes(cleanSearch)
+    || identityName(props.identityProfiles, message.sender).toLocaleLowerCase().includes(cleanSearch)
+    || message.attachments.some((attachment) => attachment.name.toLocaleLowerCase().includes(cleanSearch))
+  ))
+
+  const chooseMention = (member: string) => {
+    if (!mentionDraft) return
+    const insertion = insertMention(draft, mentionDraft, member)
+    setDraft(insertion.value)
+    setMentionDraft(null)
+    setMentionSelection(0)
+    requestAnimationFrame(() => {
+      composerInput.current?.focus()
+      composerInput.current?.setSelectionRange(insertion.cursor, insertion.cursor)
+    })
   }
 
   const submit = async () => {
@@ -92,8 +141,10 @@ export function ConversationPane(props: Props) {
     <main className="conversation-pane">
       <header className="conversation-header">
         <button className="icon-button mobile-menu" onClick={props.onOpenRail} aria-label="Open conversations"><Menu size={21} /></button>
-        <div className="header-avatar">{secret.title.slice(0, 2).toUpperCase()}</div>
-        <div className="header-copy"><h1>{view?.title || secret.title}</h1><span className={`presence ${liveState}`}><i />{liveState === 'live' ? (directPeer ? `${onlineSet.has(directPeer) ? 'Online' : 'Offline'} · Realtime private sync` : `${onlinePeers.length + 1} of ${members.length} online · Realtime private sync`) : liveState === 'fallback' ? 'Secure reconciliation fallback' : 'Connecting realtime sync'}</span></div>
+        {directPeer
+          ? <IdentityAvatar className="header-avatar" identityKey={directPeer} profiles={props.identityProfiles} fallback={displayTitle.slice(0, 2).toUpperCase()} />
+          : <div className="header-avatar">{displayTitle.slice(0, 2).toUpperCase()}</div>}
+        <div className="header-copy"><h1>{displayTitle}</h1><span className={`presence ${liveState}`}><i />{liveState === 'live' ? (directPeer ? `${onlineSet.has(directPeer) ? 'Online' : 'Offline'} · Realtime private sync` : `${onlinePeers.length + 1} of ${members.length} online · Realtime private sync`) : liveState === 'fallback' ? 'Secure reconciliation fallback' : 'Connecting realtime sync'}</span></div>
         <div className="header-call-actions">
           <button className="header-call" disabled={props.callActive || liveState !== 'live' || onlinePeers.length === 0} onClick={() => beginCall('audio')} aria-label={directPeer ? 'Start voice call' : 'Start group audio meeting'} title={onlinePeers.length === 0 ? 'No other members are online' : directPeer ? 'Start voice call' : 'Start group audio meeting'}><Phone size={17} /></button>
           <button className="header-call" disabled={props.callActive || liveState !== 'live' || onlinePeers.length === 0} onClick={() => beginCall('video')} aria-label={directPeer ? 'Start video call' : 'Start group video meeting'} title={onlinePeers.length === 0 ? 'No other members are online' : directPeer ? 'Start video call' : 'Start group video meeting'}><Video size={18} /></button>
@@ -108,23 +159,29 @@ export function ConversationPane(props: Props) {
             <button className="call-menu-start" disabled={selectedCallMembers.length === 0} onClick={() => { const selected = selectedCallMembers; setCallMenu(null); void props.onCall(selected, callMenu) }}>{callMenu === 'video' ? <Video size={16} /> : <Phone size={16} />} Start meeting <span>{selectedCallMembers.length + 1}</span></button>
           </div>}
         </div>
+        <button className={`header-call ${searchOpen ? 'is-active' : ''}`} onClick={() => { setSearchOpen((current) => !current); if (searchOpen) setSearchQuery('') }} aria-label="Search this conversation" title="Search this conversation"><Search size={18} /></button>
         <button className="header-details" onClick={props.onOpenDetails}><Info size={18} /><span>Details</span></button>
       </header>
 
-      {view?.partial && <button className="history-banner" onClick={() => void props.onLoadHistory()}><ArrowDown size={16} /> Older encrypted events are available. Load full history.</button>}
+      {(searchOpen || view?.partial) && <div className="conversation-tools">
+        {searchOpen && <label className="message-search"><Search size={16} /><input autoFocus type="search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search decrypted messages" /><span>{cleanSearch ? `${visibleMessages.length} result${visibleMessages.length === 1 ? '' : 's'}` : 'On this device'}</span><button onClick={() => { setSearchOpen(false); setSearchQuery('') }} aria-label="Close message search"><X size={15} /></button></label>}
+        {view?.partial && <button className="history-banner" onClick={() => void props.onLoadHistory()}><ArrowDown size={16} /> Older encrypted events are available. Load full history.</button>}
+      </div>}
       <div className="message-timeline" ref={timeline} aria-live="polite">
         {loading && <div className="timeline-state"><span className="spinner" /> Opening encrypted history…</div>}
         {!loading && view?.messages.length === 0 && <div className="timeline-empty"><ShieldCheck size={27} /><h2>This conversation is ready</h2><p>Send the first end-to-end encrypted message.</p></div>}
-        {view?.messages.map((message) => {
+        {!loading && cleanSearch && visibleMessages.length === 0 && <div className="timeline-empty search-empty"><Search size={27} /><h2>No matching messages</h2><p>Search checks decrypted text, people, and attachment names locally.</p></div>}
+        {visibleMessages.map((message) => {
           const mine = message.sender === identityKey
           const isEditing = editing === message.id
+          const mentionsMe = mentionedIdentities(message.body).includes(identityKey)
           return (
-            <article className={`message-row ${mine ? 'mine' : ''}`} key={message.id}>
-              {!mine && <div className="message-sender-avatar">{identityInitials(props.identityProfiles, message.sender)}</div>}
+            <article className={`message-row ${mine ? 'mine' : ''} ${mentionsMe ? 'mentions-me' : ''}`} key={message.id}>
+              {!mine && <IdentityAvatar className="message-sender-avatar" identityKey={message.sender} profiles={props.identityProfiles} />}
               <div className="message-stack">
-                <div className="message-meta"><span>{mine ? 'You' : identityName(props.identityProfiles, message.sender)}</span><time>{formatTime(message.createdAt)}</time>{message.edited && <em>edited</em>}</div>
+                <div className="message-meta"><span>{mine ? 'You' : identityName(props.identityProfiles, message.sender)}</span><time>{formatTime(message.createdAt)}</time>{message.edited && <em>edited</em>}{mentionsMe && <em className="mentioned-you"><AtSign size={10} /> Mentioned you</em>}</div>
                 <div className="message-bubble">
-                  {isEditing ? <div className="edit-form"><textarea value={editBody} onChange={(event) => setEditBody(event.target.value)} autoFocus /><div><button className="text-button" onClick={() => setEditing(null)}>Cancel</button><button className="compact-button is-active" onClick={() => void props.onEdit(message.id, editBody).then(() => setEditing(null))}>Save</button></div></div> : <p>{message.body}</p>}
+                  {isEditing ? <div className="edit-form"><textarea value={editBody} onChange={(event) => setEditBody(event.target.value)} autoFocus /><div><button className="text-button" onClick={() => setEditing(null)}>Cancel</button><button className="compact-button is-active" onClick={() => void props.onEdit(message.id, editBody).then(() => setEditing(null))}>Save</button></div></div> : <p>{messageBody(message.body, props.identityProfiles)}</p>}
                   {message.attachments.map((attachment, index) => <button className="attachment-card" key={attachment.id} onClick={() => void props.onDownload(message, index)}><FileLock2 size={19} /><span><strong>{attachment.name}</strong><small>{Math.max(1, Math.round(attachment.size / 1024))} KB · encrypted</small></span><Download size={16} /></button>)}
                 </div>
                 {message.reactions.length > 0 && <div className="reaction-list">{[...new Set(message.reactions.map((reaction) => reaction.emoji))].map((emoji) => <button key={emoji} onClick={() => void props.onReact(message.id, emoji)}>{emoji} {message.reactions.filter((reaction) => reaction.emoji === emoji).length}</button>)}</div>}
@@ -147,13 +204,26 @@ export function ConversationPane(props: Props) {
           {typingPeers.length > 0 && <b><i /><i /><i /></b>}
         </div>
         {files.length > 0 && <div className="file-queue">{files.map((file) => <span key={`${file.name}:${file.size}`}><FileLock2 size={14} />{file.name}<button onClick={() => setFiles((current) => current.filter((item) => item !== file))}>×</button></span>)}</div>}
-        <div className="composer">
+        <div className="composer-wrap">
+          {mentionDraft && <div className="mention-picker" role="listbox" aria-label="Mention a conversation member">
+            <div><AtSign size={14} /><span><strong>Mention someone</strong><small>Identity-verified members of this chat</small></span></div>
+            {mentionCandidates.map((member, index) => <button role="option" aria-selected={index === mentionSelection} className={index === mentionSelection ? 'selected' : ''} key={member} onMouseDown={(event) => { event.preventDefault(); chooseMention(member) }}><IdentityAvatar className="mention-avatar" identityKey={member} profiles={props.identityProfiles} /><span><strong>{identityName(props.identityProfiles, member)}</strong><small>{member.slice(0, 14)}…{member.slice(-8)}</small></span></button>)}
+            {mentionCandidates.length === 0 && <p>No current member matches “{mentionDraft.query}”.</p>}
+          </div>}
+          <div className="composer">
           <input ref={fileInput} type="file" multiple hidden onChange={(event) => setFiles(Array.from(event.target.files ?? []))} />
           <button className="icon-button attach-button" onClick={() => fileInput.current?.click()} aria-label="Attach encrypted files"><Paperclip size={20} /></button>
-          <textarea value={draft} maxLength={20_000} onChange={(event) => { setDraft(event.target.value); onTyping(event.target.value.trim().length > 0) }} onBlur={() => onTyping(false)} onKeyDown={(event) => {
+          <textarea ref={composerInput} value={draft} maxLength={20_000} onChange={(event) => { setDraft(event.target.value); setMentionDraft(activeMentionDraft(event.target.value, event.target.selectionStart)); setMentionSelection(0); onTyping(event.target.value.trim().length > 0) }} onClick={(event) => setMentionDraft(activeMentionDraft(event.currentTarget.value, event.currentTarget.selectionStart))} onBlur={() => { onTyping(false); setTimeout(() => setMentionDraft(null), 100) }} onKeyDown={(event) => {
+            if (mentionDraft && mentionCandidates.length > 0) {
+              if (event.key === 'ArrowDown') { event.preventDefault(); setMentionSelection((current) => (current + 1) % mentionCandidates.length); return }
+              if (event.key === 'ArrowUp') { event.preventDefault(); setMentionSelection((current) => (current - 1 + mentionCandidates.length) % mentionCandidates.length); return }
+              if (event.key === 'Escape') { event.preventDefault(); setMentionDraft(null); return }
+              if (event.key === 'Tab' || event.key === 'Enter') { event.preventDefault(); chooseMention(mentionCandidates[mentionSelection] ?? mentionCandidates[0]); return }
+            }
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit() }
-          }} placeholder="Write a private message" rows={1} />
+          }} placeholder={`Message ${displayTitle} · type @< to mention`} rows={1} />
           <button className="send-button" disabled={busy || (!draft.trim() && files.length === 0)} onClick={() => void submit()} aria-label="Send message"><Send size={19} /></button>
+          </div>
         </div>
         <div className="composer-note"><LockKeyhole size={12} /> Encrypted before leaving this device <span><CheckCheck size={12} /> Durable outbox</span></div>
       </footer>

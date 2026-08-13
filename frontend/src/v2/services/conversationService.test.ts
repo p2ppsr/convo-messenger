@@ -51,6 +51,29 @@ class MemoryOutbox implements OutboxBackingStore {
 }
 
 describe('conversation control delivery', () => {
+  it('archives and restores a conversation only in the wallet-private repository', async () => {
+    const alice = '02' + '31'.repeat(32)
+    const bob = '03' + '42'.repeat(32)
+    const secret: ConversationSecret = {
+      v: 2, conversationId: 'ac'.repeat(32), kind: 'direct', title: 'Direct message', currentEpoch: 1,
+      epochs: [{ epoch: 1, rootKey: generateRootKey(), members: [alice, bob], admins: [alice], activatedAt: 1 }],
+      createdAt: 1, updatedAt: 1, preferences: { archived: false, favorite: false, muted: false, lastReadAt: 0 },
+    }
+    const repository = new ConversationSecretRepository(new MemoryPrivateStore())
+    await repository.save(secret)
+    const service = new ConversationService({} as WalletInterface, alice, {
+      secrets: repository,
+      store: new GlobalConversationStore(unusedOverlay),
+      messageBox: {} as ReturnType<typeof messageBoxFor>,
+    })
+
+    const archived = await service.setPreferences(secret, { archived: true })
+    expect(archived.preferences.archived).toBe(true)
+    expect((await repository.get(secret.conversationId))?.preferences.archived).toBe(true)
+    const restored = await service.setPreferences(archived, { archived: false })
+    expect(restored.preferences.archived).toBe(false)
+  })
+
   it('withholds group invitations until the prerequisite GlobalKV event is durable', async () => {
     const wallets = [new CompletedProtoWallet(PrivateKey.fromRandom()), new CompletedProtoWallet(PrivateKey.fromRandom())]
     const [alice, bob] = await Promise.all(wallets.map(async (wallet) => (await wallet.getPublicKey({ identityKey: true })).publicKey))

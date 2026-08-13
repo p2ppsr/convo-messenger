@@ -11,7 +11,15 @@ export default defineConfig({
   build: {
     outDir: 'build',
     sourcemap: false,
-    chunkSizeWarningLimit: 850
+    chunkSizeWarningLimit: 650,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('/node_modules/@bsv/') || id.includes('/node_modules/curvepoint/')) return 'metanet'
+          if (id.includes('/node_modules/react') || id.includes('/node_modules/lucide-react/')) return 'ui'
+        },
+      },
+    },
   },
   test: {
     environment: 'jsdom',

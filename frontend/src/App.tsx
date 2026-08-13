@@ -63,11 +63,13 @@ function App() {
   activeSecretRef.current = activeSecret
   const activeEpoch = activeSecret?.currentEpoch ?? null
   const identityKeys = useMemo(() => {
-    const explicitRoster = detailsOpen
-      ? activeSecret?.epochs.find((epoch) => epoch.epoch === activeSecret.currentEpoch)?.members ?? []
-      : []
+    const explicitRoster = activeSecret?.epochs.find((epoch) => epoch.epoch === activeSecret.currentEpoch)?.members ?? []
+    const directPeers = conversations.filter((conversation) => conversation.kind === 'direct')
+      .flatMap((conversation) => conversation.epochs.find((epoch) => epoch.epoch === conversation.currentEpoch)?.members ?? [])
     return [...new Set([
+      ...(session.status === 'ready' ? [session.identityKey] : []),
       ...explicitRoster,
+      ...directPeers,
       ...(view?.messages.map((message) => message.sender) ?? []),
       ...onlinePeers.map((peer) => peer.identityKey),
       ...typingPeers.map((peer) => peer.identityKey),
@@ -76,7 +78,7 @@ function App() {
       ...invites.map((invite) => invite.sender),
       ...updates.map((update) => update.sender),
     ])]
-  }, [activeSecret, call.participants, call.peerIdentityKey, detailsOpen, invites, onlinePeers, typingPeers, updates, view?.messages])
+  }, [activeSecret, call.participants, call.peerIdentityKey, conversations, invites, onlinePeers, session, typingPeers, updates, view?.messages])
   const identityProfiles = useIdentityProfiles(session.status === 'ready' ? session.client : undefined, identityKeys)
 
   const refreshIndex = useCallback(async () => {
@@ -228,7 +230,7 @@ function App() {
       {!online && <div className="offline-banner"><WifiOff size={15} /> Offline. New messages remain encrypted in the durable outbox until connectivity returns.</div>}
       {error && <div className="error-banner" role="alert"><AlertTriangle size={16} /><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss"><X size={16} /></button></div>}
       <div className="app-grid">
-        <ConversationRail conversations={conversations} activeId={activeId} pendingCount={invites.length + updates.length} loading={loading && conversations.length === 0} open={railOpen} onClose={() => setRailOpen(false)} onSelect={setActiveId} onNew={() => setNewOpen(true)} onOpenInvites={() => setInboxOpen(true)} />
+        <ConversationRail conversations={conversations} identityKey={session.identityKey} identityProfiles={identityProfiles} activeId={activeId} pendingCount={invites.length + updates.length} loading={loading && conversations.length === 0} open={railOpen} onClose={() => setRailOpen(false)} onSelect={setActiveId} onNew={() => setNewOpen(true)} onOpenInvites={() => setInboxOpen(true)} onRestore={(conversation) => runBusy(async () => { if (service) { await service.setPreferences(conversation, { archived: false }); await refreshIndex() } })} />
         {railOpen && <button className="rail-scrim" aria-label="Close conversations" onClick={() => setRailOpen(false)} />}
         <ConversationPane
           identityKey={session.identityKey}
@@ -314,6 +316,11 @@ function App() {
         if (!sameMembers(members, epoch.members) || !sameMembers(admins, epoch.admins)) updated = await service.changeMembership(updated, members, admins)
         await afterMutation(updated); setDetailsOpen(false)
         if (updated.pendingControl?.length) setError(`${updated.pendingControl.length} encrypted membership update${updated.pendingControl.length === 1 ? '' : 's'} will retry automatically.`)
+      })} onSetPreferences={(patch) => runBusy(async () => {
+        if (!service) return
+        await service.setPreferences(activeSecret, patch)
+        const latest = await refreshIndex()
+        if (patch.archived) setActiveId(latest.find((conversation) => !conversation.preferences.archived && conversation.conversationId !== activeSecret.conversationId)?.conversationId ?? null)
       })} /></Suspense>}
     </div>
   )

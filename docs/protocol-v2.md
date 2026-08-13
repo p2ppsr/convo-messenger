@@ -6,7 +6,7 @@ Version 2 is a new protocol with no v1 reader, data migration, or compatibility 
 
 ## Secret state
 
-Each wallet stores a `ConversationSecret` in wallet-encrypted `LocalKVStore` context `convo private v2`. The private index contains opaque 32-byte conversation IDs. Each secret contains the local title, conversation type, preferences, and one or more membership epochs.
+Each wallet stores a `ConversationSecret` in wallet-encrypted `LocalKVStore` context `convo private v2`. The private index contains opaque 32-byte conversation IDs. Each secret contains the local title, conversation type, preferences, and one or more membership epochs. Archive, favorite, mute, and read state are local preferences; archiving never emits a public or group event.
 
 An epoch contains:
 
@@ -54,6 +54,8 @@ The client verifies the event locator, query controller, writer identity, epoch 
 
 The append log supports message, edit, delete, reaction, private metadata, and membership events. Event IDs make append retries idempotent. Materialization sorts by creation time and ID, deduplicates IDs, limits edits to the original sender, and limits deletion to the original sender or an epoch administrator.
 
+Mentions are ordinary encrypted message text using the canonical token `@<identity-key>`. The composer offers only current-epoch members, and rendering resolves the key through the same best-effort identity profile cache used elsewhere. The token remains stable if a public profile changes, while display names never become an authentication input. Search replaces canonical tokens with resolved labels in memory and scans only the currently decrypted history; it sends no search term or search index to a service.
+
 ## Delivery and recovery
 
 Before a global write, the event is purpose-encrypted in a local durable outbox. State advances through `queued`, `writing`, `confirmed`, and `notified`. A retry uses the same event ID and locator, decrypts any indexed winner, and accepts it only when the complete event digest matches, so randomized encryption remains semantically idempotent without another spend. Failed invitation and membership sends retain their exact wallet-private envelopes and retry at startup, on subsequent mutations, and during periodic synchronization; prerequisite gating prevents a recipient from learning an epoch whose membership event has not become durable.
@@ -70,7 +72,7 @@ Each participant pair deterministically elects one offerer, preventing SDP glare
 
 The frontend requests short-lived managed STUN/TURN configuration through BRC-103 AuthFetch and reuses the result within one meeting. The credential broker rate-limits authenticated identities, permits only configured browser origins, returns no provider errors or long-term secret, and does not receive signaling or media. Direct Cloudflare and Google STUN remain a degraded fallback. Every deterministic offerer can perform one ICE restart after a ten-second disconnect grace, with fresh managed credentials fetched first. One failed peer link does not end a group meeting.
 
-Public display names are best-effort UI metadata resolved lazily from public identity certificates only for visible message senders, online or calling participants, and a roster the user explicitly opens. Results are cached per wallet session and never become part of the encrypted conversation state or meeting trust decision; the BRC-103 identity key remains authoritative. This avoids correlating a complete private roster through an eager burst of certificate queries. Audio and video invitations use distinct Web Audio ringtones synthesized locally, so no third-party sound request or tracking surface is introduced.
+Public display names and HTTPS avatar URLs are best-effort UI metadata resolved lazily from public identity certificates for visible direct-message peers, the active roster, visible message senders, and online or calling participants. Results are cached per wallet session and never become part of encrypted conversation state or a meeting trust decision; the BRC-103 identity key remains authoritative. Avatar requests use no referrer, reject non-HTTPS schemes, and fall back to initials on failure. Inactive group rosters are not eagerly resolved. Audio and video invitations use distinct Web Audio ringtones synthesized locally, so Convo introduces no third-party sound request or tracking surface.
 
 ## Attachments
 

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { WalletInterface } from '@bsv/sdk'
-import { Crown, LockKeyhole, ShieldCheck, UserMinus, X } from 'lucide-react'
+import { Archive, BellOff, Crown, Heart, LockKeyhole, ShieldCheck, UserMinus, X } from 'lucide-react'
 import type { ConversationSecret } from '../domain/types'
+import { conversationName } from '../domain/presentation'
 import { identityInitials, identityName, type IdentityProfileMap } from '../hooks/useIdentityProfiles'
 import type { RealtimePeer } from '../realtime/messaging'
 import { IdentitySearch, type IdentityChoice } from './IdentitySearch'
@@ -16,9 +17,10 @@ interface Props {
   identityProfiles: IdentityProfileMap
   onClose: () => void
   onSave: (title: string, members: string[], admins: string[]) => Promise<void>
+  onSetPreferences: (patch: Partial<ConversationSecret['preferences']>) => Promise<void>
 }
 
-export function ConversationDetails({ open, busy, identityKey, wallet, secret, onlinePeers, identityProfiles, onClose, onSave }: Props) {
+export function ConversationDetails({ open, busy, identityKey, wallet, secret, onlinePeers, identityProfiles, onClose, onSave, onSetPreferences }: Props) {
   const epoch = useMemo(() => secret.epochs.find((item) => item.epoch === secret.currentEpoch)!, [secret])
   const [title, setTitle] = useState(secret.title)
   const [members, setMembers] = useState<string[]>(epoch.members)
@@ -47,8 +49,12 @@ export function ConversationDetails({ open, busy, identityKey, wallet, secret, o
           <button className="icon-button" onClick={onClose} aria-label="Close"><X size={20} /></button>
         </div>
         <div className="modal-content">
-          <label className="field-label">Private title</label>
-          <input className="text-field" disabled={!canAdmin} value={title} maxLength={100} onChange={(event) => setTitle(event.target.value)} />
+          {secret.kind === 'group' ? <><label className="field-label">Private group title</label><input className="text-field" disabled={!canAdmin} value={title} maxLength={100} onChange={(event) => setTitle(event.target.value)} /></> : <div className="resolved-direct-name"><span>Direct message with</span><strong>{conversationName(secret, identityKey, identityProfiles)}</strong><small>Resolved from their certified public identity, with their identity key used as the fallback.</small></div>}
+          <div className="conversation-preferences" aria-label="Conversation preferences">
+            <button className={secret.preferences.favorite ? 'is-active' : ''} disabled={busy} onClick={() => void onSetPreferences({ favorite: !secret.preferences.favorite })}><Heart size={17} fill={secret.preferences.favorite ? 'currentColor' : 'none'} /><span><strong>{secret.preferences.favorite ? 'Favorited' : 'Favorite'}</strong><small>Keep this chat near the top</small></span></button>
+            <button className={secret.preferences.muted ? 'is-active' : ''} disabled={busy} onClick={() => void onSetPreferences({ muted: !secret.preferences.muted })}><BellOff size={17} /><span><strong>{secret.preferences.muted ? 'Muted' : 'Mute'}</strong><small>Silence attention signals</small></span></button>
+            <button disabled={busy} onClick={() => void onSetPreferences({ archived: true }).then(onClose)}><Archive size={17} /><span><strong>Archive</strong><small>Hide from your chat list</small></span></button>
+          </div>
           <div className="field-heading"><label className="field-label">Members</label><span>{canAdmin ? 'Changes rotate the group key' : 'Administrators manage this group'}</span></div>
           {canAdmin && <div className="identity-search-shell"><IdentitySearch wallet={wallet} onSelect={addMember} /></div>}
           <div className="member-list">

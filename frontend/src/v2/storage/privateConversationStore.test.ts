@@ -37,4 +37,12 @@ describe('wallet-private conversation index', () => {
     const listed = await repository.list()
     expect(listed.map((item) => item.title)).toEqual(['b', 'a'])
   })
+
+  it('rejects malformed wallet-private preferences', async () => {
+    const store = new MemoryPrivateStore()
+    const repository = new ConversationSecretRepository(store)
+    const malformed = { ...secret('a', 1), preferences: { archived: 'yes', favorite: false, muted: false, lastReadAt: 0 } }
+    store.values.set('conversation:' + 'a'.repeat(64), JSON.stringify(malformed))
+    expect(await repository.get('a'.repeat(64))).toBeNull()
+  })
 })

@@ -67,8 +67,49 @@ describe('ConversationPane realtime experience', () => {
     expect(screen.getByText('Online · Realtime private sync')).toBeInTheDocument()
     expect(screen.getByText('Bob Builder is typing')).toBeInTheDocument()
     expect(screen.getByText('Delivered live · saving')).toBeInTheDocument()
-    fireEvent.change(screen.getByPlaceholderText('Write a private message'), { target: { value: 'hello' } })
+    fireEvent.change(screen.getByPlaceholderText(/Message Bob Builder/), { target: { value: 'hello' } })
     expect(onTyping).toHaveBeenCalledWith(true)
+  })
+
+  it('inserts identity-key mentions, renders them by profile, and searches decrypted messages', () => {
+    const onSend = vi.fn(async () => undefined)
+    render(<ConversationPane
+      identityKey={alice}
+      secret={secret}
+      view={{ ...view, messages: [{ ...view.messages[0], sender: bob, body: `hello @<${alice}>` }] }}
+      loading={false}
+      busy={false}
+      liveState="live"
+      onlinePeers={[{ identityKey: bob, lastSeen: Date.now() }]}
+      typingPeers={[]}
+      deliveryStates={{}}
+      identityProfiles={{ [alice]: { identityKey: alice, name: 'Alice Admin' }, [bob]: { identityKey: bob, name: 'Bob Builder' } }}
+      callActive={false}
+      onOpenRail={vi.fn()}
+      onOpenDetails={vi.fn()}
+      onLoadHistory={vi.fn(async () => undefined)}
+      onTyping={vi.fn()}
+      onCall={vi.fn(async () => undefined)}
+      onSend={onSend}
+      onEdit={vi.fn(async () => undefined)}
+      onDelete={vi.fn(async () => undefined)}
+      onReact={vi.fn(async () => undefined)}
+      onDownload={vi.fn(async () => undefined)}
+    />)
+
+    expect(screen.getByText('Alice Admin')).toBeInTheDocument()
+    expect(screen.getByText('Mentioned you')).toBeInTheDocument()
+    const composer = screen.getByPlaceholderText(/Message Bob Builder/)
+    fireEvent.change(composer, { target: { value: '@<bo', selectionStart: 4 } })
+    expect(screen.getByRole('listbox', { name: 'Mention a conversation member' })).toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByRole('option', { name: /Bob Builder/ }))
+    expect(composer).toHaveValue(`@<${bob}> `)
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    expect(onSend).toHaveBeenCalledWith(`@<${bob}> `, [])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Search this conversation' }))
+    fireEvent.change(screen.getByPlaceholderText('Search decrypted messages'), { target: { value: 'Alice Admin' } })
+    expect(screen.getByText('1 result')).toBeInTheDocument()
   })
 
   it('only enables direct calls while the peer is online', () => {

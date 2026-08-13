@@ -139,6 +139,12 @@ export function validateSecret(secret: ConversationSecret): void {
   if (secret.v !== 2 || !/^[0-9a-f]{64}$/.test(secret.conversationId)) throw new Error('Invalid conversation secret')
   if ((secret.kind !== 'direct' && secret.kind !== 'group') || typeof secret.title !== 'string' || secret.title.length === 0 || secret.title.length > 100) throw new Error('Invalid conversation metadata')
   if (!Number.isSafeInteger(secret.currentEpoch) || secret.currentEpoch < 1) throw new Error('Invalid conversation epoch')
+  if (!secret.preferences
+    || typeof secret.preferences.archived !== 'boolean'
+    || typeof secret.preferences.favorite !== 'boolean'
+    || typeof secret.preferences.muted !== 'boolean'
+    || !Number.isFinite(secret.preferences.lastReadAt)
+    || secret.preferences.lastReadAt < 0) throw new Error('Invalid conversation preferences')
   if (!Array.isArray(secret.epochs) || secret.epochs.length === 0 || secret.epochs.length > 10_000) throw new Error('Conversation requires an epoch')
   const epochNumbers = new Set<number>()
   for (const epoch of secret.epochs) {
