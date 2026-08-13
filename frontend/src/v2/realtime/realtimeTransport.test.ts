@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { generateRootKey, randomId } from '../domain/crypto'
 import type { ConversationEpoch, MessageEvent } from '../domain/types'
-import { ConversationTransport, type RealtimePeer, type TypingPeer } from './messaging'
+import { ConversationTransport, type CallSignal, type RealtimePeer, type TypingPeer } from './messaging'
 
 interface LiveOptions {
   messageBox: string
@@ -61,6 +61,7 @@ function createTransport(
     onEvent?: (event: MessageEvent) => void
     onPeersChange?: (peers: RealtimePeer[]) => void
     onTypingChange?: (peers: TypingPeer[]) => void
+    onCallSignal?: (sender: string, signal: CallSignal) => void
     onState?: (state: 'connecting' | 'live' | 'fallback') => void
   } = {},
 ) {
@@ -74,6 +75,7 @@ function createTransport(
     onState: callbacks.onState ?? vi.fn(),
     onPeersChange: callbacks.onPeersChange,
     onTypingChange: callbacks.onTypingChange,
+    onCallSignal: callbacks.onCallSignal,
   })
 }
 
@@ -105,7 +107,7 @@ describe('private realtime conversation transport', () => {
       body: 'instant secret message',
     }
     await expect(aliceTransport.publishEvent(event)).resolves.toBe(1)
-    await vi.waitFor(() => expect(received).toHaveBeenCalledWith(event))
+    await vi.waitFor(() => expect(received).toHaveBeenCalledWith(event), { timeout: 5_000 })
 
     const wire = JSON.stringify(FakeMessageBox.bodies.at(-1))
     expect(wire).toContain('convo-v2-live')
@@ -146,6 +148,39 @@ describe('private realtime conversation transport', () => {
     expect(wire).not.toContain('typing')
     expect(wire).not.toContain(conversationId)
 
+    await aliceTransport.stop()
+    await bobTransport.stop()
+  })
+
+  it('targets call signaling without exposing identities, call metadata, or SDP on the wire', async () => {
+    const sharedEpoch = epoch()
+    const received = vi.fn()
+    const aliceTransport = createTransport(alice, sharedEpoch)
+    const bobTransport = createTransport(bob, sharedEpoch, { onCallSignal: received })
+    await bobTransport.start()
+    await aliceTransport.start()
+    FakeMessageBox.bodies = []
+    const signal: CallSignal = {
+      v: 1,
+      type: 'offer',
+      callId: 'cd'.repeat(32),
+      to: bob,
+      media: 'video',
+      sdp: 'v=0\r\na=ice-ufrag:private-call-secret\r\n',
+      expiresAt: Date.now() + 45_000,
+    }
+
+    await expect(aliceTransport.publishCallSignal(bob, signal)).resolves.toBe(true)
+    await vi.waitFor(() => expect(received).toHaveBeenCalledWith(alice, signal), { timeout: 5_000 })
+
+    const wire = JSON.stringify(FakeMessageBox.bodies.at(-1))
+    expect(wire).toContain('convo-v2-live')
+    expect(wire).not.toContain(signal.callId)
+    expect(wire).not.toContain('private-call-secret')
+    expect(wire).not.toContain('video')
+    expect(wire).not.toContain(conversationId)
+    expect(wire).not.toContain(alice)
+    expect(wire).not.toContain(bob)
     await aliceTransport.stop()
     await bobTransport.stop()
   })

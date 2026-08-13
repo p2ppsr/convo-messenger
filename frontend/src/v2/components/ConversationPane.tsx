@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDown, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, MoreHorizontal, Paperclip, Send, ShieldCheck, SmilePlus, Trash2 } from 'lucide-react'
+import { ArrowDown, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, MoreHorizontal, Paperclip, Phone, Send, ShieldCheck, SmilePlus, Trash2, Video, X } from 'lucide-react'
 import type { ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from '../domain/types'
-import type { RealtimePeer, TypingPeer } from '../realtime/messaging'
+import type { CallMedia, RealtimePeer, TypingPeer } from '../realtime/messaging'
 
 interface Props {
   identityKey: string
@@ -13,10 +13,12 @@ interface Props {
   onlinePeers: RealtimePeer[]
   typingPeers: TypingPeer[]
   deliveryStates: Record<string, MessageDeliveryState>
+  callActive: boolean
   onOpenRail: () => void
   onOpenDetails: () => void
   onLoadHistory: () => Promise<void>
   onTyping: (active: boolean) => void
+  onCall: (identityKey: string, media: CallMedia) => Promise<void>
   onSend: (body: string, files: File[]) => Promise<void>
   onEdit: (messageId: string, body: string) => Promise<void>
   onDelete: (messageId: string) => Promise<void>
@@ -38,11 +40,12 @@ export function ConversationPane(props: Props) {
   const [files, setFiles] = useState<File[]>([])
   const [editing, setEditing] = useState<string | null>(null)
   const [editBody, setEditBody] = useState('')
+  const [callMenu, setCallMenu] = useState<CallMedia | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const timeline = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    setDraft(''); setFiles([]); setEditing(null)
+    setDraft(''); setFiles([]); setEditing(null); setCallMenu(null)
     return () => onTyping(false)
   }, [secret?.conversationId, onTyping])
   useEffect(() => {
@@ -61,6 +64,15 @@ export function ConversationPane(props: Props) {
     )
   }
 
+  const members = view?.members ?? secret.epochs.find((epoch) => epoch.epoch === secret.currentEpoch)?.members ?? []
+  const otherMembers = members.filter((member) => member !== identityKey)
+  const onlineSet = new Set(onlinePeers.map((peer) => peer.identityKey))
+  const directPeer = otherMembers.length === 1 ? otherMembers[0] : null
+  const beginCall = (media: CallMedia) => {
+    if (directPeer) void props.onCall(directPeer, media)
+    else setCallMenu(media)
+  }
+
   const submit = async () => {
     if ((!draft.trim() && files.length === 0) || busy) return
     const currentDraft = draft
@@ -76,7 +88,18 @@ export function ConversationPane(props: Props) {
       <header className="conversation-header">
         <button className="icon-button mobile-menu" onClick={props.onOpenRail} aria-label="Open conversations"><Menu size={21} /></button>
         <div className="header-avatar">{secret.title.slice(0, 2).toUpperCase()}</div>
-        <div className="header-copy"><h1>{view?.title || secret.title}</h1><span className={`presence ${liveState}`}><i />{liveState === 'live' ? `${onlinePeers.length > 0 ? `${onlinePeers.length + 1} active · ` : ''}Realtime private sync` : liveState === 'fallback' ? 'Secure reconciliation fallback' : 'Connecting realtime sync'}</span></div>
+        <div className="header-copy"><h1>{view?.title || secret.title}</h1><span className={`presence ${liveState}`}><i />{liveState === 'live' ? (directPeer ? `${onlineSet.has(directPeer) ? 'Online' : 'Offline'} · Realtime private sync` : `${onlinePeers.length + 1} of ${members.length} online · Realtime private sync`) : liveState === 'fallback' ? 'Secure reconciliation fallback' : 'Connecting realtime sync'}</span></div>
+        <div className="header-call-actions">
+          <button className="header-call" disabled={props.callActive || liveState !== 'live' || (directPeer !== null && !onlineSet.has(directPeer))} onClick={() => beginCall('audio')} aria-label="Start voice call" title={directPeer && !onlineSet.has(directPeer) ? 'This member is offline' : 'Start voice call'}><Phone size={17} /></button>
+          <button className="header-call" disabled={props.callActive || liveState !== 'live' || (directPeer !== null && !onlineSet.has(directPeer))} onClick={() => beginCall('video')} aria-label="Start video call" title={directPeer && !onlineSet.has(directPeer) ? 'This member is offline' : 'Start video call'}><Video size={18} /></button>
+          {callMenu && <div className="call-member-menu" role="dialog" aria-label={`Choose member for ${callMenu} call`}>
+            <div><strong>Start {callMenu} call</strong><button onClick={() => setCallMenu(null)} aria-label="Close call menu"><X size={15} /></button></div>
+            {otherMembers.map((member) => {
+              const online = onlineSet.has(member)
+              return <button className="call-member" key={member} disabled={!online} onClick={() => { setCallMenu(null); void props.onCall(member, callMenu) }}><i className={online ? 'online' : ''} /><span><strong>{shortKey(member)}</strong><small>{online ? 'Online now' : 'Offline'}</small></span>{callMenu === 'video' ? <Video size={16} /> : <Phone size={16} />}</button>
+            })}
+          </div>}
+        </div>
         <button className="header-details" onClick={props.onOpenDetails}><Info size={18} /><span>Details</span></button>
       </header>
 

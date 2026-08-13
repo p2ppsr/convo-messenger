@@ -3,9 +3,11 @@ import { AlertTriangle, LockKeyhole, RefreshCw, ShieldCheck, WifiOff, X } from '
 import { ConversationPane } from './v2/components/ConversationPane'
 import { ConversationRail } from './v2/components/ConversationRail'
 import { ControlInbox } from './v2/components/ControlInbox'
+import { CallOverlay } from './v2/components/CallOverlay'
 import { applyConversationEvent } from './v2/domain/materialize'
 import type { ConversationEvent, ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from './v2/domain/types'
 import type { PendingInvite, PendingMembershipUpdate, RealtimePeer, TypingPeer } from './v2/realtime/messaging'
+import { idleCallSnapshot, type CallSnapshot } from './v2/realtime/calling'
 import { AttachmentService } from './v2/services/attachments'
 import { ConversationService } from './v2/services/conversationService'
 import { useWalletSession } from './v2/hooks/useWalletSession'
@@ -48,6 +50,7 @@ function App() {
   const [onlinePeers, setOnlinePeers] = useState<RealtimePeer[]>([])
   const [typingPeers, setTypingPeers] = useState<TypingPeer[]>([])
   const [deliveryStates, setDeliveryStates] = useState<Record<string, MessageDeliveryState>>({})
+  const [call, setCall] = useState<CallSnapshot>(idleCallSnapshot)
   const liveEventsRef = useRef(new Map<string, ConversationEvent>())
 
   const service = useMemo(() => session.status === 'ready'
@@ -145,7 +148,7 @@ function App() {
     const sessionSecret = activeSecretRef.current
     if (!service || !activeId || activeEpoch === null || !sessionSecret || sessionSecret.conversationId !== activeId) {
       liveEventsRef.current.clear()
-      setView(null); setOnlinePeers([]); setTypingPeers([])
+      setView(null); setOnlinePeers([]); setTypingPeers([]); setCall(idleCallSnapshot())
       return
     }
     let cancelled = false
@@ -155,6 +158,7 @@ function App() {
     setOnlinePeers([])
     setTypingPeers([])
     setDeliveryStates({})
+    setCall(idleCallSnapshot())
     void reloadActive(sessionSecret).then(async () => {
       if (cancelled) return
       setLoading(false)
@@ -176,6 +180,7 @@ function App() {
         },
         onPeersChange: (peers) => { if (!cancelled) setOnlinePeers(peers) },
         onTypingChange: (peers) => { if (!cancelled) setTypingPeers(peers) },
+        onCallChange: (nextCall) => { if (!cancelled) setCall(nextCall) },
       })
     }).catch((reason: unknown) => {
       if (!cancelled) { setError(reason instanceof Error ? reason.message : 'Could not open this conversation'); setLoading(false); setLiveState('fallback') }
@@ -218,10 +223,17 @@ function App() {
           onlinePeers={onlinePeers}
           typingPeers={typingPeers}
           deliveryStates={deliveryStates}
+          callActive={call.status !== 'idle' && call.status !== 'ended' && call.status !== 'error'}
           onOpenRail={() => setRailOpen(true)}
           onOpenDetails={() => setDetailsOpen(true)}
           onLoadHistory={() => activeSecret ? runBusy(() => reloadActive(activeSecret, Number.MAX_SAFE_INTEGER)) : Promise.resolve()}
           onTyping={publishTyping}
+          onCall={async (peer, media) => {
+            if (!service) return
+            setError('')
+            try { await service.startCall(peer, media) }
+            catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not start the call'); throw reason }
+          }}
           onSend={(body, files) => runBusy(async () => {
             if (!service || !activeSecret || !attachments) return
             const epoch = currentEpoch(activeSecret)
@@ -252,6 +264,16 @@ function App() {
         />
       </div>
 
+      <CallOverlay
+        call={call}
+        onAccept={async () => { if (service) await service.acceptCall() }}
+        onDecline={async () => { if (service) await service.declineCall() }}
+        onHangup={async () => { if (service) await service.hangupCall() }}
+        onDismiss={() => service?.dismissCall()}
+        onToggleAudio={() => service?.toggleCallAudio()}
+        onToggleVideo={() => service?.toggleCallVideo()}
+      />
+
       {newOpen && <Suspense fallback={<div className="modal-backdrop"><span className="spinner" /></div>}><NewConversationDialog open busy={busy} wallet={session.client} onClose={() => setNewOpen(false)} onCreate={(title, members) => runBusy(async () => {
         if (!service) return
         const created = await service.create(title, members)
@@ -265,7 +287,7 @@ function App() {
         if (!service) return
         const accepted = await service.acceptMembershipUpdate(pending); await refreshControl(); await afterMutation(accepted)
       })} />
-      {activeSecret && detailsOpen && <Suspense fallback={<div className="modal-backdrop"><span className="spinner" /></div>}><ConversationDetails open busy={busy} identityKey={session.identityKey} wallet={session.client} secret={activeSecret} onClose={() => setDetailsOpen(false)} onSave={(title, members, admins) => runBusy(async () => {
+      {activeSecret && detailsOpen && <Suspense fallback={<div className="modal-backdrop"><span className="spinner" /></div>}><ConversationDetails open busy={busy} identityKey={session.identityKey} wallet={session.client} secret={activeSecret} onlinePeers={onlinePeers} onClose={() => setDetailsOpen(false)} onSave={(title, members, admins) => runBusy(async () => {
         if (!service) return
         let updated = activeSecret
         if (title.trim() !== activeSecret.title) updated = await service.rename(updated, title)

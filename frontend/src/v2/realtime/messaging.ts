@@ -167,6 +167,13 @@ export interface TypingPeer extends RealtimePeer {
   expiresAt: number
 }
 
+export type CallMedia = 'audio' | 'video'
+export type CallSignal =
+  | { v: 1; type: 'offer'; callId: string; to: string; media: CallMedia; sdp: string; expiresAt: number }
+  | { v: 1; type: 'answer'; callId: string; to: string; sdp: string }
+  | { v: 1; type: 'ice'; callId: string; to: string; candidate: RTCIceCandidateInit }
+  | { v: 1; type: 'ringing' | 'decline' | 'busy' | 'hangup'; callId: string; to: string; reason?: string }
+
 interface LiveEnvelope {
   type: 'convo-v2-live'
   v: 2
@@ -177,12 +184,13 @@ interface LiveEnvelope {
 interface LivePayload {
   conversationId: string
   epoch: number
-  kind: 'event' | 'presence' | 'typing' | 'reconcile'
+  kind: 'event' | 'presence' | 'typing' | 'reconcile' | 'call'
   sentAt: number
   event?: ConversationEvent
   presence?: 'join' | 'ping' | 'leave'
   typing?: boolean
   expiresAt?: number
+  call?: CallSignal
 }
 
 export interface ConversationTransportOptions {
@@ -195,6 +203,7 @@ export interface ConversationTransportOptions {
   onState: (state: 'connecting' | 'live' | 'fallback') => void
   onPeersChange?: (peers: RealtimePeer[]) => void
   onTypingChange?: (peers: TypingPeer[]) => void
+  onCallSignal?: (sender: string, signal: CallSignal) => void | Promise<void>
 }
 
 function isLiveEnvelope(value: unknown): value is LiveEnvelope {
@@ -245,7 +254,31 @@ function isEvent(value: unknown, conversationId: string, epoch: ConversationEpoc
   return false
 }
 
-function isLivePayload(value: unknown, conversationId: string, epoch: ConversationEpoch, sender: string): value is LivePayload {
+function isCallSignal(value: unknown, recipient: string): value is CallSignal {
+  if (typeof value !== 'object' || value === null) return false
+  const signal = value as Partial<CallSignal>
+  if (signal.v !== 1
+    || typeof signal.callId !== 'string' || !/^[0-9a-f]{64}$/.test(signal.callId)
+    || signal.to !== recipient) return false
+  if (signal.type === 'offer') return (signal.media === 'audio' || signal.media === 'video')
+    && typeof signal.sdp === 'string' && signal.sdp.length > 0 && signal.sdp.length <= 50_000
+    && typeof signal.expiresAt === 'number' && Number.isSafeInteger(signal.expiresAt)
+    && signal.expiresAt > Date.now() - 5_000 && signal.expiresAt <= Date.now() + 120_000
+  if (signal.type === 'answer') return typeof signal.sdp === 'string'
+    && signal.sdp.length > 0 && signal.sdp.length <= 50_000
+  if (signal.type === 'ice') {
+    const candidate = signal.candidate
+    return typeof candidate === 'object' && candidate !== null
+      && typeof candidate.candidate === 'string' && candidate.candidate.length <= 8_192
+      && (candidate.sdpMid === undefined || candidate.sdpMid === null || (typeof candidate.sdpMid === 'string' && candidate.sdpMid.length <= 256))
+      && (candidate.sdpMLineIndex === undefined || candidate.sdpMLineIndex === null || (Number.isSafeInteger(candidate.sdpMLineIndex) && (candidate.sdpMLineIndex as number) >= 0))
+      && (candidate.usernameFragment === undefined || candidate.usernameFragment === null || (typeof candidate.usernameFragment === 'string' && candidate.usernameFragment.length <= 256))
+  }
+  return (signal.type === 'ringing' || signal.type === 'decline' || signal.type === 'busy' || signal.type === 'hangup')
+    && (signal.reason === undefined || (typeof signal.reason === 'string' && signal.reason.length <= 160))
+}
+
+function isLivePayload(value: unknown, conversationId: string, epoch: ConversationEpoch, sender: string, recipient: string): value is LivePayload {
   if (typeof value !== 'object' || value === null) return false
   const payload = value as Partial<LivePayload>
   if (payload.conversationId !== conversationId
@@ -255,6 +288,7 @@ function isLivePayload(value: unknown, conversationId: string, epoch: Conversati
   if (payload.kind === 'presence') return payload.presence === 'join' || payload.presence === 'ping' || payload.presence === 'leave'
   if (payload.kind === 'typing') return typeof payload.typing === 'boolean'
     && typeof payload.expiresAt === 'number' && Number.isFinite(payload.expiresAt)
+  if (payload.kind === 'call') return isCallSignal(payload.call, recipient)
   return payload.kind === 'reconcile'
 }
 
@@ -364,7 +398,7 @@ export class ConversationTransport {
       await this.acknowledge(messageId)
       return
     }
-    if (!isLivePayload(payload, this.options.conversationId, this.options.epoch, sender)) {
+    if (!isLivePayload(payload, this.options.conversationId, this.options.epoch, sender, this.options.identityKey)) {
       await this.acknowledge(messageId)
       return
     }
@@ -413,6 +447,12 @@ export class ConversationTransport {
     if (payload.kind === 'reconcile') {
       if (this.isFresh(payload.sentAt)) this.notePeer(sender)
       await this.options.onSyncRequested()
+      return
+    }
+    if (payload.kind === 'call' && payload.call) {
+      if (!this.isFresh(payload.sentAt)) return
+      this.notePeer(sender)
+      await this.options.onCallSignal?.(sender, payload.call)
     }
   }
 
@@ -433,6 +473,29 @@ export class ConversationTransport {
       throw new Error('Cannot publish an invalid realtime conversation event')
     }
     return await this.publishPayload({ kind: 'event', event })
+  }
+
+  async publishCallSignal(recipient: string, signal: CallSignal): Promise<boolean> {
+    if (!this.options.epoch.members.includes(recipient)
+      || recipient === this.options.identityKey
+      || !isCallSignal(signal, recipient)) {
+      throw new Error('Cannot publish an invalid realtime call signal')
+    }
+    const envelopeId = randomId()
+    const payload: LivePayload = {
+      conversationId: this.options.conversationId,
+      epoch: this.options.epoch.epoch,
+      kind: 'call',
+      sentAt: Date.now(),
+      call: signal,
+    }
+    const envelope: LiveEnvelope = {
+      type: 'convo-v2-live',
+      v: 2,
+      envelopeId,
+      ciphertext: encryptJson(this.options.epoch.rootKey, `live:${envelopeId}`, payload, 1_024),
+    }
+    return await this.sendPrepared(recipient, envelope)
   }
 
   publishTyping(active: boolean): void {

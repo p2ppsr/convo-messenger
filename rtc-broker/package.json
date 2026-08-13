@@ -1,0 +1,19 @@
+{
+  "name": "convo-rtc-credential-broker",
+  "private": true,
+  "version": "1.0.0",
+  "description": "BRC-103 authenticated broker for short-lived managed TURN credentials",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@bsv/auth-express-middleware": "2.2.1",
+    "@bsv/sdk": "2.3.1",
+    "express": "4.22.2"
+  }
+}

@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationSecret, ConversationView } from '../domain/types'
 import { ConversationPane } from './ConversationPane'
 
@@ -35,6 +35,8 @@ const view: ConversationView = {
   loadedPages: 1,
 }
 
+afterEach(cleanup)
+
 describe('ConversationPane realtime experience', () => {
   it('shows presence, typing, and the live-to-durable message state', () => {
     const onTyping = vi.fn()
@@ -48,10 +50,12 @@ describe('ConversationPane realtime experience', () => {
       onlinePeers={[{ identityKey: bob, lastSeen: Date.now() }]}
       typingPeers={[{ identityKey: bob, lastSeen: Date.now(), expiresAt: Date.now() + 5_000 }]}
       deliveryStates={{ [messageId]: 'live' }}
+      callActive={false}
       onOpenRail={vi.fn()}
       onOpenDetails={vi.fn()}
       onLoadHistory={vi.fn(async () => undefined)}
       onTyping={onTyping}
+      onCall={vi.fn(async () => undefined)}
       onSend={vi.fn(async () => undefined)}
       onEdit={vi.fn(async () => undefined)}
       onDelete={vi.fn(async () => undefined)}
@@ -59,10 +63,65 @@ describe('ConversationPane realtime experience', () => {
       onDownload={vi.fn(async () => undefined)}
     />)
 
-    expect(screen.getByText('2 active · Realtime private sync')).toBeInTheDocument()
+    expect(screen.getByText('Online · Realtime private sync')).toBeInTheDocument()
     expect(screen.getByText(/is typing$/)).toBeInTheDocument()
     expect(screen.getByText('Delivered live · saving')).toBeInTheDocument()
     fireEvent.change(screen.getByPlaceholderText('Write a private message'), { target: { value: 'hello' } })
     expect(onTyping).toHaveBeenCalledWith(true)
+  })
+
+  it('only enables direct calls while the peer is online', () => {
+    const onCall = vi.fn(async () => undefined)
+    const { getByRole, getByText, rerender } = render(<ConversationPane
+      identityKey={alice}
+      secret={secret}
+      view={view}
+      loading={false}
+      busy={false}
+      liveState="live"
+      onlinePeers={[]}
+      typingPeers={[]}
+      deliveryStates={{}}
+      callActive={false}
+      onOpenRail={vi.fn()}
+      onOpenDetails={vi.fn()}
+      onLoadHistory={vi.fn(async () => undefined)}
+      onTyping={vi.fn()}
+      onCall={onCall}
+      onSend={vi.fn(async () => undefined)}
+      onEdit={vi.fn(async () => undefined)}
+      onDelete={vi.fn(async () => undefined)}
+      onReact={vi.fn(async () => undefined)}
+      onDownload={vi.fn(async () => undefined)}
+    />)
+
+    expect(getByText('Offline · Realtime private sync')).toBeInTheDocument()
+    expect(getByRole('button', { name: 'Start voice call' })).toBeDisabled()
+
+    rerender(<ConversationPane
+      identityKey={alice}
+      secret={secret}
+      view={view}
+      loading={false}
+      busy={false}
+      liveState="live"
+      onlinePeers={[{ identityKey: bob, lastSeen: Date.now() }]}
+      typingPeers={[]}
+      deliveryStates={{}}
+      callActive={false}
+      onOpenRail={vi.fn()}
+      onOpenDetails={vi.fn()}
+      onLoadHistory={vi.fn(async () => undefined)}
+      onTyping={vi.fn()}
+      onCall={onCall}
+      onSend={vi.fn(async () => undefined)}
+      onEdit={vi.fn(async () => undefined)}
+      onDelete={vi.fn(async () => undefined)}
+      onReact={vi.fn(async () => undefined)}
+      onDownload={vi.fn(async () => undefined)}
+    />)
+
+    fireEvent.click(getByRole('button', { name: 'Start voice call' }))
+    expect(onCall).toHaveBeenCalledWith(bob, 'audio')
   })
 })

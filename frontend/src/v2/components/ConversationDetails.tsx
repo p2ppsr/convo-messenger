@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { WalletInterface } from '@bsv/sdk'
 import { Crown, LockKeyhole, ShieldCheck, UserMinus, X } from 'lucide-react'
 import type { ConversationSecret } from '../domain/types'
+import type { RealtimePeer } from '../realtime/messaging'
 import { IdentitySearch, type IdentityChoice } from './IdentitySearch'
 
 interface Props {
@@ -10,6 +11,7 @@ interface Props {
   identityKey: string
   wallet: WalletInterface
   secret: ConversationSecret
+  onlinePeers: RealtimePeer[]
   onClose: () => void
   onSave: (title: string, members: string[], admins: string[]) => Promise<void>
 }
@@ -18,13 +20,14 @@ function shortKey(key: string): string {
   return `${key.slice(0, 12)}…${key.slice(-10)}`
 }
 
-export function ConversationDetails({ open, busy, identityKey, wallet, secret, onClose, onSave }: Props) {
+export function ConversationDetails({ open, busy, identityKey, wallet, secret, onlinePeers, onClose, onSave }: Props) {
   const epoch = useMemo(() => secret.epochs.find((item) => item.epoch === secret.currentEpoch)!, [secret])
   const [title, setTitle] = useState(secret.title)
   const [members, setMembers] = useState<string[]>(epoch.members)
   const [admins, setAdmins] = useState<string[]>(epoch.admins)
   const [error, setError] = useState('')
   const canAdmin = epoch.admins.includes(identityKey)
+  const onlineSet = new Set(onlinePeers.map((peer) => peer.identityKey))
 
   useEffect(() => {
     setTitle(secret.title)
@@ -56,7 +59,7 @@ export function ConversationDetails({ open, busy, identityKey, wallet, secret, o
               return (
                 <div className="member-row" key={member}>
                   <span className="member-avatar">{isSelf ? 'You' : member.slice(2, 4).toUpperCase()}</span>
-                  <span className="member-key"><strong>{isSelf ? 'You' : shortKey(member)}</strong><small>{isAdmin ? 'Administrator' : 'Member'}</small></span>
+                  <span className="member-key"><strong>{isSelf ? 'You' : shortKey(member)}</strong><small><i className={`member-presence ${isSelf || onlineSet.has(member) ? 'online' : ''}`} />{isSelf || onlineSet.has(member) ? 'Online' : 'Offline'} · {isAdmin ? 'Administrator' : 'Member'}</small></span>
                   {canAdmin && <div className="member-controls">
                     <button className={`compact-button ${isAdmin ? 'is-active' : ''}`} disabled={isSelf} onClick={() => setAdmins((current) => isAdmin ? current.filter((item) => item !== member) : [...current, member])}><Crown size={14} /> Admin</button>
                     <button className="icon-button danger" disabled={isSelf} onClick={() => { setMembers((current) => current.filter((item) => item !== member)); setAdmins((current) => current.filter((item) => item !== member)) }} aria-label={`Remove ${shortKey(member)}`}><UserMinus size={16} /></button>

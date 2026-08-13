@@ -1,4 +1,4 @@
-import type { WalletInterface } from '@bsv/sdk'
+import { AuthFetch, type WalletInterface } from '@bsv/sdk'
 import { epochHistoryDigest, eventDigest, generateRootKey, randomId } from '../domain/crypto'
 import { materializeConversation, sortAndDedupeEvents } from '../domain/materialize'
 import type {
@@ -36,7 +36,9 @@ import {
   type PendingMembershipUpdate,
   type RealtimePeer,
   type TypingPeer,
+  type CallMedia,
 } from '../realtime/messaging'
+import { AuthenticatedCallManager, defaultIceServers, type CallSnapshot } from '../realtime/calling'
 import { safeWriteError } from '../storage/kvWriteRecovery'
 
 const defaultPreferences = () => ({ archived: false, favorite: false, muted: false, lastReadAt: 0 })
@@ -88,8 +90,10 @@ export class ConversationService {
   readonly outbox: EncryptedOutbox
   readonly messageBox
   private transport: ConversationTransport | null = null
+  private callManager: AuthenticatedCallManager | null = null
   private transportConversationId: string | null = null
   private outboxFlushPromise: Promise<void> | null = null
+  private readonly relayAuthFetch: AuthFetch
   private liveCallbacks: {
     onEvent: (event: ConversationEvent) => void
     onDelivery: (eventId: string, state: MessageDeliveryState) => void
@@ -109,6 +113,7 @@ export class ConversationService {
     this.store = dependencies.store ?? new GlobalConversationStore(overlayFor(wallet))
     this.outbox = dependencies.outbox ?? new EncryptedOutbox(identityKey)
     this.messageBox = dependencies.messageBox ?? messageBoxFor(wallet)
+    this.relayAuthFetch = new AuthFetch(wallet, undefined, undefined, 'convo.metanet.app')
   }
 
   async list(): Promise<ConversationSecret[]> {
@@ -392,6 +397,7 @@ export class ConversationService {
     onDelivery: (eventId: string, state: MessageDeliveryState) => void
     onPeersChange?: (peers: RealtimePeer[]) => void
     onTypingChange?: (peers: TypingPeer[]) => void
+    onCallChange?: (call: CallSnapshot) => void
   }): Promise<void> {
     await this.closeLive()
     this.liveCallbacks = { onEvent: callbacks.onEvent, onDelivery: callbacks.onDelivery }
@@ -405,6 +411,16 @@ export class ConversationService {
       onState: callbacks.onState,
       onPeersChange: callbacks.onPeersChange,
       onTypingChange: callbacks.onTypingChange,
+      onCallSignal: async (sender, signal) => await this.callManager?.handleSignal(sender, signal),
+    })
+    this.callManager = new AuthenticatedCallManager({
+      wallet: this.wallet,
+      identityKey: this.identityKey,
+      conversationId: secret.conversationId,
+      epoch: currentEpoch(secret),
+      sendSignal: async (recipient, signal) => await this.transport?.publishCallSignal(recipient, signal) ?? false,
+      onChange: callbacks.onCallChange ?? (() => undefined),
+      getIceServers: async () => await this.resolveIceServers(),
     })
     this.transportConversationId = secret.conversationId
     await this.transport.start()
@@ -413,6 +429,9 @@ export class ConversationService {
 
   async closeLive(): Promise<void> {
     const active = this.transport
+    const activeCall = this.callManager
+    this.callManager = null
+    if (activeCall) await activeCall.stop()
     this.transport = null
     this.transportConversationId = null
     this.liveCallbacks = null
@@ -421,6 +440,66 @@ export class ConversationService {
 
   publishTyping(active: boolean): void {
     this.transport?.publishTyping(active)
+  }
+
+  async startCall(peerIdentityKey: string, media: CallMedia): Promise<void> {
+    if (!this.callManager) throw new Error('Open a conversation before starting a call')
+    await this.callManager.startCall(peerIdentityKey, media)
+  }
+
+  async acceptCall(): Promise<void> { await this.callManager?.accept() }
+  async declineCall(): Promise<void> { await this.callManager?.decline() }
+  async hangupCall(): Promise<void> { await this.callManager?.hangup() }
+  dismissCall(): void { this.callManager?.dismiss() }
+  toggleCallAudio(): void { this.callManager?.toggleAudio() }
+  toggleCallVideo(): void { this.callManager?.toggleVideo() }
+
+  private async resolveIceServers(): Promise<RTCIceServer[]> {
+    const configured = import.meta.env.VITE_CONVO_ICE_SERVERS?.trim()
+    if (configured) return this.validateIceServers(JSON.parse(configured))
+    const configurationUrl = import.meta.env.VITE_CONVO_ICE_CONFIG_URL?.trim()
+      || 'https://convo-rtc-credentials-921101068003.us-west1.run.app/ice'
+    try {
+      const parsedUrl = new URL(configurationUrl)
+      if (parsedUrl.protocol !== 'https:') throw new Error('The call relay configuration URL must use HTTPS')
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      const response = await Promise.race([
+        this.relayAuthFetch.fetch(parsedUrl.href),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('The call relay configuration timed out')), 8_000)
+        }),
+      ]).finally(() => clearTimeout(timeout))
+      if (!response.ok) throw new Error(`The call relay rejected ICE configuration (${response.status})`)
+      const encoded = await response.text()
+      if (encoded.length > 64_000) throw new Error('The call relay configuration is too large')
+      const body = JSON.parse(encoded) as { iceServers?: unknown }
+      return this.validateIceServers(body.iceServers)
+    } catch {
+      // Direct peer connectivity remains available if the optional relay is degraded.
+      return defaultIceServers()
+    }
+  }
+
+  private validateIceServers(value: unknown): RTCIceServer[] {
+    if (!Array.isArray(value) || value.length === 0 || value.length > 8) throw new Error('Call relay configuration is invalid')
+    return value.map((candidate) => {
+      if (typeof candidate !== 'object' || candidate === null) throw new Error('Call relay configuration is invalid')
+      const server = candidate as { urls?: unknown; username?: unknown; credential?: unknown }
+      const urls = typeof server.urls === 'string' ? [server.urls] : server.urls
+      if (!Array.isArray(urls) || urls.length === 0 || urls.length > 8
+        || !urls.every((url) => typeof url === 'string' && url.length <= 2_048 && /^(stun|stuns|turn|turns):/i.test(url))) {
+        throw new Error('Call relay URLs are invalid')
+      }
+      if ((server.username !== undefined && (typeof server.username !== 'string' || server.username.length > 512))
+        || (server.credential !== undefined && (typeof server.credential !== 'string' || server.credential.length > 1_024))) {
+        throw new Error('Call relay credentials are invalid')
+      }
+      return {
+        urls: typeof server.urls === 'string' ? server.urls : urls,
+        username: server.username as string | undefined,
+        credential: server.credential as string | undefined,
+      }
+    })
   }
 
   async flushOutbox(): Promise<void> {

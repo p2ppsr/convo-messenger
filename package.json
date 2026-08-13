@@ -12,7 +12,8 @@
     "frontend:build": "npm --prefix frontend run build",
     "frontend:lint": "npm --prefix frontend run lint",
     "frontend:test": "npm --prefix frontend run test",
-    "verify": "npm run frontend:lint && npm run frontend:test && npm run frontend:build",
+    "broker:test": "npm --prefix rtc-broker run test",
+    "verify": "npm run broker:test && npm run frontend:lint && npm run frontend:test && npm run frontend:build",
     "build": "cars build 1",
     "predeploy": "cars project ensure-balance 1 --min 1 --topup-to 235000",
     "deploy": "cars release now 1"
