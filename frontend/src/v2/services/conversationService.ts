@@ -43,6 +43,13 @@ import { safeWriteError } from '../storage/kvWriteRecovery'
 
 const defaultPreferences = () => ({ archived: false, favorite: false, muted: false, lastReadAt: 0 })
 
+export class EncryptedOutboxRetryError extends Error {
+  constructor(readonly cause: unknown) {
+    super('A saved message is awaiting wallet review. It remains encrypted and will retry automatically.')
+    this.name = 'EncryptedOutboxRetryError'
+  }
+}
+
 function uniqueIdentities(identities: string[]): string[] {
   return [...new Set(identities.filter((identity) => /^(02|03)[0-9a-f]{64}$/i.test(identity)))]
 }
@@ -542,7 +549,7 @@ export class ConversationService {
       } catch (error) {
         this.outbox.update(item.id, { state: 'failed', lastError: safeWriteError(error) })
         if (this.transportConversationId === item.conversationId) this.liveCallbacks?.onDelivery(item.id, 'retrying')
-        throw error
+        throw new EncryptedOutboxRetryError(error)
       }
     }
   }

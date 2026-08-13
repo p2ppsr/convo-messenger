@@ -14,11 +14,57 @@
   "display": "standalone",
   "theme_color": "#0b1512",
   "background_color": "#09100e",
-  "babbage": {
-    "spendingAuthorization": {
-      "description": "Allow Convo to update encrypted conversation pages in GlobalKVStore",
-      "duration": "3888000",
-      "amount": "600000"
+  "metanet": {
+    "schemaVersion": 1,
+    "groupPermissions": {
+      "description": "Private messaging, secure storage, and calls",
+      "spendingAuthorization": {
+        "amount": 600000,
+        "description": "Store encrypted chats and attachments"
+      },
+      "protocolPermissions": [
+        {
+          "protocolID": [1, "kvstore"],
+          "description": "Write encrypted conversation pages"
+        },
+        {
+          "protocolID": [1, "messagebox"],
+          "description": "Send encrypted realtime messages"
+        },
+        {
+          "protocolID": [2, "convo private v2"],
+          "counterparty": "self",
+          "description": "Protect private conversation keys"
+        },
+        {
+          "protocolID": [2, "server hmac"],
+          "counterparty": "self",
+          "description": "Authenticate realtime connections"
+        }
+      ],
+      "basketAccess": [
+        {
+          "basket": "convo private v2",
+          "description": "Store private conversation secrets"
+        }
+      ]
+    },
+    "counterpartyPermissions": {
+      "description": "Private messaging and calls with Metanet peers",
+      "protocols": [
+        {
+          "protocolName": "Convo Messenger",
+          "description": "Share group keys with this person"
+        },
+        {
+          "protocolName": "auth message signature",
+          "description": "Authenticate messages and calls"
+        },
+        {
+          "protocolName": "3241645161d8",
+          "description": "Pay storage and relay services"
+        }
+      ]
     }
   }
 }

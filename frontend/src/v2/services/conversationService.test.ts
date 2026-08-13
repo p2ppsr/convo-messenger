@@ -43,6 +43,40 @@ class MemoryOutbox implements OutboxBackingStore {
 }
 
 describe('conversation control delivery', () => {
+  it('keeps wallet review details private while preserving the failed encrypted outbox item', async () => {
+    const alice = '02' + '31'.repeat(32)
+    const bob = '03' + '42'.repeat(32)
+    const secret: ConversationSecret = {
+      v: 2, conversationId: 'ef'.repeat(32), kind: 'direct', title: 'Retry', currentEpoch: 1,
+      epochs: [{ epoch: 1, rootKey: generateRootKey(), members: [alice, bob], admins: [alice], activatedAt: 1 }],
+      createdAt: 1, updatedAt: 1, preferences: { archived: false, favorite: false, muted: false, lastReadAt: 0 },
+    }
+    const repository = new ConversationSecretRepository(new MemoryPrivateStore())
+    await repository.save(secret)
+    const backing = new MemoryOutbox()
+    const outbox = new EncryptedOutbox(alice, backing)
+    outbox.enqueue(secret, {
+      v: 2, type: 'message', id: randomId(), conversationId: secret.conversationId,
+      epoch: 1, sender: alice, createdAt: Date.now(), body: 'never expose me in an error',
+    })
+    const walletReview = Object.assign(new Error('internal wallet transaction detail'), {
+      name: 'WERR_REVIEW_ACTIONS',
+      reviewActionResults: [{ status: 'pending', competingTxs: ['secret transaction'] }],
+    })
+    const service = new ConversationService({} as WalletInterface, alice, {
+      secrets: repository,
+      store: { async append() { throw walletReview } } as never,
+      outbox,
+      messageBox: {} as ReturnType<typeof messageBoxFor>,
+    })
+
+    await expect(service.flushOutbox()).rejects.toThrow('A saved message is awaiting wallet review')
+    expect(backing.items).toHaveLength(1)
+    expect(backing.items[0]).toMatchObject({ state: 'failed', attempts: 1, lastError: 'WERR_REVIEW_ACTIONS (pending)' })
+    expect(JSON.stringify(backing.items[0])).not.toContain('secret transaction')
+    expect(JSON.stringify(backing.items[0])).not.toContain('internal wallet transaction detail')
+  })
+
   it('serializes burst outbox writes so wallet actions never overlap', async () => {
     const alice = '02' + '31'.repeat(32)
     const bob = '03' + '42'.repeat(32)
