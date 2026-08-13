@@ -79,7 +79,9 @@ export function CallOverlay({ call, identityProfiles, onAccept, onDecline, onHan
   const finished = call.status === 'ended' || call.status === 'error'
   const inMeeting = !incoming && !finished && Boolean(call.localStream)
   const video = call.media === 'video'
-  const joined = call.participants.filter((participant) => participant.status === 'active' || participant.status === 'authenticating' || participant.status === 'connecting')
+  const visibleParticipants = call.participants.filter((participant) => participant.status === 'active' || participant.status === 'authenticating' || participant.status === 'connecting')
+  const connectedParticipants = call.participants.filter((participant) => participant.status === 'active' && participant.authenticated)
+  const connectingParticipants = visibleParticipants.length - connectedParticipants.length
   const act = async (operation: () => Promise<void>) => {
     setActionBusy(true)
     try { await operation() } catch { /* The call manager exposes the failure in call state. */ } finally { setActionBusy(false) }
@@ -88,14 +90,14 @@ export function CallOverlay({ call, identityProfiles, onAccept, onDecline, onHan
   return (
     <div className={`call-layer ${inMeeting ? 'is-active' : ''}`} role="dialog" aria-modal="true" aria-label={incoming ? `Incoming ${call.media} ${call.isGroup ? 'meeting' : 'call'}` : 'Secure meeting'} data-ringtone={incoming ? call.media : undefined}>
       <section className={`call-card ${video ? 'has-video' : 'audio-only'} ${call.isGroup ? 'group-meeting' : 'direct-meeting'}`}>
-        {inMeeting && <div className={`meeting-grid participant-count-${Math.min(joined.length + 1, 8)}`}>
+        {inMeeting && <div className={`meeting-grid participant-count-${Math.min(visibleParticipants.length + 1, 8)}`}>
           <article className="meeting-tile local-participant">
             {video && call.videoEnabled && <StreamMedia stream={call.localStream} video muted className="meeting-video local-video" />}
             {(!video || !call.videoEnabled) && <div className="meeting-avatar self">YOU</div>}
             <div className="meeting-participant-label"><span>You</span><small><ShieldCheck size={12} /> This device</small></div>
             <div className="meeting-media-state">{!call.audioEnabled && <MicOff size={15} />}{video && !call.videoEnabled && <CameraOff size={15} />}</div>
           </article>
-          {joined.map((participant) => <article className={`meeting-tile participant-${participant.status}`} key={participant.identityKey}>
+          {visibleParticipants.map((participant) => <article className={`meeting-tile participant-${participant.status}`} key={participant.identityKey}>
             {video && participant.stream && participant.videoEnabled && <StreamMedia stream={participant.stream} video className="meeting-video" />}
             {!video && participant.stream && <StreamMedia stream={participant.stream} video={false} />}
             {(!video || !participant.stream || !participant.videoEnabled) && <div className="meeting-avatar">{identityInitials(identityProfiles, participant.identityKey)}</div>}
@@ -121,7 +123,9 @@ export function CallOverlay({ call, identityProfiles, onAccept, onDecline, onHan
           </div>}
 
           {inMeeting && <div className="meeting-toolbar">
-            <span className="meeting-count"><Users size={15} /> {call.isGroup && joined.length === 0 ? 'Just you · room open' : `${joined.length + 1} in meeting`}</span>
+            <span className="meeting-count"><Users size={15} /> {call.isGroup
+              ? <>{connectedParticipants.length === 0 ? 'Just you · room open' : `${connectedParticipants.length + 1} connected`}{connectingParticipants > 0 ? ` · ${connectingParticipants} connecting` : ''}</>
+              : connectedParticipants.length > 0 ? '2 connected' : 'Connecting…'}</span>
             <div className="active-call-actions">
               <button className={`call-control ${call.audioEnabled ? '' : 'is-off'}`} onClick={onToggleAudio} aria-label={call.audioEnabled ? 'Mute microphone' : 'Unmute microphone'}>{call.audioEnabled ? <Mic size={21} /> : <MicOff size={21} />}</button>
               {video && <button className={`call-control ${call.videoEnabled ? '' : 'is-off'}`} onClick={onToggleVideo} aria-label={call.videoEnabled ? 'Turn camera off' : 'Turn camera on'}>{call.videoEnabled ? <Camera size={21} /> : <CameraOff size={21} />}</button>}

@@ -8,6 +8,8 @@ const AUTH_CHANNEL = 'convo-brc103-auth-v1'
 const MEETING_INVITE_TIMEOUT_MS = 60_000
 const ROOM_ANNOUNCEMENT_INTERVAL_MS = 30_000
 const ROOM_ANNOUNCEMENT_TTL_MS = 75_000
+const ROOM_MESH_SYNC_INTERVAL_MS = 5_000
+const ROOM_MESH_SYNC_ROUNDS = 6
 const DISCONNECT_GRACE_MS = 10_000
 export const MAX_MEETING_PARTICIPANTS = 8
 
@@ -96,6 +98,9 @@ interface ActiveMeeting {
   inviteTimer?: ReturnType<typeof setTimeout>
   roomAnnouncementTimer?: ReturnType<typeof setInterval>
   roomAnnouncementBusy?: boolean
+  roomMeshSyncTimer?: ReturnType<typeof setInterval>
+  roomMeshSyncBusy?: boolean
+  roomMeshSyncRounds?: number
   startedAt?: number
   iceServers?: RTCIceServer[]
 }
@@ -171,6 +176,7 @@ export class AuthenticatedCallManager {
         this.emit(call, 'active', 'Meeting room is open · waiting for others to join')
         await this.announceRoom(call)
         this.startRoomAnnouncements(call)
+        this.startRoomMeshSync(call)
         return
       }
       const expiresAt = Date.now() + MEETING_INVITE_TIMEOUT_MS
@@ -234,6 +240,7 @@ export class AuthenticatedCallManager {
       }).catch(() => false)))
       if (!deliveries.some(Boolean)) throw new Error('The meeting room is no longer reachable')
       this.emit(call, 'active', 'Waiting for authenticated participants')
+      this.startRoomMeshSync(call)
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : 'Could not join the meeting room'
       await this.finish(message, 'error', true)
@@ -707,6 +714,41 @@ export class AuthenticatedCallManager {
     call.roomAnnouncementTimer = setInterval(() => { void this.announceRoom(call) }, ROOM_ANNOUNCEMENT_INTERVAL_MS)
   }
 
+  /**
+   * MessageBox live delivery can be interrupted by a reconnect or a short rate-limit
+   * window. A room therefore converges through a few idempotent join rounds instead
+   * of depending on one best-effort fan-out. Existing authenticated links are never
+   * signalled again, keeping the steady-state room quiet.
+   */
+  private startRoomMeshSync(call: ActiveMeeting): void {
+    if (!call.room || this.call !== call || call.roomMeshSyncTimer) return
+    call.roomMeshSyncRounds = 0
+    call.roomMeshSyncTimer = setInterval(() => { void this.syncRoomMesh(call) }, ROOM_MESH_SYNC_INTERVAL_MS)
+  }
+
+  private async syncRoomMesh(call: ActiveMeeting): Promise<void> {
+    if (this.call !== call || !call.room || call.roomMeshSyncBusy) return
+    if ((call.roomMeshSyncRounds ?? 0) >= ROOM_MESH_SYNC_ROUNDS) {
+      if (call.roomMeshSyncTimer) clearInterval(call.roomMeshSyncTimer)
+      call.roomMeshSyncTimer = undefined
+      return
+    }
+    call.roomMeshSyncBusy = true
+    call.roomMeshSyncRounds = (call.roomMeshSyncRounds ?? 0) + 1
+    try {
+      const recipients = this.otherMembers(call).filter((identityKey) => !call.links.get(identityKey)?.authenticated)
+      await Promise.all(recipients.map(async (recipient) => await this.sendTo(call, recipient, {
+        v: 2,
+        type: 'join',
+        callId: call.callId,
+        to: recipient,
+        media: call.media,
+      }).catch(() => false)))
+    } finally {
+      call.roomMeshSyncBusy = false
+    }
+  }
+
   private async announceRoom(call: ActiveMeeting): Promise<void> {
     if (this.call !== call
       || !call.room
@@ -890,6 +932,7 @@ export class AuthenticatedCallManager {
   private cleanup(call: ActiveMeeting): void {
     if (call.inviteTimer) clearTimeout(call.inviteTimer)
     if (call.roomAnnouncementTimer) clearInterval(call.roomAnnouncementTimer)
+    if (call.roomMeshSyncTimer) clearInterval(call.roomMeshSyncTimer)
     for (const identityKey of [...call.links.keys()]) this.removeLink(call, identityKey)
     for (const track of call.localStream?.getTracks() ?? []) track.stop()
     call.pendingCandidates.clear()

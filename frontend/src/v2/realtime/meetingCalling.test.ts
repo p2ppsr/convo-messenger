@@ -179,6 +179,63 @@ describe('authenticated group meeting mesh', () => {
     await host.stop()
   })
 
+  it('converges two room clients when the first join signal is lost', async () => {
+    vi.useFakeTimers()
+    const hostSignals: CallSignal[] = []
+    const guestSignals: CallSignal[] = []
+    const hostConnections: ReturnType<typeof fakePeerConnection>[] = []
+    const guestConnections: ReturnType<typeof fakePeerConnection>[] = []
+    const clients = {} as { host: AuthenticatedCallManager; guest: AuthenticatedCallManager }
+    let droppedFirstJoin = false
+
+    const host = manager({
+      identityKey: alice,
+      privateKey: aliceKey,
+      connections: hostConnections,
+      sendSignal: async (recipient, signal) => {
+        hostSignals.push(signal)
+        if (recipient === bob) await clients.guest.handleSignal(alice, signal)
+        return true
+      },
+    }).call
+    clients.host = host
+    const guest = manager({
+      identityKey: bob,
+      privateKey: bobKey,
+      connections: guestConnections,
+      sendSignal: async (recipient, signal) => {
+        guestSignals.push(signal)
+        if (signal.type === 'join' && !droppedFirstJoin) {
+          droppedFirstJoin = true
+          return true
+        }
+        if (recipient === alice) await clients.host.handleSignal(bob, signal)
+        return true
+      },
+    }).call
+    clients.guest = guest
+
+    try {
+      await host.startCall([bob], 'video')
+      await guest.joinRoom()
+      expect(droppedFirstJoin).toBe(true)
+      expect(hostConnections).toHaveLength(0)
+
+      await vi.advanceTimersByTimeAsync(5_000)
+
+      expect(hostSignals.some((signal) => signal.type === 'offer' || signal.type === 'answer')).toBe(true)
+      expect(guestSignals.some((signal) => signal.type === 'offer' || signal.type === 'answer')).toBe(true)
+      expect(hostConnections).toHaveLength(1)
+      expect(guestConnections).toHaveLength(1)
+      expect(host.current().participants[0].status).toMatch(/connecting|authenticating/)
+      expect(guest.current().participants[0].status).toMatch(/connecting|authenticating/)
+    } finally {
+      await guest.stop()
+      await host.stop()
+      vi.useRealTimers()
+    }
+  })
+
   it('uses one deterministic offerer per pair and gates cloned outbound tracks until authentication', async () => {
     const signals: CallSignal[] = []
     const connections: ReturnType<typeof fakePeerConnection>[] = []

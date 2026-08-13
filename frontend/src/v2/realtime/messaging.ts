@@ -543,7 +543,7 @@ export class ConversationTransport {
       envelopeId,
       ciphertext: encryptJson(this.options.epoch.rootKey, `live:${envelopeId}`, payload, 1_024),
     }
-    return await this.sendPrepared(recipient, envelope)
+    return await this.sendPrepared(recipient, envelope, true)
   }
 
   publishTyping(active: boolean): void {
@@ -588,13 +588,15 @@ export class ConversationTransport {
     return delivered
   }
 
-  private async sendPrepared(recipient: string, envelope: LiveEnvelope): Promise<boolean> {
+  private async sendPrepared(recipient: string, envelope: LiveEnvelope, retryRateLimit = false): Promise<boolean> {
     let delivered = false
     const queued = this.outboundTail.then(async () => {
       const client = this.client
       if (client === null || this.stopped) return
       try {
-        await pacedMessageBoxSend(async () => await client.sendLiveMessage({ recipient, messageBox: this.boxFor(recipient), body: envelope }, MESSAGEBOX_HOST))
+        const send = async () => await client.sendLiveMessage({ recipient, messageBox: this.boxFor(recipient), body: envelope }, MESSAGEBOX_HOST)
+        if (retryRateLimit) await sendControlWithBackoff(async () => { await send() })
+        else await pacedMessageBoxSend(send)
         delivered = true
       } catch {
         this.options.onState('fallback')

@@ -40,6 +40,25 @@ describe('CallOverlay', () => {
 
     expect(container.querySelector('audio')).toBeInTheDocument()
     expect(container.querySelector('audio')?.srcObject).toBe(remoteStream)
+    expect(screen.getByText('2 connected')).toBeInTheDocument()
+  })
+
+  it('does not count an unauthenticated room peer as connected', () => {
+    const peer = `02${'33'.repeat(32)}`
+    render(<CallOverlay
+      call={{
+        status: 'active', media: 'video', peerIdentityKey: peer,
+        localStream: { getTracks: () => [] } as unknown as MediaStream,
+        audioEnabled: true, videoEnabled: true, authenticated: false,
+        message: 'Connecting authenticated participants…', isGroup: true,
+        participants: [{ identityKey: peer, status: 'connecting', authenticated: false, audioEnabled: true, videoEnabled: true }],
+      }}
+      identityProfiles={{}}
+      onAccept={vi.fn()} onDecline={vi.fn()} onHangup={vi.fn()} onDismiss={vi.fn()} onToggleAudio={vi.fn()} onToggleVideo={vi.fn()}
+    />)
+
+    expect(screen.getByText('Just you · room open · 1 connecting')).toBeInTheDocument()
+    expect(screen.queryByText('2 connected')).not.toBeInTheDocument()
   })
 
   it('renders resolved names and selects the custom video ringtone for an incoming group meeting', () => {
