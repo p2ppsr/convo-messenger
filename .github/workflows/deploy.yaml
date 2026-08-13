@@ -33,6 +33,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             frontend/package-lock.json
+            rtc-broker/package-lock.json
 
       - name: Install release tooling
         run: npm ci
@@ -41,6 +42,10 @@ jobs:
         run: npm ci
         working-directory: frontend
 
+      - name: Install realtime credential broker
+        run: npm ci
+        working-directory: rtc-broker
+
       - name: Verify privacy, reliability, and production build
         run: npm run verify
 
@@ -48,15 +53,18 @@ jobs:
         run: npx cars build 1
 
       - name: Check CARS transport and balance
+        id: cars-preflight
         env:
           CARS_PRIVATE_KEY: ${{ secrets.CARS_PRIVATE_KEY }}
           CARS_WALLET_STORAGE: ${{ secrets.CARS_WALLET_STORAGE }}
         run: |
           set -euo pipefail
           if [ -z "${CARS_PRIVATE_KEY:-}" ]; then
-            echo "CARS_PRIVATE_KEY repository secret is required." >&2
-            exit 1
+            echo "CARS_PRIVATE_KEY is not configured; verification passed and deployment is skipped."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
           storage_args=()
           if [ -n "${CARS_WALLET_STORAGE:-}" ]; then
             storage_args=(--storage "$CARS_WALLET_STORAGE")
@@ -65,6 +73,7 @@ jobs:
           npx cars project ensure-balance 1 --key "$CARS_PRIVATE_KEY" --network mainnet "${storage_args[@]}" --min 1 --topup-to 235000
 
       - name: Release Convo
+        if: steps.cars-preflight.outputs.enabled == 'true'
         env:
           CARS_PRIVATE_KEY: ${{ secrets.CARS_PRIVATE_KEY }}
           CARS_WALLET_STORAGE: ${{ secrets.CARS_WALLET_STORAGE }}
