@@ -54,6 +54,13 @@ export interface AttachmentReference {
   digest: string
 }
 
+export interface AttachmentKeyEnvelope {
+  scheme: 'curvepoint-uhrp-v1'
+  keyId: string
+  /** Contains the member-bearing CurvePoint header; keep only inside encrypted conversation events. */
+  envelope: string
+}
+
 export interface EventBase {
   v: typeof CONVO_PROTOCOL_VERSION
   id: string
@@ -68,6 +75,7 @@ export interface MessageEvent extends EventBase {
   body: string
   replyTo?: string
   attachments?: AttachmentReference[]
+  attachmentKey?: AttachmentKeyEnvelope
 }
 
 export interface EditEvent extends EventBase {
@@ -135,6 +143,7 @@ export interface MaterializedMessage {
   epoch: number
   replyTo?: string
   attachments: AttachmentReference[]
+  attachmentKey?: AttachmentKeyEnvelope
   reactions: Array<{ sender: string; emoji: string }>
   edited: boolean
 }

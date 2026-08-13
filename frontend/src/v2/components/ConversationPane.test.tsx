@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationSecret, ConversationView } from '../domain/types'
 import { ConversationPane } from './ConversationPane'
@@ -35,9 +35,59 @@ const view: ConversationView = {
   loadedPages: 1,
 }
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('ConversationPane realtime experience', () => {
+  it('records locally, lets the user review audio, and only sends after confirmation', async () => {
+    const stopTrack = vi.fn()
+    const getUserMedia = vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] }))
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia } })
+    class FakeMediaRecorder {
+      static isTypeSupported(type: string) { return type.startsWith('audio/webm') }
+      state: RecordingState = 'inactive'
+      mimeType = 'audio/webm;codecs=opus'
+      ondataavailable: ((event: BlobEvent) => void) | null = null
+      onerror: ((event: Event) => void) | null = null
+      onstop: (() => void) | null = null
+      constructor() {}
+      start() { this.state = 'recording' }
+      stop() {
+        this.state = 'inactive'
+        this.ondataavailable?.({ data: new Blob([Uint8Array.from([1, 2, 3])], { type: 'audio/webm' }) } as BlobEvent)
+        this.onstop?.()
+      }
+    }
+    vi.stubGlobal('MediaRecorder', FakeMediaRecorder)
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL() { return 'blob:recording-preview' }
+      static revokeObjectURL() {}
+    })
+    const onSend = vi.fn(async (body: string, files: File[]) => { void body; void files })
+    render(<ConversationPane
+      identityKey={alice} secret={secret} view={view} loading={false} busy={false} liveState="live"
+      onlinePeers={[]} typingPeers={[]} deliveryStates={{}} identityProfiles={{}} callActive={false}
+      onOpenRail={vi.fn()} onOpenDetails={vi.fn()} onLoadHistory={vi.fn(async () => undefined)} onTyping={vi.fn()}
+      onCall={vi.fn(async () => undefined)} onSend={onSend} onEdit={vi.fn(async () => undefined)}
+      onDelete={vi.fn(async () => undefined)} onReact={vi.fn(async () => undefined)}
+      onDownload={vi.fn(async () => undefined)} onOpenAttachment={vi.fn(async () => new Blob())}
+    />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Record a private voice message' }))
+    await screen.findByText('Recording voice')
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true })
+    expect(onSend).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: /Stop & review/ }))
+    await screen.findByText('Review recording')
+    expect(screen.getByLabelText('Review voice recording')).toHaveAttribute('src', 'blob:recording-preview')
+    expect(onSend).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1))
+    const sentFiles = onSend.mock.calls[0][1]
+    expect(sentFiles).toHaveLength(1)
+    expect(sentFiles[0].type).toBe('audio/webm')
+    expect(stopTrack).toHaveBeenCalled()
+  })
+
   it('shows presence, typing, and the live-to-durable message state', () => {
     const onTyping = vi.fn()
     render(<ConversationPane
@@ -62,6 +112,7 @@ describe('ConversationPane realtime experience', () => {
       onDelete={vi.fn(async () => undefined)}
       onReact={vi.fn(async () => undefined)}
       onDownload={vi.fn(async () => undefined)}
+      onOpenAttachment={vi.fn(async () => new Blob())}
     />)
 
     expect(screen.getByText('Online · Realtime private sync')).toBeInTheDocument()
@@ -95,6 +146,7 @@ describe('ConversationPane realtime experience', () => {
       onDelete={vi.fn(async () => undefined)}
       onReact={vi.fn(async () => undefined)}
       onDownload={vi.fn(async () => undefined)}
+      onOpenAttachment={vi.fn(async () => new Blob())}
     />)
 
     expect(screen.getByText('Alice Admin')).toBeInTheDocument()
@@ -136,6 +188,7 @@ describe('ConversationPane realtime experience', () => {
       onDelete={vi.fn(async () => undefined)}
       onReact={vi.fn(async () => undefined)}
       onDownload={vi.fn(async () => undefined)}
+      onOpenAttachment={vi.fn(async () => new Blob())}
     />)
 
     expect(getByText('Offline · Realtime private sync')).toBeInTheDocument()
@@ -163,6 +216,7 @@ describe('ConversationPane realtime experience', () => {
       onDelete={vi.fn(async () => undefined)}
       onReact={vi.fn(async () => undefined)}
       onDownload={vi.fn(async () => undefined)}
+      onOpenAttachment={vi.fn(async () => new Blob())}
     />)
 
     fireEvent.click(getByRole('button', { name: 'Start voice call' }))

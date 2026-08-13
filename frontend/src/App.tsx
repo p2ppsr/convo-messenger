@@ -257,9 +257,8 @@ function App() {
           onSend={(body, files) => runBusy(async () => {
             if (!service || !activeSecret || !attachments) return
             const epoch = currentEpoch(activeSecret)
-            const uploaded = []
-            for (const file of files) uploaded.push(await attachments.upload(file, epoch))
-            await service.sendMessage(activeSecret, body, { attachments: uploaded })
+            const uploaded = files.length ? await attachments.upload(files, activeSecret.conversationId, epoch) : undefined
+            await service.sendMessage(activeSecret, body, uploaded)
             await afterMutation(activeSecret)
           })}
           onEdit={(messageId, body) => runBusy(async () => { if (service && activeSecret) { await service.editMessage(activeSecret, messageId, body); await afterMutation(activeSecret) } })}
@@ -270,12 +269,19 @@ function App() {
             await service.react(activeSecret, messageId, emoji, removed)
             await afterMutation(activeSecret)
           })}
+          onOpenAttachment={async (message: MaterializedMessage, attachmentIndex) => {
+            if (!attachments || !activeSecret) throw new Error('Attachment service is unavailable')
+            const reference = message.attachments[attachmentIndex]
+            const epoch = activeSecret.epochs.find((item) => item.epoch === message.epoch)
+            if (!reference || !epoch || !message.attachmentKey) throw new Error('Attachment key is unavailable')
+            return await attachments.download(reference, message.attachmentKey, activeSecret.conversationId, epoch)
+          }}
           onDownload={(message: MaterializedMessage, attachmentIndex) => runBusy(async () => {
             if (!attachments || !activeSecret) return
             const reference = message.attachments[attachmentIndex]
             const epoch = activeSecret.epochs.find((item) => item.epoch === message.epoch)
-            if (!reference || !epoch) throw new Error('Attachment key is unavailable')
-            const blob = await attachments.download(reference, epoch)
+            if (!reference || !epoch || !message.attachmentKey) throw new Error('Attachment key is unavailable')
+            const blob = await attachments.download(reference, message.attachmentKey, activeSecret.conversationId, epoch)
             const url = URL.createObjectURL(blob)
             const anchor = document.createElement('a')
             anchor.href = url; anchor.download = reference.name; anchor.click()

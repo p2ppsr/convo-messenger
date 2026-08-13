@@ -1,8 +1,10 @@
 import { AuthFetch, type WalletInterface } from '@bsv/sdk'
 import { epochHistoryDigest, eventDigest, generateRootKey, randomId } from '../domain/crypto'
 import { materializeConversation, sortAndDedupeEvents } from '../domain/materialize'
+import { validAttachmentSet } from '../domain/attachmentValidation'
 import type {
   AttachmentReference,
+  AttachmentKeyEnvelope,
   ConversationEpoch,
   ConversationEvent,
   ConversationInvite,
@@ -286,18 +288,23 @@ export class ConversationService {
   async sendMessage(
     secret: ConversationSecret,
     body: string,
-    options: { replyTo?: string; attachments?: AttachmentReference[] } = {},
+    options: { replyTo?: string; attachments?: AttachmentReference[]; attachmentKey?: AttachmentKeyEnvelope } = {},
   ): Promise<MessageEvent> {
     const text = body.trim()
     if (!text && !options.attachments?.length) throw new Error('Message is empty')
     if (text.length > 20_000) throw new Error('Message is too long')
     if ((options.attachments?.length ?? 0) > 20) throw new Error('A message supports at most 20 attachments')
+    if (((options.attachments?.length ?? 0) > 0) !== Boolean(options.attachmentKey)) throw new Error('Encrypted attachments require a CurvePoint key')
+    if (!validAttachmentSet(options.attachments, options.attachmentKey, secret.conversationId, secret.currentEpoch)) {
+      throw new Error('Encrypted attachment metadata is invalid')
+    }
     const event: MessageEvent = {
       ...this.baseEvent(secret),
       type: 'message',
       body: text,
       replyTo: options.replyTo,
       attachments: options.attachments,
+      attachmentKey: options.attachmentKey,
     }
     await this.persistEvent(secret, event)
     return event

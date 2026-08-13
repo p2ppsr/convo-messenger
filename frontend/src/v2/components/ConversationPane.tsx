@@ -1,13 +1,40 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowDown, AtSign, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, MoreHorizontal, Paperclip, Phone, Search, Send, ShieldCheck, SmilePlus, Trash2, Video, X } from 'lucide-react'
+import { ArrowDown, AtSign, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, Mic, MoreHorizontal, Paperclip, Phone, Search, Send, ShieldCheck, SmilePlus, Square, Trash2, Video, X } from 'lucide-react'
 import type { ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from '../domain/types'
 import { identityInitials, identityName, type IdentityProfileMap } from '../hooks/useIdentityProfiles'
 import { conversationName } from '../domain/presentation'
 import { activeMentionDraft, displayMessageText, insertMention, mentionedIdentities, MENTION_PATTERN, type MentionDraft } from '../domain/mentions'
+import { isInlineAudio, isInlineImage, MAX_ATTACHMENT_BYTES } from '../domain/attachmentValidation'
 import { MAX_MEETING_PARTICIPANTS } from '../realtime/meetingCalling'
 import type { CallMedia, RealtimePeer, TypingPeer } from '../realtime/messaging'
 import { IdentityAvatar } from './IdentityAvatar'
+import { EncryptedMediaAttachment } from './EncryptedImageAttachment'
+
+const MAX_RECORDING_SECONDS = 10 * 60
+
+function preferredRecordingType(): string {
+  for (const type of ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm']) {
+    if (MediaRecorder.isTypeSupported(type)) return type
+  }
+  return ''
+}
+
+function voiceRecordingName(type: string): string {
+  const extension = type.startsWith('audio/mp4') ? 'm4a' : 'webm'
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  return `Voice recording ${timestamp}.${extension}`
+}
+
+function AudioDraft({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const [url, setUrl] = useState('')
+  useEffect(() => {
+    const next = URL.createObjectURL(file)
+    setUrl(next)
+    return () => URL.revokeObjectURL(next)
+  }, [file])
+  return <div className="audio-draft"><span><Mic size={15} /><strong>Review recording</strong><small>{file.name}</small></span>{url && <audio controls src={url} preload="metadata" aria-label="Review voice recording" />}<button onClick={onRemove} aria-label="Discard voice recording"><X size={15} /> Discard</button></div>
+}
 
 interface Props {
   identityKey: string
@@ -30,6 +57,7 @@ interface Props {
   onEdit: (messageId: string, body: string) => Promise<void>
   onDelete: (messageId: string) => Promise<void>
   onReact: (messageId: string, emoji: string) => Promise<void>
+  onOpenAttachment: (message: MaterializedMessage, attachmentIndex: number) => Promise<Blob>
   onDownload: (message: MaterializedMessage, attachmentIndex: number) => Promise<void>
 }
 
@@ -63,14 +91,86 @@ export function ConversationPane(props: Props) {
   const [searchQuery, setSearchQuery] = useState('')
   const [mentionDraft, setMentionDraft] = useState<MentionDraft | null>(null)
   const [mentionSelection, setMentionSelection] = useState(0)
+  const [isRecording, setIsRecording] = useState(false)
+  const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const [recordingError, setRecordingError] = useState('')
   const fileInput = useRef<HTMLInputElement>(null)
   const composerInput = useRef<HTMLTextAreaElement>(null)
   const timeline = useRef<HTMLDivElement>(null)
+  const recorder = useRef<MediaRecorder | null>(null)
+  const recordingStream = useRef<MediaStream | null>(null)
+  const recordingChunks = useRef<Blob[]>([])
+  const discardRecording = useRef(false)
+
+  const stopRecording = (discard = false) => {
+    discardRecording.current = discard
+    if (recorder.current?.state !== 'inactive') recorder.current?.stop()
+    recordingStream.current?.getTracks().forEach((track) => track.stop())
+    recordingStream.current = null
+  }
+
+  const startRecording = async () => {
+    setRecordingError('')
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setRecordingError('Audio recording is not supported by this browser.')
+      return
+    }
+    let stream: MediaStream | null = null
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const preferredType = preferredRecordingType()
+      const next = new MediaRecorder(stream, preferredType ? { mimeType: preferredType } : undefined)
+      recordingStream.current = stream
+      recordingChunks.current = []
+      discardRecording.current = false
+      next.ondataavailable = (event) => { if (event.data.size) recordingChunks.current.push(event.data) }
+      next.onerror = () => setRecordingError('The recording stopped unexpectedly.')
+      next.onstop = () => {
+        const mimeType = (next.mimeType || preferredType || 'audio/webm').split(';')[0]
+        const blob = new Blob(recordingChunks.current, { type: mimeType })
+        if (!discardRecording.current && blob.size > 0 && blob.size <= MAX_ATTACHMENT_BYTES) {
+          setFiles((current) => [...current, new File([blob], voiceRecordingName(mimeType), { type: mimeType })])
+        } else if (!discardRecording.current && blob.size > MAX_ATTACHMENT_BYTES) {
+          setRecordingError('Recording exceeded the 25 MB attachment limit.')
+        }
+        recorder.current = null
+        recordingChunks.current = []
+        setIsRecording(false)
+        setRecordingSeconds(0)
+      }
+      recorder.current = next
+      next.start(1_000)
+      setIsRecording(true)
+      setRecordingSeconds(0)
+    } catch (reason) {
+      stream?.getTracks().forEach((track) => track.stop())
+      setRecordingError(reason instanceof DOMException && reason.name === 'NotAllowedError'
+        ? 'Microphone access was not allowed.'
+        : 'Could not start audio recording.')
+    }
+  }
 
   useEffect(() => {
-    setDraft(''); setFiles([]); setEditing(null); setCallMenu(null); setSelectedCallMembers([]); setSearchOpen(false); setSearchQuery(''); setMentionDraft(null)
-    return () => onTyping(false)
+    setDraft(''); setFiles([]); setEditing(null); setCallMenu(null); setSelectedCallMembers([]); setSearchOpen(false); setSearchQuery(''); setMentionDraft(null); setRecordingError('')
+    return () => {
+      onTyping(false)
+      discardRecording.current = true
+      if (recorder.current?.state !== 'inactive') recorder.current?.stop()
+      recordingStream.current?.getTracks().forEach((track) => track.stop())
+    }
   }, [secret?.conversationId, onTyping])
+  useEffect(() => {
+    if (!isRecording) return
+    const timer = window.setInterval(() => setRecordingSeconds((seconds) => {
+      if (seconds + 1 >= MAX_RECORDING_SECONDS) {
+        if (recorder.current?.state !== 'inactive') recorder.current?.stop()
+        recordingStream.current?.getTracks().forEach((track) => track.stop())
+        recordingStream.current = null
+      }
+      return seconds + 1
+    }), 1_000)
+    return () => window.clearInterval(timer)
+  }, [isRecording])
   useEffect(() => {
     const element = timeline.current
     if (!element) return
@@ -128,7 +228,7 @@ export function ConversationPane(props: Props) {
   }
 
   const submit = async () => {
-    if ((!draft.trim() && files.length === 0) || busy) return
+    if ((!draft.trim() && files.length === 0) || busy || isRecording) return
     const currentDraft = draft
     const currentFiles = files
     setDraft('')
@@ -182,7 +282,9 @@ export function ConversationPane(props: Props) {
                 <div className="message-meta"><span>{mine ? 'You' : identityName(props.identityProfiles, message.sender)}</span><time>{formatTime(message.createdAt)}</time>{message.edited && <em>edited</em>}{mentionsMe && <em className="mentioned-you"><AtSign size={10} /> Mentioned you</em>}</div>
                 <div className="message-bubble">
                   {isEditing ? <div className="edit-form"><textarea value={editBody} onChange={(event) => setEditBody(event.target.value)} autoFocus /><div><button className="text-button" onClick={() => setEditing(null)}>Cancel</button><button className="compact-button is-active" onClick={() => void props.onEdit(message.id, editBody).then(() => setEditing(null))}>Save</button></div></div> : <p>{messageBody(message.body, props.identityProfiles)}</p>}
-                  {message.attachments.map((attachment, index) => <button className="attachment-card" key={attachment.id} onClick={() => void props.onDownload(message, index)}><FileLock2 size={19} /><span><strong>{attachment.name}</strong><small>{Math.max(1, Math.round(attachment.size / 1024))} KB · encrypted</small></span><Download size={16} /></button>)}
+                  {message.attachments.map((attachment, index) => isInlineImage(attachment) || isInlineAudio(attachment)
+                    ? <EncryptedMediaAttachment attachment={attachment} message={message} index={index} media={isInlineImage(attachment) ? 'image' : 'audio'} onOpen={props.onOpenAttachment} key={attachment.id} />
+                    : <button className="attachment-card" key={attachment.id} onClick={() => void props.onDownload(message, index)}><FileLock2 size={19} /><span><strong>{attachment.name}</strong><small>{Math.max(1, Math.round(attachment.size / 1024))} KB · CurvePoint encrypted</small></span><Download size={16} /></button>)}
                 </div>
                 {message.reactions.length > 0 && <div className="reaction-list">{[...new Set(message.reactions.map((reaction) => reaction.emoji))].map((emoji) => <button key={emoji} onClick={() => void props.onReact(message.id, emoji)}>{emoji} {message.reactions.filter((reaction) => reaction.emoji === emoji).length}</button>)}</div>}
                 <div className="message-actions">
@@ -203,7 +305,10 @@ export function ConversationPane(props: Props) {
           <span>{typingPeers.length === 1 ? `${identityName(props.identityProfiles, typingPeers[0].identityKey)} is typing` : typingPeers.length === 2 ? 'Two people are typing' : typingPeers.length > 2 ? `${typingPeers.length} people are typing` : ''}</span>
           {typingPeers.length > 0 && <b><i /><i /><i /></b>}
         </div>
-        {files.length > 0 && <div className="file-queue">{files.map((file) => <span key={`${file.name}:${file.size}`}><FileLock2 size={14} />{file.name}<button onClick={() => setFiles((current) => current.filter((item) => item !== file))}>×</button></span>)}</div>}
+        {files.some((file) => file.type.startsWith('audio/')) && <div className="audio-draft-list">{files.filter((file) => file.type.startsWith('audio/')).map((file) => <AudioDraft file={file} onRemove={() => setFiles((current) => current.filter((item) => item !== file))} key={`${file.name}:${file.lastModified}`} />)}</div>}
+        {files.some((file) => !file.type.startsWith('audio/')) && <div className="file-queue">{files.filter((file) => !file.type.startsWith('audio/')).map((file) => <span key={`${file.name}:${file.size}`}><FileLock2 size={14} />{file.name}<button onClick={() => setFiles((current) => current.filter((item) => item !== file))}>×</button></span>)}</div>}
+        {isRecording && <div className="recording-strip" role="status"><i /><span><strong>Recording voice</strong><small>{Math.floor(recordingSeconds / 60)}:{String(recordingSeconds % 60).padStart(2, '0')} · stays on this device</small></span><button onClick={() => stopRecording(true)}>Cancel</button><button className="stop-recording" onClick={() => stopRecording()}><Square size={11} /> Stop & review</button></div>}
+        {recordingError && <div className="composer-error" role="alert"><span>{recordingError}</span><button onClick={() => setRecordingError('')}>Dismiss</button></div>}
         <div className="composer-wrap">
           {mentionDraft && <div className="mention-picker" role="listbox" aria-label="Mention a conversation member">
             <div><AtSign size={14} /><span><strong>Mention someone</strong><small>Identity-verified members of this chat</small></span></div>
@@ -211,8 +316,9 @@ export function ConversationPane(props: Props) {
             {mentionCandidates.length === 0 && <p>No current member matches “{mentionDraft.query}”.</p>}
           </div>}
           <div className="composer">
-          <input ref={fileInput} type="file" multiple hidden onChange={(event) => setFiles(Array.from(event.target.files ?? []))} />
+          <input ref={fileInput} type="file" multiple hidden onChange={(event) => { setFiles((current) => [...current, ...Array.from(event.target.files ?? [])]); event.currentTarget.value = '' }} />
           <button className="icon-button attach-button" onClick={() => fileInput.current?.click()} aria-label="Attach encrypted files"><Paperclip size={20} /></button>
+          <button className={`icon-button record-button ${isRecording ? 'recording' : ''}`} disabled={isRecording || busy} onClick={() => void startRecording()} aria-label="Record a private voice message" title="Record a private voice message"><Mic size={19} /></button>
           <textarea ref={composerInput} value={draft} maxLength={20_000} onChange={(event) => { setDraft(event.target.value); setMentionDraft(activeMentionDraft(event.target.value, event.target.selectionStart)); setMentionSelection(0); onTyping(event.target.value.trim().length > 0) }} onClick={(event) => setMentionDraft(activeMentionDraft(event.currentTarget.value, event.currentTarget.selectionStart))} onBlur={() => { onTyping(false); setTimeout(() => setMentionDraft(null), 100) }} onKeyDown={(event) => {
             if (mentionDraft && mentionCandidates.length > 0) {
               if (event.key === 'ArrowDown') { event.preventDefault(); setMentionSelection((current) => (current + 1) % mentionCandidates.length); return }
@@ -222,7 +328,7 @@ export function ConversationPane(props: Props) {
             }
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit() }
           }} placeholder={`Message ${displayTitle} · type @< to mention`} rows={1} />
-          <button className="send-button" disabled={busy || (!draft.trim() && files.length === 0)} onClick={() => void submit()} aria-label="Send message"><Send size={19} /></button>
+          <button className="send-button" disabled={busy || isRecording || (!draft.trim() && files.length === 0)} onClick={() => void submit()} aria-label="Send message"><Send size={19} /></button>
           </div>
         </div>
         <div className="composer-note"><LockKeyhole size={12} /> Encrypted before leaving this device <span><CheckCheck size={12} /> Durable outbox</span></div>

@@ -7,7 +7,7 @@ import type {
   EventPage,
   MemberManifest,
 } from '../domain/types'
-import { MAX_ATTACHMENT_BYTES } from '../services/attachments'
+import { validAttachmentSet } from '../domain/attachmentValidation'
 import { recoverGlobalKvWrite } from './kvWriteRecovery'
 
 const MAX_PAGE_EVENTS = 32
@@ -138,15 +138,7 @@ function validEvent(event: unknown, epoch: ConversationEpoch, writer: string): e
   if (candidate.type === 'message') return typeof candidate.body === 'string'
     && candidate.body.length <= 20_000
     && (candidate.replyTo === undefined || validTarget(candidate.replyTo))
-    && (candidate.attachments === undefined || (Array.isArray(candidate.attachments)
-      && candidate.attachments.length <= 20
-      && candidate.attachments.every((attachment) => typeof attachment === 'object' && attachment !== null
-        && typeof attachment.id === 'string' && attachment.id.length <= 128
-        && typeof attachment.handle === 'string' && attachment.handle.length <= 2_048
-        && typeof attachment.name === 'string' && attachment.name.length <= 255
-        && typeof attachment.mimeType === 'string' && attachment.mimeType.length <= 255
-        && typeof attachment.size === 'number' && Number.isSafeInteger(attachment.size) && attachment.size >= 0 && attachment.size <= MAX_ATTACHMENT_BYTES
-        && typeof attachment.digest === 'string' && /^[0-9a-f]{64}$/.test(attachment.digest))))
+    && validAttachmentSet(candidate.attachments, candidate.attachmentKey, candidate.conversationId, candidate.epoch)
   if (candidate.type === 'edit') return validTarget(candidate.targetId) && typeof candidate.body === 'string' && candidate.body.length <= 20_000
   if (candidate.type === 'delete') return validTarget(candidate.targetId)
   if (candidate.type === 'reaction') return validTarget(candidate.targetId) && typeof candidate.emoji === 'string' && candidate.emoji.length > 0 && candidate.emoji.length <= 32

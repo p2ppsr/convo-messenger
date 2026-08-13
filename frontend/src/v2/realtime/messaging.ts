@@ -1,8 +1,8 @@
 import { MessageBoxClient } from '@bsv/message-box-client'
 import { CurvePoint } from 'curvepoint'
 import { Utils, type WalletInterface, type WalletProtocol } from '@bsv/sdk'
+import { validAttachmentSet } from '../domain/attachmentValidation'
 import { decryptJson, encryptJson, liveBoxName, randomId } from '../domain/crypto'
-import { MAX_ATTACHMENT_BYTES } from '../services/attachments'
 import type {
   ConversationEvent,
   ConversationEpoch,
@@ -235,14 +235,7 @@ function isEvent(value: unknown, conversationId: string, epoch: ConversationEpoc
   if (event.type === 'message') {
     return typeof event.body === 'string' && event.body.length <= 20_000
       && (event.replyTo === undefined || (typeof event.replyTo === 'string' && /^[0-9a-f]{64}$/.test(event.replyTo)))
-      && (event.attachments === undefined || (Array.isArray(event.attachments) && event.attachments.length <= 20
-        && event.attachments.every((attachment) => typeof attachment === 'object' && attachment !== null
-          && typeof attachment.id === 'string' && /^[0-9a-f]{64}$/.test(attachment.id)
-          && typeof attachment.handle === 'string' && attachment.handle.length > 0 && attachment.handle.length <= 2_048
-          && typeof attachment.name === 'string' && attachment.name.length > 0 && attachment.name.length <= 255
-          && typeof attachment.mimeType === 'string' && attachment.mimeType.length > 0 && attachment.mimeType.length <= 255
-          && Number.isSafeInteger(attachment.size) && attachment.size >= 0 && attachment.size <= MAX_ATTACHMENT_BYTES
-          && typeof attachment.digest === 'string' && /^[0-9a-f]{64}$/.test(attachment.digest))))
+      && validAttachmentSet(event.attachments, event.attachmentKey, conversationId, epoch.epoch)
   }
   if (event.type === 'edit') return typeof event.targetId === 'string' && /^[0-9a-f]{64}$/.test(event.targetId)
     && typeof event.body === 'string' && event.body.length <= 20_000

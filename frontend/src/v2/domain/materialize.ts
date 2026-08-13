@@ -39,6 +39,7 @@ export function materializeConversation(
         epoch: event.epoch,
         replyTo: event.replyTo,
         attachments: event.attachments ?? [],
+        attachmentKey: event.attachmentKey,
         reactions: [],
         edited: false,
       })
@@ -106,6 +107,7 @@ export function applyConversationEvent(
       epoch: event.epoch,
       replyTo: event.replyTo,
       attachments: event.attachments ?? [],
+      attachmentKey: event.attachmentKey,
       reactions: [],
       edited: false,
     })
