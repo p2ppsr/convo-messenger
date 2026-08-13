@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { WalletInterface } from '@bsv/sdk'
 import { Crown, LockKeyhole, ShieldCheck, UserMinus, X } from 'lucide-react'
 import type { ConversationSecret } from '../domain/types'
+import { identityInitials, identityName, type IdentityProfileMap } from '../hooks/useIdentityProfiles'
 import type { RealtimePeer } from '../realtime/messaging'
 import { IdentitySearch, type IdentityChoice } from './IdentitySearch'
 
@@ -12,15 +13,12 @@ interface Props {
   wallet: WalletInterface
   secret: ConversationSecret
   onlinePeers: RealtimePeer[]
+  identityProfiles: IdentityProfileMap
   onClose: () => void
   onSave: (title: string, members: string[], admins: string[]) => Promise<void>
 }
 
-function shortKey(key: string): string {
-  return `${key.slice(0, 12)}…${key.slice(-10)}`
-}
-
-export function ConversationDetails({ open, busy, identityKey, wallet, secret, onlinePeers, onClose, onSave }: Props) {
+export function ConversationDetails({ open, busy, identityKey, wallet, secret, onlinePeers, identityProfiles, onClose, onSave }: Props) {
   const epoch = useMemo(() => secret.epochs.find((item) => item.epoch === secret.currentEpoch)!, [secret])
   const [title, setTitle] = useState(secret.title)
   const [members, setMembers] = useState<string[]>(epoch.members)
@@ -58,11 +56,11 @@ export function ConversationDetails({ open, busy, identityKey, wallet, secret, o
               const isAdmin = admins.includes(member)
               return (
                 <div className="member-row" key={member}>
-                  <span className="member-avatar">{isSelf ? 'You' : member.slice(2, 4).toUpperCase()}</span>
-                  <span className="member-key"><strong>{isSelf ? 'You' : shortKey(member)}</strong><small><i className={`member-presence ${isSelf || onlineSet.has(member) ? 'online' : ''}`} />{isSelf || onlineSet.has(member) ? 'Online' : 'Offline'} · {isAdmin ? 'Administrator' : 'Member'}</small></span>
+                  <span className="member-avatar">{isSelf ? 'You' : identityInitials(identityProfiles, member)}</span>
+                  <span className="member-key"><strong>{isSelf ? 'You' : identityName(identityProfiles, member)}</strong><small><i className={`member-presence ${isSelf || onlineSet.has(member) ? 'online' : ''}`} />{isSelf || onlineSet.has(member) ? 'Online' : 'Offline'} · {isAdmin ? 'Administrator' : 'Member'}</small></span>
                   {canAdmin && <div className="member-controls">
                     <button className={`compact-button ${isAdmin ? 'is-active' : ''}`} disabled={isSelf} onClick={() => setAdmins((current) => isAdmin ? current.filter((item) => item !== member) : [...current, member])}><Crown size={14} /> Admin</button>
-                    <button className="icon-button danger" disabled={isSelf} onClick={() => { setMembers((current) => current.filter((item) => item !== member)); setAdmins((current) => current.filter((item) => item !== member)) }} aria-label={`Remove ${shortKey(member)}`}><UserMinus size={16} /></button>
+                    <button className="icon-button danger" disabled={isSelf} onClick={() => { setMembers((current) => current.filter((item) => item !== member)); setAdmins((current) => current.filter((item) => item !== member)) }} aria-label={`Remove ${identityName(identityProfiles, member)}`}><UserMinus size={16} /></button>
                   </div>}
                 </div>
               )

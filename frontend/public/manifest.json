@@ -40,6 +40,10 @@
           "protocolID": [2, "server hmac"],
           "counterparty": "self",
           "description": "Authenticate realtime connections"
+        },
+        {
+          "protocolID": [2, "identity resolution"],
+          "description": "Resolve public Metanet identity certificates for conversation members"
         }
       ],
       "basketAccess": [

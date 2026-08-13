@@ -161,12 +161,12 @@ describe('private realtime conversation transport', () => {
     await aliceTransport.start()
     FakeMessageBox.bodies = []
     const signal: CallSignal = {
-      v: 1,
-      type: 'offer',
+      v: 2,
+      type: 'invite',
       callId: 'cd'.repeat(32),
       to: bob,
       media: 'video',
-      sdp: 'v=0\r\na=ice-ufrag:private-call-secret\r\n',
+      participants: [alice, bob],
       expiresAt: Date.now() + 45_000,
     }
 
@@ -176,7 +176,7 @@ describe('private realtime conversation transport', () => {
     const wire = JSON.stringify(FakeMessageBox.bodies.at(-1))
     expect(wire).toContain('convo-v2-live')
     expect(wire).not.toContain(signal.callId)
-    expect(wire).not.toContain('private-call-secret')
+    expect(wire).not.toContain('participants')
     expect(wire).not.toContain('video')
     expect(wire).not.toContain(conversationId)
     expect(wire).not.toContain(alice)

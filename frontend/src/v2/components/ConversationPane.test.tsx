@@ -50,6 +50,7 @@ describe('ConversationPane realtime experience', () => {
       onlinePeers={[{ identityKey: bob, lastSeen: Date.now() }]}
       typingPeers={[{ identityKey: bob, lastSeen: Date.now(), expiresAt: Date.now() + 5_000 }]}
       deliveryStates={{ [messageId]: 'live' }}
+      identityProfiles={{ [bob]: { identityKey: bob, name: 'Bob Builder' } }}
       callActive={false}
       onOpenRail={vi.fn()}
       onOpenDetails={vi.fn()}
@@ -64,7 +65,7 @@ describe('ConversationPane realtime experience', () => {
     />)
 
     expect(screen.getByText('Online · Realtime private sync')).toBeInTheDocument()
-    expect(screen.getByText(/is typing$/)).toBeInTheDocument()
+    expect(screen.getByText('Bob Builder is typing')).toBeInTheDocument()
     expect(screen.getByText('Delivered live · saving')).toBeInTheDocument()
     fireEvent.change(screen.getByPlaceholderText('Write a private message'), { target: { value: 'hello' } })
     expect(onTyping).toHaveBeenCalledWith(true)
@@ -82,6 +83,7 @@ describe('ConversationPane realtime experience', () => {
       onlinePeers={[]}
       typingPeers={[]}
       deliveryStates={{}}
+      identityProfiles={{}}
       callActive={false}
       onOpenRail={vi.fn()}
       onOpenDetails={vi.fn()}
@@ -108,6 +110,7 @@ describe('ConversationPane realtime experience', () => {
       onlinePeers={[{ identityKey: bob, lastSeen: Date.now() }]}
       typingPeers={[]}
       deliveryStates={{}}
+      identityProfiles={{}}
       callActive={false}
       onOpenRail={vi.fn()}
       onOpenDetails={vi.fn()}
@@ -122,6 +125,6 @@ describe('ConversationPane realtime experience', () => {
     />)
 
     fireEvent.click(getByRole('button', { name: 'Start voice call' }))
-    expect(onCall).toHaveBeenCalledWith(bob, 'audio')
+    expect(onCall).toHaveBeenCalledWith([bob], 'audio')
   })
 })

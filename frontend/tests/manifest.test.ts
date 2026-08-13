@@ -46,6 +46,7 @@ describe('BRC-116 manifest permissions', () => {
       { protocolID: [1, 'messagebox'] },
       { protocolID: [2, 'convo private v2'], counterparty: 'self' },
       { protocolID: [2, 'server hmac'], counterparty: 'self' },
+      { protocolID: [2, 'identity resolution'] },
     ])
     expect(manifest.metanet?.counterpartyPermissions?.protocols?.map(({ protocolName }) => protocolName)).toEqual([
       'Convo Messenger',

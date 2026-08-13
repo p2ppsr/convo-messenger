@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowDown, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, MoreHorizontal, Paperclip, Phone, Send, ShieldCheck, SmilePlus, Trash2, Video, X } from 'lucide-react'
 import type { ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from '../domain/types'
+import { identityInitials, identityName, type IdentityProfileMap } from '../hooks/useIdentityProfiles'
+import { MAX_MEETING_PARTICIPANTS } from '../realtime/meetingCalling'
 import type { CallMedia, RealtimePeer, TypingPeer } from '../realtime/messaging'
 
 interface Props {
@@ -13,21 +15,18 @@ interface Props {
   onlinePeers: RealtimePeer[]
   typingPeers: TypingPeer[]
   deliveryStates: Record<string, MessageDeliveryState>
+  identityProfiles: IdentityProfileMap
   callActive: boolean
   onOpenRail: () => void
   onOpenDetails: () => void
   onLoadHistory: () => Promise<void>
   onTyping: (active: boolean) => void
-  onCall: (identityKey: string, media: CallMedia) => Promise<void>
+  onCall: (identityKeys: string[], media: CallMedia) => Promise<void>
   onSend: (body: string, files: File[]) => Promise<void>
   onEdit: (messageId: string, body: string) => Promise<void>
   onDelete: (messageId: string) => Promise<void>
   onReact: (messageId: string, emoji: string) => Promise<void>
   onDownload: (message: MaterializedMessage, attachmentIndex: number) => Promise<void>
-}
-
-function shortKey(key: string): string {
-  return `${key.slice(0, 8)}…${key.slice(-6)}`
 }
 
 function formatTime(timestamp: number): string {
@@ -41,11 +40,12 @@ export function ConversationPane(props: Props) {
   const [editing, setEditing] = useState<string | null>(null)
   const [editBody, setEditBody] = useState('')
   const [callMenu, setCallMenu] = useState<CallMedia | null>(null)
+  const [selectedCallMembers, setSelectedCallMembers] = useState<string[]>([])
   const fileInput = useRef<HTMLInputElement>(null)
   const timeline = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    setDraft(''); setFiles([]); setEditing(null); setCallMenu(null)
+    setDraft(''); setFiles([]); setEditing(null); setCallMenu(null); setSelectedCallMembers([])
     return () => onTyping(false)
   }, [secret?.conversationId, onTyping])
   useEffect(() => {
@@ -69,8 +69,11 @@ export function ConversationPane(props: Props) {
   const onlineSet = new Set(onlinePeers.map((peer) => peer.identityKey))
   const directPeer = otherMembers.length === 1 ? otherMembers[0] : null
   const beginCall = (media: CallMedia) => {
-    if (directPeer) void props.onCall(directPeer, media)
-    else setCallMenu(media)
+    if (directPeer) void props.onCall([directPeer], media)
+    else {
+      setSelectedCallMembers(otherMembers.filter((member) => onlineSet.has(member)).slice(0, MAX_MEETING_PARTICIPANTS - 1))
+      setCallMenu(media)
+    }
   }
 
   const submit = async () => {
@@ -90,14 +93,17 @@ export function ConversationPane(props: Props) {
         <div className="header-avatar">{secret.title.slice(0, 2).toUpperCase()}</div>
         <div className="header-copy"><h1>{view?.title || secret.title}</h1><span className={`presence ${liveState}`}><i />{liveState === 'live' ? (directPeer ? `${onlineSet.has(directPeer) ? 'Online' : 'Offline'} · Realtime private sync` : `${onlinePeers.length + 1} of ${members.length} online · Realtime private sync`) : liveState === 'fallback' ? 'Secure reconciliation fallback' : 'Connecting realtime sync'}</span></div>
         <div className="header-call-actions">
-          <button className="header-call" disabled={props.callActive || liveState !== 'live' || (directPeer !== null && !onlineSet.has(directPeer))} onClick={() => beginCall('audio')} aria-label="Start voice call" title={directPeer && !onlineSet.has(directPeer) ? 'This member is offline' : 'Start voice call'}><Phone size={17} /></button>
-          <button className="header-call" disabled={props.callActive || liveState !== 'live' || (directPeer !== null && !onlineSet.has(directPeer))} onClick={() => beginCall('video')} aria-label="Start video call" title={directPeer && !onlineSet.has(directPeer) ? 'This member is offline' : 'Start video call'}><Video size={18} /></button>
-          {callMenu && <div className="call-member-menu" role="dialog" aria-label={`Choose member for ${callMenu} call`}>
-            <div><strong>Start {callMenu} call</strong><button onClick={() => setCallMenu(null)} aria-label="Close call menu"><X size={15} /></button></div>
-            {otherMembers.map((member) => {
-              const online = onlineSet.has(member)
-              return <button className="call-member" key={member} disabled={!online} onClick={() => { setCallMenu(null); void props.onCall(member, callMenu) }}><i className={online ? 'online' : ''} /><span><strong>{shortKey(member)}</strong><small>{online ? 'Online now' : 'Offline'}</small></span>{callMenu === 'video' ? <Video size={16} /> : <Phone size={16} />}</button>
+          <button className="header-call" disabled={props.callActive || liveState !== 'live' || onlinePeers.length === 0} onClick={() => beginCall('audio')} aria-label={directPeer ? 'Start voice call' : 'Start group audio meeting'} title={onlinePeers.length === 0 ? 'No other members are online' : directPeer ? 'Start voice call' : 'Start group audio meeting'}><Phone size={17} /></button>
+          <button className="header-call" disabled={props.callActive || liveState !== 'live' || onlinePeers.length === 0} onClick={() => beginCall('video')} aria-label={directPeer ? 'Start video call' : 'Start group video meeting'} title={onlinePeers.length === 0 ? 'No other members are online' : directPeer ? 'Start video call' : 'Start group video meeting'}><Video size={18} /></button>
+          {callMenu && <div className="call-member-menu" role="dialog" aria-label={`Choose participants for ${callMenu} meeting`}>
+            <div><span><strong>{callMenu === 'video' ? 'Video' : 'Audio'} meeting</strong><small>Select up to {MAX_MEETING_PARTICIPANTS - 1} people</small></span><button onClick={() => setCallMenu(null)} aria-label="Close call menu"><X size={15} /></button></div>
+            {otherMembers.filter((member) => onlineSet.has(member)).map((member) => {
+              const online = true
+              const selected = selectedCallMembers.includes(member)
+              const atCapacity = selectedCallMembers.length >= MAX_MEETING_PARTICIPANTS - 1
+              return <button className={`call-member ${selected ? 'selected' : ''}`} key={member} disabled={!online || (!selected && atCapacity)} onClick={() => setSelectedCallMembers((current) => selected ? current.filter((identityKey) => identityKey !== member) : [...current, member])}><i className={online ? 'online' : ''} /><span><strong>{identityName(props.identityProfiles, member)}</strong><small>{online ? (selected ? 'Included in meeting' : 'Online now') : 'Offline'}</small></span><b aria-hidden="true">{selected ? '✓' : ''}</b></button>
             })}
+            <button className="call-menu-start" disabled={selectedCallMembers.length === 0} onClick={() => { const selected = selectedCallMembers; setCallMenu(null); void props.onCall(selected, callMenu) }}>{callMenu === 'video' ? <Video size={16} /> : <Phone size={16} />} Start meeting <span>{selectedCallMembers.length + 1}</span></button>
           </div>}
         </div>
         <button className="header-details" onClick={props.onOpenDetails}><Info size={18} /><span>Details</span></button>
@@ -112,9 +118,9 @@ export function ConversationPane(props: Props) {
           const isEditing = editing === message.id
           return (
             <article className={`message-row ${mine ? 'mine' : ''}`} key={message.id}>
-              {!mine && <div className="message-sender-avatar">{message.sender.slice(2, 4).toUpperCase()}</div>}
+              {!mine && <div className="message-sender-avatar">{identityInitials(props.identityProfiles, message.sender)}</div>}
               <div className="message-stack">
-                <div className="message-meta"><span>{mine ? 'You' : shortKey(message.sender)}</span><time>{formatTime(message.createdAt)}</time>{message.edited && <em>edited</em>}</div>
+                <div className="message-meta"><span>{mine ? 'You' : identityName(props.identityProfiles, message.sender)}</span><time>{formatTime(message.createdAt)}</time>{message.edited && <em>edited</em>}</div>
                 <div className="message-bubble">
                   {isEditing ? <div className="edit-form"><textarea value={editBody} onChange={(event) => setEditBody(event.target.value)} autoFocus /><div><button className="text-button" onClick={() => setEditing(null)}>Cancel</button><button className="compact-button is-active" onClick={() => void props.onEdit(message.id, editBody).then(() => setEditing(null))}>Save</button></div></div> : <p>{message.body}</p>}
                   {message.attachments.map((attachment, index) => <button className="attachment-card" key={attachment.id} onClick={() => void props.onDownload(message, index)}><FileLock2 size={19} /><span><strong>{attachment.name}</strong><small>{Math.max(1, Math.round(attachment.size / 1024))} KB · encrypted</small></span><Download size={16} /></button>)}
@@ -134,8 +140,8 @@ export function ConversationPane(props: Props) {
 
       <footer className="composer-shell">
         <div className={`typing-indicator ${typingPeers.length > 0 ? 'visible' : ''}`} aria-live="polite">
-          <span className="typing-avatars">{typingPeers.slice(0, 3).map((peer) => <i key={peer.identityKey}>{peer.identityKey.slice(2, 4).toUpperCase()}</i>)}</span>
-          <span>{typingPeers.length === 1 ? `${shortKey(typingPeers[0].identityKey)} is typing` : typingPeers.length === 2 ? 'Two people are typing' : typingPeers.length > 2 ? `${typingPeers.length} people are typing` : ''}</span>
+          <span className="typing-avatars">{typingPeers.slice(0, 3).map((peer) => <i key={peer.identityKey}>{identityInitials(props.identityProfiles, peer.identityKey)}</i>)}</span>
+          <span>{typingPeers.length === 1 ? `${identityName(props.identityProfiles, typingPeers[0].identityKey)} is typing` : typingPeers.length === 2 ? 'Two people are typing' : typingPeers.length > 2 ? `${typingPeers.length} people are typing` : ''}</span>
           {typingPeers.length > 0 && <b><i /><i /><i /></b>}
         </div>
         {files.length > 0 && <div className="file-queue">{files.map((file) => <span key={`${file.name}:${file.size}`}><FileLock2 size={14} />{file.name}<button onClick={() => setFiles((current) => current.filter((item) => item !== file))}>×</button></span>)}</div>}

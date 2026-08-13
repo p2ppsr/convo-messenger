@@ -7,10 +7,11 @@ import { CallOverlay } from './v2/components/CallOverlay'
 import { applyConversationEvent } from './v2/domain/materialize'
 import type { ConversationEvent, ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from './v2/domain/types'
 import type { PendingInvite, PendingMembershipUpdate, RealtimePeer, TypingPeer } from './v2/realtime/messaging'
-import { idleCallSnapshot, type CallSnapshot } from './v2/realtime/calling'
+import { idleCallSnapshot, type CallSnapshot } from './v2/realtime/meetingCalling'
 import { AttachmentService } from './v2/services/attachments'
 import { ConversationService } from './v2/services/conversationService'
 import { useWalletSession } from './v2/hooks/useWalletSession'
+import { useIdentityProfiles } from './v2/hooks/useIdentityProfiles'
 
 const NewConversationDialog = lazy(async () => {
   const module = await import('./v2/components/NewConversationDialog')
@@ -61,6 +62,22 @@ function App() {
   const activeSecretRef = useRef(activeSecret)
   activeSecretRef.current = activeSecret
   const activeEpoch = activeSecret?.currentEpoch ?? null
+  const identityKeys = useMemo(() => {
+    const explicitRoster = detailsOpen
+      ? activeSecret?.epochs.find((epoch) => epoch.epoch === activeSecret.currentEpoch)?.members ?? []
+      : []
+    return [...new Set([
+      ...explicitRoster,
+      ...(view?.messages.map((message) => message.sender) ?? []),
+      ...onlinePeers.map((peer) => peer.identityKey),
+      ...typingPeers.map((peer) => peer.identityKey),
+      ...(call.peerIdentityKey ? [call.peerIdentityKey] : []),
+      ...call.participants.filter((participant) => participant.status === 'connecting' || participant.status === 'authenticating' || participant.status === 'active').map((participant) => participant.identityKey),
+      ...invites.map((invite) => invite.sender),
+      ...updates.map((update) => update.sender),
+    ])]
+  }, [activeSecret, call.participants, call.peerIdentityKey, detailsOpen, invites, onlinePeers, typingPeers, updates, view?.messages])
+  const identityProfiles = useIdentityProfiles(session.status === 'ready' ? session.client : undefined, identityKeys)
 
   const refreshIndex = useCallback(async () => {
     if (!service) return []
@@ -223,16 +240,17 @@ function App() {
           onlinePeers={onlinePeers}
           typingPeers={typingPeers}
           deliveryStates={deliveryStates}
+          identityProfiles={identityProfiles}
           callActive={call.status !== 'idle' && call.status !== 'ended' && call.status !== 'error'}
           onOpenRail={() => setRailOpen(true)}
           onOpenDetails={() => setDetailsOpen(true)}
           onLoadHistory={() => activeSecret ? runBusy(() => reloadActive(activeSecret, Number.MAX_SAFE_INTEGER)) : Promise.resolve()}
           onTyping={publishTyping}
-          onCall={async (peer, media) => {
+          onCall={async (peers, media) => {
             if (!service) return
             setError('')
-            try { await service.startCall(peer, media) }
-            catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not start the call'); throw reason }
+            try { await service.startCall(peers, media) }
+            catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not start the meeting'); throw reason }
           }}
           onSend={(body, files) => runBusy(async () => {
             if (!service || !activeSecret || !attachments) return
@@ -266,6 +284,7 @@ function App() {
 
       <CallOverlay
         call={call}
+        identityProfiles={identityProfiles}
         onAccept={async () => { if (service) await service.acceptCall() }}
         onDecline={async () => { if (service) await service.declineCall() }}
         onHangup={async () => { if (service) await service.hangupCall() }}
@@ -280,14 +299,14 @@ function App() {
         await refreshIndex(); setActiveId(created.conversationId); setNewOpen(false)
         if (created.pendingControl?.length) setError(`${created.pendingControl.length} encrypted invitation${created.pendingControl.length === 1 ? '' : 's'} will retry automatically.`)
       })} /></Suspense>}
-      <ControlInbox open={inboxOpen} busy={busy} invites={invites} updates={updates} onClose={() => setInboxOpen(false)} onAcceptInvite={(pending) => runBusy(async () => {
+      <ControlInbox open={inboxOpen} busy={busy} invites={invites} updates={updates} identityProfiles={identityProfiles} onClose={() => setInboxOpen(false)} onAcceptInvite={(pending) => runBusy(async () => {
         if (!service) return
         const accepted = await service.acceptInvite(pending); await refreshControl(); await refreshIndex(); setActiveId(accepted.conversationId)
       })} onDeclineInvite={(pending) => runBusy(async () => { if (service) { await service.declineInvite(pending); await refreshControl() } })} onAcceptUpdate={(pending) => runBusy(async () => {
         if (!service) return
         const accepted = await service.acceptMembershipUpdate(pending); await refreshControl(); await afterMutation(accepted)
       })} />
-      {activeSecret && detailsOpen && <Suspense fallback={<div className="modal-backdrop"><span className="spinner" /></div>}><ConversationDetails open busy={busy} identityKey={session.identityKey} wallet={session.client} secret={activeSecret} onlinePeers={onlinePeers} onClose={() => setDetailsOpen(false)} onSave={(title, members, admins) => runBusy(async () => {
+      {activeSecret && detailsOpen && <Suspense fallback={<div className="modal-backdrop"><span className="spinner" /></div>}><ConversationDetails open busy={busy} identityKey={session.identityKey} wallet={session.client} secret={activeSecret} onlinePeers={onlinePeers} identityProfiles={identityProfiles} onClose={() => setDetailsOpen(false)} onSave={(title, members, admins) => runBusy(async () => {
         if (!service) return
         let updated = activeSecret
         if (title.trim() !== activeSecret.title) updated = await service.rename(updated, title)

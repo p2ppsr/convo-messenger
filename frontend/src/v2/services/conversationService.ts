@@ -38,7 +38,8 @@ import {
   type TypingPeer,
   type CallMedia,
 } from '../realtime/messaging'
-import { AuthenticatedCallManager, defaultIceServers, type CallSnapshot } from '../realtime/calling'
+import { defaultIceServers } from '../realtime/calling'
+import { AuthenticatedCallManager, type CallSnapshot } from '../realtime/meetingCalling'
 import { safeWriteError } from '../storage/kvWriteRecovery'
 
 const defaultPreferences = () => ({ archived: false, favorite: false, muted: false, lastReadAt: 0 })
@@ -449,9 +450,9 @@ export class ConversationService {
     this.transport?.publishTyping(active)
   }
 
-  async startCall(peerIdentityKey: string, media: CallMedia): Promise<void> {
+  async startCall(peerIdentityKeys: string[], media: CallMedia): Promise<void> {
     if (!this.callManager) throw new Error('Open a conversation before starting a call')
-    await this.callManager.startCall(peerIdentityKey, media)
+    await this.callManager.startCall(peerIdentityKeys, media)
   }
 
   async acceptCall(): Promise<void> { await this.callManager?.accept() }

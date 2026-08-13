@@ -13,7 +13,8 @@ Convo is a wallet-native, end-to-end encrypted messenger for direct and group co
 - Attachments are encrypted locally before NanoStore upload; names, MIME types, digests, and handles remain inside encrypted message events.
 - Encrypted durable outboxes make event writes and exact invitation/membership envelopes retryable. GlobalKVStore double-spend conflicts use bounded readback/retry recovery, and live MessageBox delivery falls back to durable polling.
 - Recipient-specific encrypted MessageBox rooms carry immediate messages, presence, typing, and call signaling while GlobalKVStore remains the durable source of truth.
-- Voice and video use direct WebRTC media with managed TURN fallback. A BRC-103 peer handshake over an ordered data channel binds the DTLS session to the expected Metanet identity and exact conversation before local media tracks are enabled.
+- Voice and video meetings use a bounded WebRTC mesh (up to eight participants) with managed TURN fallback. Every peer association performs an independent BRC-103 handshake that binds DTLS to the expected Metanet identity, exact meeting, and exact conversation before its private outbound track clones are enabled.
+- Public identity certificates are resolved lazily and cached for visible participant display, with abbreviated identity keys used only when no public name is available. Incoming audio and video meetings use distinct locally synthesized Convo ringtones.
 
 The exact wire format and security assumptions are documented in [docs/protocol-v2.md](docs/protocol-v2.md) and [docs/threat-model.md](docs/threat-model.md).
 

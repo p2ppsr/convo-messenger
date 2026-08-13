@@ -1,22 +1,20 @@
 import { Inbox, LockKeyhole, ShieldCheck, UserRoundPlus, X } from 'lucide-react'
 import type { PendingInvite, PendingMembershipUpdate } from '../realtime/messaging'
+import { identityName, type IdentityProfileMap } from '../hooks/useIdentityProfiles'
 
 interface Props {
   open: boolean
   busy: boolean
   invites: PendingInvite[]
   updates: PendingMembershipUpdate[]
+  identityProfiles: IdentityProfileMap
   onClose: () => void
   onAcceptInvite: (invite: PendingInvite) => Promise<void>
   onDeclineInvite: (invite: PendingInvite) => Promise<void>
   onAcceptUpdate: (update: PendingMembershipUpdate) => Promise<void>
 }
 
-function shortKey(key: string): string {
-  return `${key.slice(0, 10)}…${key.slice(-8)}`
-}
-
-export function ControlInbox({ open, busy, invites, updates, onClose, onAcceptInvite, onDeclineInvite, onAcceptUpdate }: Props) {
+export function ControlInbox({ open, busy, invites, updates, identityProfiles, onClose, onAcceptInvite, onDeclineInvite, onAcceptUpdate }: Props) {
   if (!open) return null
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -30,7 +28,7 @@ export function ControlInbox({ open, busy, invites, updates, onClose, onAcceptIn
           {invites.map((pending) => (
             <article className="inbox-card" key={pending.messageId}>
               <div className="inbox-card-icon"><UserRoundPlus size={20} /></div>
-              <div className="inbox-card-copy"><h3>{pending.invite.title}</h3><p>From {shortKey(pending.sender)} · {pending.invite.members.length} members</p><span><LockKeyhole size={13} /> Epoch {pending.invite.epoch} key sealed with CurvePoint</span></div>
+              <div className="inbox-card-copy"><h3>{pending.invite.title}</h3><p>From {identityName(identityProfiles, pending.sender)} · {pending.invite.members.length} members</p><span><LockKeyhole size={13} /> Epoch {pending.invite.epoch} key sealed with CurvePoint</span></div>
               <div className="inbox-card-actions"><button className="secondary-button" disabled={busy} onClick={() => void onDeclineInvite(pending).catch(() => undefined)}>Decline</button><button className="primary-button" disabled={busy} onClick={() => void onAcceptInvite(pending).catch(() => undefined)}>Accept</button></div>
             </article>
           ))}

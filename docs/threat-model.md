@@ -24,7 +24,7 @@ Convo protects message content, attachment content and metadata, conversation ti
 - Concurrent GlobalKVStore spends are read back and retried without leaking transaction details into application logs.
 - A failed live socket does not lose durable messages because recipients poll and senders retain encrypted outbox state. Failed invitations and rotations retain their exact envelopes in wallet-private storage for retry.
 - A signaling-box observer cannot read call participants, media type, SDP, candidates, or call identifiers because targeted signals are epoch-encrypted and padded.
-- A signaling attacker cannot enable local camera or microphone media: tracks remain disabled until BRC-103 proves the expected member identity and binds the exact call and conversation over the WebRTC data channel.
+- A signaling attacker cannot enable local camera or microphone media: every peer receives its own cloned tracks, which remain disabled until BRC-103 proves that expected member identity and binds the exact meeting and conversation over the WebRTC data channel.
 - Long-term TURN credentials are never shipped to the browser. The broker requires wallet mutual authentication, applies bounded CORS and issuance limits, and returns expiring credentials from a dedicated secret-scoped runtime identity.
 
 ## Residual metadata and limitations
@@ -35,7 +35,7 @@ Current members necessarily know the current roster. A malicious current member 
 
 Availability depends on wallet, overlay, MessageBox, NanoStore, and network availability. Outbox retry and HTTP fallback improve recovery but cannot guarantee service during an indefinite outage. Local browser storage holds only encrypted outbox payloads, but deletion of browser and wallet-private state can make a conversation undiscoverable.
 
-Presence is intentionally visible to current conversation members while a conversation is open; it is not a global availability directory. MessageBox and the TURN provider can still observe network addresses, timing, traffic volume, and encrypted packet sizes. The broker can observe the requesting wallet identity and issuance timing. TURN credentials are bearer credentials until expiry, so broker authentication, rate limits, provider spend monitoring, and timely credential rotation remain operational controls.
+Presence is intentionally visible to current conversation members while a conversation is open; it is not a global availability directory. Public certificate names are display-only and never replace identity-key verification. MessageBox and the TURN provider can still observe network addresses, timing, traffic volume, and encrypted packet sizes. The broker can observe the requesting wallet identity and issuance timing. TURN credentials are bearer credentials until expiry, so broker authentication, rate limits, provider spend monitoring, and timely credential rotation remain operational controls. A full mesh is intentionally capped at eight participants to bound upload bandwidth, peer count, and TURN cost; larger meetings require a separately reviewed SFU design.
 
 Membership rotation establishes a serialization boundary. Events racing the administrator’s full-history snapshot may be omitted from the accepted closed epoch and should be resent in the new epoch. Convo blocks rotation when history is incomplete.
 
@@ -46,4 +46,4 @@ Newly added members deliberately receive no earlier keys or history. There is no
 - Keep `@bsv/sdk`, CurvePoint, MessageBox client, and CARS dependencies pinned through lockfiles and review security advisories before release.
 - Deploy from CI after `npm run verify`; do not reintroduce `tm_convo`, `ls_convo`, broad overlay scans, or public CurvePoint headers.
 - Treat a MessageBox outage as a degraded state, not permission to publish invitation metadata elsewhere.
-- Test membership removal, outbox recovery, websocket fallback, public-record leakage, pre-auth media suppression, exact call binding, and managed-relay failure for every protocol change.
+- Test membership removal, outbox recovery, websocket fallback, public-record leakage, deterministic mesh formation, per-peer pre-auth media suppression, exact meeting binding, participant departure, and managed-relay failure for every protocol change.
