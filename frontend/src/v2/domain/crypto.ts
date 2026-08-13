@@ -1,14 +1,14 @@
-import { Hash, SymmetricKey, Utils } from '@bsv/sdk'
+import { Hash, Random, SymmetricKey, Utils } from '@bsv/sdk'
 import type { ConversationEvent } from './types'
 
 const DOMAIN = 'convo:v2'
 
 export function generateRootKey(): string {
-  return Utils.toBase64(SymmetricKey.fromRandom().toArray())
+  return Utils.toBase64(Random(32))
 }
 
 export function randomId(): string {
-  return Utils.toHex(SymmetricKey.fromRandom().toArray())
+  return Utils.toHex(Random(32))
 }
 
 export function deriveKey(rootKey: string, purpose: string): number[] {
