@@ -16,8 +16,9 @@ afterEach(cleanup)
 describe('conversation rail', () => {
   it('presents private state and supports selecting and filtering', () => {
     const onSelect = vi.fn()
-    render(<ConversationRail conversations={[conversation]} identityKey={identity} identityProfiles={{}} activeId={null} pendingCount={2} loading={false} open onClose={() => undefined} onSelect={onSelect} onNew={() => undefined} onOpenInvites={() => undefined} onRestore={vi.fn(async () => undefined)} />)
+    render(<ConversationRail conversations={[conversation]} identityKey={identity} identityProfiles={{}} activeId={null} pendingCount={2} meetingRooms={{ [conversation.conversationId]: { callId: 'ab'.repeat(32), hostIdentityKey: identity, media: 'video', memberIdentityKeys: [identity], expiresAt: Date.now() + 60_000 } }} loading={false} open onClose={() => undefined} onSelect={onSelect} onNew={() => undefined} onOpenInvites={() => undefined} onRestore={vi.fn(async () => undefined)} />)
     expect(screen.getByText('Private design circle')).toBeInTheDocument()
+    expect(screen.getByTitle('Meeting room live')).toHaveTextContent('Live')
     expect(screen.getByText('2')).toBeInTheDocument()
     fireEvent.click(screen.getByText('Private design circle'))
     expect(onSelect).toHaveBeenCalledWith(conversation.conversationId)

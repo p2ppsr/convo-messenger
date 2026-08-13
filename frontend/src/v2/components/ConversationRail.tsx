@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Archive, ArchiveRestore, AtSign, BellOff, ChevronDown, Hash, Heart, Inbox, MessageCircle, Plus, Search, ShieldCheck, X } from 'lucide-react'
+import { Archive, ArchiveRestore, AtSign, BellOff, ChevronDown, Hash, Heart, Inbox, MessageCircle, Plus, Search, ShieldCheck, Video, X } from 'lucide-react'
 import type { ConversationSecret } from '../domain/types'
 import { conversationName, conversationSearchText, currentMembers, directPeer } from '../domain/presentation'
 import type { IdentityProfileMap } from '../hooks/useIdentityProfiles'
 import { IdentityAvatar } from './IdentityAvatar'
+import type { MeetingRoomSnapshot } from '../realtime/meetingCalling'
 
 interface Props {
   conversations: ConversationSecret[]
@@ -12,6 +13,7 @@ interface Props {
   identityProfiles: IdentityProfileMap
   activeId: string | null
   pendingCount: number
+  meetingRooms?: Record<string, MeetingRoomSnapshot>
   loading: boolean
   open: boolean
   onClose: () => void
@@ -26,7 +28,7 @@ function initials(title: string): string {
 }
 
 export function ConversationRail(props: Props) {
-  const { conversations, identityKey, identityProfiles, activeId, pendingCount, loading, open, onClose, onSelect, onNew, onOpenInvites } = props
+  const { conversations, identityKey, identityProfiles, activeId, pendingCount, meetingRooms = {}, loading, open, onClose, onSelect, onNew, onOpenInvites } = props
   const [query, setQuery] = useState('')
   const [showArchived, setShowArchived] = useState(false)
   const cleanQuery = query.trim().toLocaleLowerCase()
@@ -59,6 +61,7 @@ export function ConversationRail(props: Props) {
                 <span className="conversation-meta">{conversation.kind === 'direct' ? <><AtSign size={12} /> Direct message</> : <><ShieldCheck size={12} /> {members.length} private members</>}</span>
               </span>
               <span className="conversation-flags">
+                {meetingRooms[conversation.conversationId] && <span className="conversation-room-live" title="Meeting room live"><Video size={13} /> Live</span>}
                 {conversation.preferences.favorite && <Heart size={13} fill="currentColor" />}
                 {conversation.preferences.muted && <BellOff size={13} />}
               </span>

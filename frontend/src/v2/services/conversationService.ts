@@ -29,6 +29,7 @@ import {
   ConversationTransport,
   acknowledgeControl,
   listControlMessages,
+  listWorkspaceRoomUpdates,
   messageBoxFor,
   openEpochKey,
   sealEpochKey,
@@ -39,6 +40,7 @@ import {
   type RealtimePeer,
   type TypingPeer,
   type CallMedia,
+  type WorkspaceRoomUpdate,
 } from '../realtime/messaging'
 import { defaultIceServers } from '../realtime/calling'
 import { AuthenticatedCallManager, type CallSnapshot, type MeetingRoomSnapshot } from '../realtime/meetingCalling'
@@ -160,6 +162,10 @@ export class ConversationService {
     updates: PendingMembershipUpdate[]
   }> {
     return await listControlMessages(this.messageBox)
+  }
+
+  async discoverWorkspaceRooms(conversations: ConversationSecret[]): Promise<WorkspaceRoomUpdate[]> {
+    return await listWorkspaceRoomUpdates(this.messageBox, this.identityKey, conversations)
   }
 
   async create(title: string, participants: string[]): Promise<ConversationSecret> {
@@ -515,6 +521,8 @@ export class ConversationService {
     if (!this.callManager) throw new Error('Open a conversation before joining a meeting room')
     await this.callManager.joinRoom()
   }
+  discoverMeetingRoom(room: MeetingRoomSnapshot): void { this.callManager?.discoverRoom(room) }
+  async closeDiscoveredMeetingRoom(sender: string, callId: string): Promise<void> { await this.callManager?.closeDiscoveredRoom(sender, callId) }
   async declineCall(): Promise<void> { await this.callManager?.decline() }
   async hangupCall(): Promise<void> { await this.callManager?.hangup() }
   dismissCall(): void { this.callManager?.dismiss() }

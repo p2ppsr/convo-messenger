@@ -7,6 +7,7 @@ import type {
   ConversationEvent,
   ConversationEpoch,
   ConversationInvite,
+  ConversationSecret,
   EpochCommitment,
   MembershipUpdate,
 } from '../domain/types'
@@ -222,6 +223,20 @@ export type CallSignal =
 
 export type MeetingCallSignal = CallSignal
 
+export interface WorkspaceRoomUpdate {
+  conversationId: string
+  sender: string
+  sentAt: number
+  room?: {
+    callId: string
+    hostIdentityKey: string
+    media: CallMedia
+    memberIdentityKeys: string[]
+    expiresAt: number
+  }
+  closedCallId?: string
+}
+
 interface LiveEnvelope {
   type: 'convo-v2-live'
   v: 2
@@ -338,6 +353,66 @@ function isLivePayload(value: unknown, conversationId: string, epoch: Conversati
     && typeof payload.expiresAt === 'number' && Number.isFinite(payload.expiresAt)
   if (payload.kind === 'call') return isCallSignal(payload.call, recipient)
   return payload.kind === 'reconcile'
+}
+
+/**
+ * Discovers private meeting announcements outside the currently open chat.
+ * Every lookup uses that group's secret-derived recipient box; only validated
+ * room control messages are acknowledged, so ordinary realtime traffic remains
+ * queued for the conversation transport that owns it.
+ */
+export async function listWorkspaceRoomUpdates(
+  client: MessageBoxClient,
+  identityKey: string,
+  conversations: ConversationSecret[],
+): Promise<WorkspaceRoomUpdate[]> {
+  const updates: WorkspaceRoomUpdate[] = []
+  const groups = conversations.filter((conversation) => conversation.kind === 'group')
+  for (const conversation of groups) {
+    const epoch = conversation.epochs.find((candidate) => candidate.epoch === conversation.currentEpoch)
+    if (!epoch || !epoch.members.includes(identityKey)) continue
+    let messages: Awaited<ReturnType<MessageBoxClient['listMessages']>>
+    try {
+      messages = await client.listMessages({ messageBox: liveBoxName(epoch.rootKey, identityKey), host: MESSAGEBOX_HOST })
+    } catch {
+      continue
+    }
+    for (const message of messages) {
+      const body = typeof message.body === 'string' ? safeJson(message.body) : message.body
+      if (!isLiveEnvelope(body) || !epoch.members.includes(message.sender)) continue
+      let payload: LivePayload
+      try {
+        payload = decryptJson<LivePayload>(epoch.rootKey, `live:${body.envelopeId}`, body.ciphertext)
+      } catch {
+        continue
+      }
+      if (!isLivePayload(payload, conversation.conversationId, epoch, message.sender, identityKey)
+        || payload.kind !== 'call'
+        || !payload.call
+        || (payload.call.type !== 'room-open' && payload.call.type !== 'room-close')) continue
+      const age = Date.now() - payload.sentAt
+      if (age >= -300_000 && age < CALL_SIGNAL_MAX_AGE_MS) {
+        if (payload.call.type === 'room-open' && payload.call.expiresAt > Date.now()) {
+          updates.push({
+            conversationId: conversation.conversationId,
+            sender: message.sender,
+            sentAt: payload.sentAt,
+            room: {
+              callId: payload.call.callId,
+              hostIdentityKey: message.sender,
+              media: payload.call.media,
+              memberIdentityKeys: payload.call.participants,
+              expiresAt: payload.call.expiresAt,
+            },
+          })
+        } else if (payload.call.type === 'room-close') {
+          updates.push({ conversationId: conversation.conversationId, sender: message.sender, sentAt: payload.sentAt, closedCallId: payload.call.callId })
+        }
+      }
+      await client.acknowledgeMessage({ messageIds: [message.messageId], host: MESSAGEBOX_HOST }).catch(() => undefined)
+    }
+  }
+  return updates.sort((left, right) => left.sentAt - right.sentAt)
 }
 
 export class ConversationTransport {

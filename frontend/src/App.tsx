@@ -1,12 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, LockKeyhole, RefreshCw, ShieldCheck, WifiOff, X } from 'lucide-react'
+import { AlertTriangle, LockKeyhole, RefreshCw, ShieldCheck, Video, WifiOff, X } from 'lucide-react'
 import { ConversationPane } from './v2/components/ConversationPane'
 import { ConversationRail } from './v2/components/ConversationRail'
 import { ControlInbox } from './v2/components/ControlInbox'
 import { CallOverlay } from './v2/components/CallOverlay'
 import { applyConversationEvent } from './v2/domain/materialize'
+import { conversationName } from './v2/domain/presentation'
 import type { ConversationEvent, ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from './v2/domain/types'
-import type { PendingInvite, PendingMembershipUpdate, RealtimePeer, TypingPeer } from './v2/realtime/messaging'
+import type { PendingInvite, PendingMembershipUpdate, RealtimePeer, TypingPeer, WorkspaceRoomUpdate } from './v2/realtime/messaging'
 import { idleCallSnapshot, type CallSnapshot, type MeetingRoomSnapshot } from './v2/realtime/meetingCalling'
 import { AttachmentService } from './v2/services/attachments'
 import { ConversationService } from './v2/services/conversationService'
@@ -53,7 +54,10 @@ function App() {
   const [deliveryStates, setDeliveryStates] = useState<Record<string, MessageDeliveryState>>({})
   const [call, setCall] = useState<CallSnapshot>(idleCallSnapshot)
   const [meetingRoom, setMeetingRoom] = useState<MeetingRoomSnapshot | null>(null)
+  const [workspaceRooms, setWorkspaceRooms] = useState<Record<string, MeetingRoomSnapshot>>({})
   const liveEventsRef = useRef(new Map<string, ConversationEvent>())
+  const workspaceRoomsRef = useRef(workspaceRooms)
+  workspaceRoomsRef.current = workspaceRooms
 
   const service = useMemo(() => session.status === 'ready'
     ? new ConversationService(session.client, session.identityKey)
@@ -166,6 +170,44 @@ function App() {
   }, [refreshControl, refreshIndex, service])
 
   useEffect(() => {
+    if (!service || conversations.length === 0) return
+    let cancelled = false
+    let scanning = false
+    const applyUpdates = async (updates: WorkspaceRoomUpdate[]) => {
+      if (cancelled) return
+      const next = { ...workspaceRoomsRef.current }
+      const now = Date.now()
+      for (const [conversationId, room] of Object.entries(next)) {
+        if (room.expiresAt <= now) delete next[conversationId]
+      }
+      for (const update of updates) {
+        const current = next[update.conversationId]
+        if (update.room) {
+          if (!current || current.expiresAt <= now || current.callId === update.room.callId || update.room.callId < current.callId) {
+            next[update.conversationId] = update.room
+          }
+          if (update.conversationId === activeSecretRef.current?.conversationId) service.discoverMeetingRoom(update.room)
+        } else if (update.closedCallId && current?.callId === update.closedCallId && current.hostIdentityKey === update.sender) {
+          delete next[update.conversationId]
+          if (update.conversationId === activeSecretRef.current?.conversationId) await service.closeDiscoveredMeetingRoom(update.sender, update.closedCallId)
+        }
+      }
+      workspaceRoomsRef.current = next
+      setWorkspaceRooms(next)
+    }
+    const scan = async () => {
+      if (scanning || document.visibilityState === 'hidden') return
+      scanning = true
+      try { await applyUpdates(await service.discoverWorkspaceRooms(conversations)) } finally { scanning = false }
+    }
+    const visible = () => { if (document.visibilityState === 'visible') void scan() }
+    void scan()
+    const timer = setInterval(() => { void scan() }, 10_000)
+    document.addEventListener('visibilitychange', visible)
+    return () => { cancelled = true; clearInterval(timer); document.removeEventListener('visibilitychange', visible) }
+  }, [conversations, service])
+
+  useEffect(() => {
     const sessionSecret = activeSecretRef.current
     if (!service || !activeId || activeEpoch === null || !sessionSecret || sessionSecret.conversationId !== activeId) {
       liveEventsRef.current.clear()
@@ -205,6 +247,8 @@ function App() {
         onCallChange: (nextCall) => { if (!cancelled) setCall(nextCall) },
         onRoomChange: (nextRoom) => { if (!cancelled) setMeetingRoom(nextRoom) },
       })
+      const discoveredRoom = workspaceRoomsRef.current[sessionSecret.conversationId]
+      if (discoveredRoom && discoveredRoom.expiresAt > Date.now()) service.discoverMeetingRoom(discoveredRoom)
     }).catch((reason: unknown) => {
       if (!cancelled) { setError(reason instanceof Error ? reason.message : 'Could not open this conversation'); setLoading(false); setLiveState('fallback') }
     })
@@ -229,12 +273,18 @@ function App() {
     if (target) await reloadActive(target)
   }
 
+  const workspaceRoomEntry = Object.entries(workspaceRooms).find(([conversationId, room]) => conversationId !== activeId
+    && room.expiresAt > Date.now()
+    && conversations.some((conversation) => conversation.conversationId === conversationId))
+  const workspaceRoomConversation = workspaceRoomEntry ? conversations.find((conversation) => conversation.conversationId === workspaceRoomEntry[0]) : undefined
+
   return (
     <div className="app-shell">
       {!online && <div className="offline-banner"><WifiOff size={15} /> Offline. New messages remain encrypted in the durable outbox until connectivity returns.</div>}
       {error && <div className="error-banner" role="alert"><AlertTriangle size={16} /><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss"><X size={16} /></button></div>}
+      {workspaceRoomEntry && workspaceRoomConversation && <button className="workspace-room-alert" onClick={() => setActiveId(workspaceRoomEntry[0])}><span className="meeting-room-pulse"><Video size={16} /></span><span><strong>{conversationName(workspaceRoomConversation, session.identityKey, identityProfiles)}</strong><small>{workspaceRoomEntry[1].media === 'video' ? 'Video' : 'Audio'} room is live</small></span><b>View room</b></button>}
       <div className="app-grid">
-        <ConversationRail conversations={conversations} identityKey={session.identityKey} identityProfiles={identityProfiles} activeId={activeId} pendingCount={invites.length + updates.length} loading={loading && conversations.length === 0} open={railOpen} onClose={() => setRailOpen(false)} onSelect={setActiveId} onNew={() => setNewOpen(true)} onOpenInvites={() => setInboxOpen(true)} onRestore={(conversation) => runBusy(async () => { if (service) { await service.setPreferences(conversation, { archived: false }); await refreshIndex() } })} />
+        <ConversationRail conversations={conversations} identityKey={session.identityKey} identityProfiles={identityProfiles} activeId={activeId} pendingCount={invites.length + updates.length} meetingRooms={workspaceRooms} loading={loading && conversations.length === 0} open={railOpen} onClose={() => setRailOpen(false)} onSelect={setActiveId} onNew={() => setNewOpen(true)} onOpenInvites={() => setInboxOpen(true)} onRestore={(conversation) => runBusy(async () => { if (service) { await service.setPreferences(conversation, { archived: false }); await refreshIndex() } })} />
         {railOpen && <button className="rail-scrim" aria-label="Close conversations" onClick={() => setRailOpen(false)} />}
         <ConversationPane
           identityKey={session.identityKey}

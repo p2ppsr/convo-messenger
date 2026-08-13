@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { generateRootKey, randomId } from '../domain/crypto'
-import type { ConversationEpoch, MessageEvent } from '../domain/types'
-import { ConversationTransport, type CallSignal, type RealtimePeer, type TypingPeer } from './messaging'
+import type { ConversationEpoch, ConversationSecret, MessageEvent } from '../domain/types'
+import { ConversationTransport, listWorkspaceRoomUpdates, type CallSignal, type RealtimePeer, type TypingPeer } from './messaging'
 
 interface LiveOptions {
   messageBox: string
@@ -11,6 +11,7 @@ interface LiveOptions {
 class FakeMessageBox {
   static rooms = new Map<string, LiveOptions['onMessage']>()
   static bodies: unknown[] = []
+  static inboxes = new Map<string, Array<{ messageId: string; sender: string; body: unknown }>>()
   static nextMessage = 0
   ownRoom: string | null = null
   disconnectHandler: (() => void) | null = null
@@ -25,17 +26,24 @@ class FakeMessageBox {
 
   async sendLiveMessage(request: { messageBox: string; body: unknown }) {
     FakeMessageBox.bodies.push(request.body)
-    const listener = FakeMessageBox.rooms.get(request.messageBox)
     FakeMessageBox.nextMessage += 1
-    listener?.({
+    const message = {
       messageId: `message-${FakeMessageBox.nextMessage}`,
       sender: this.identityKey,
       body: request.body,
-    })
+    }
+    const inbox = FakeMessageBox.inboxes.get(request.messageBox) ?? []
+    inbox.push(message)
+    FakeMessageBox.inboxes.set(request.messageBox, inbox)
+    FakeMessageBox.rooms.get(request.messageBox)?.(message)
   }
 
-  async listMessages() { return [] }
-  async acknowledgeMessage() {}
+  async listMessages(request: { messageBox: string }) { return [...(FakeMessageBox.inboxes.get(request.messageBox) ?? [])] }
+  async acknowledgeMessage(request: { messageIds: string[] }) {
+    for (const [room, messages] of FakeMessageBox.inboxes) {
+      FakeMessageBox.inboxes.set(room, messages.filter((message) => !request.messageIds.includes(message.messageId)))
+    }
+  }
   async leaveRoom(room: string) { if (this.ownRoom === room) FakeMessageBox.rooms.delete(room) }
   async disconnectWebSocket() {}
 }
@@ -82,6 +90,7 @@ function createTransport(
 afterEach(() => {
   FakeMessageBox.rooms.clear()
   FakeMessageBox.bodies = []
+  FakeMessageBox.inboxes.clear()
   FakeMessageBox.nextMessage = 0
   vi.useRealTimers()
 })
@@ -183,6 +192,48 @@ describe('private realtime conversation transport', () => {
     expect(wire).not.toContain(bob)
     await aliceTransport.stop()
     await bobTransport.stop()
+  })
+
+  it('discovers an encrypted group room without opening that conversation', async () => {
+    const sharedEpoch = epoch()
+    const aliceTransport = createTransport(alice, sharedEpoch)
+    await aliceTransport.start()
+    FakeMessageBox.bodies = []
+    const callId = 'ef'.repeat(32)
+    await aliceTransport.publishCallSignal(bob, {
+      v: 2,
+      type: 'room-open',
+      callId,
+      to: bob,
+      media: 'video',
+      participants: [alice, bob],
+      expiresAt: Date.now() + 60_000,
+    })
+    const secret: ConversationSecret = {
+      v: 2,
+      conversationId,
+      kind: 'group',
+      title: 'Private room',
+      currentEpoch: 1,
+      epochs: [sharedEpoch],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      preferences: { archived: false, favorite: false, muted: false, lastReadAt: 0 },
+    }
+
+    const updates = await listWorkspaceRoomUpdates(new FakeMessageBox(bob) as never, bob, [secret])
+
+    expect(updates).toEqual([expect.objectContaining({
+      conversationId,
+      sender: alice,
+      room: expect.objectContaining({ callId, hostIdentityKey: alice, media: 'video' }),
+    })])
+    const wire = JSON.stringify(FakeMessageBox.bodies.at(-1))
+    expect(wire).not.toContain(conversationId)
+    expect(wire).not.toContain(callId)
+    expect(wire).not.toContain(alice)
+    expect(wire).not.toContain(bob)
+    await aliceTransport.stop()
   })
 
   it('recreates and rejoins a fresh socket after disconnect', async () => {

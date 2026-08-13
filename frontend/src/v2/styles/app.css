@@ -326,6 +326,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .conversation-preferences button:hover, .conversation-preferences button.is-active { color: var(--accent); border-color: rgba(99, 228, 173, .23); background: var(--accent-soft); }
 .conversation-preferences button:disabled { opacity: .45; cursor: wait; }
 .conversation-preferences button > svg { flex: 0 0 auto; }
+.conversation-room-live { display: inline-flex; align-items: center; gap: 3px; padding: 3px 5px; border-radius: 7px; color: #07110d; background: var(--accent); font-size: 7px; font-weight: 850; text-transform: uppercase; }
 .conversation-preferences span, .conversation-preferences strong, .conversation-preferences small { min-width: 0; display: block; }
 .conversation-preferences strong { font-size: 10px; }
 .conversation-preferences small { margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 8px; font-weight: 500; }
@@ -411,6 +412,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .error-banner { top: 58px; border-color: rgba(255, 140, 134, .24); color: #ffc4c0; background: rgba(54, 19, 17, .95); }
 .error-banner span { min-width: 0; flex: 1; }
 .error-banner button { display: grid; place-items: center; padding: 2px; border: 0; color: inherit; background: transparent; cursor: pointer; }
+.workspace-room-alert { position: fixed; z-index: 95; top: 14px; right: 18px; min-height: 52px; display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 10px; border: 1px solid rgba(99, 228, 173, .28); border-radius: 16px; color: var(--text); background: rgba(10, 25, 19, .96); box-shadow: 0 16px 46px rgba(0, 0, 0, .42); cursor: pointer; backdrop-filter: blur(16px); }
+.workspace-room-alert > span:nth-child(2) { min-width: 120px; text-align: left; }
+.workspace-room-alert strong, .workspace-room-alert small { display: block; }
+.workspace-room-alert strong { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.workspace-room-alert small { margin-top: 3px; color: var(--muted); font-size: 8px; }
+.workspace-room-alert b { padding: 8px 9px; border-radius: 10px; color: #07110d; background: var(--accent); font-size: 8px; }
 
 .wallet-gate { position: relative; height: 100%; display: grid; place-items: center; overflow: hidden; padding: 22px; background: radial-gradient(circle at 50% 0, #1c4938 0, #09100e 42%); }
 .ambient-orb { position: absolute; border-radius: 50%; filter: blur(2px); opacity: .5; }

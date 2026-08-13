@@ -139,6 +139,22 @@ export class AuthenticatedCallManager {
 
   current(): CallSnapshot { return this.snapshot }
 
+  discoverRoom(room: MeetingRoomSnapshot): void {
+    this.handleRoomOpen(room.hostIdentityKey, {
+      v: 2,
+      type: 'room-open',
+      callId: room.callId,
+      to: this.options.identityKey,
+      media: room.media,
+      participants: room.memberIdentityKeys,
+      expiresAt: room.expiresAt,
+    })
+  }
+
+  async closeDiscoveredRoom(sender: string, callId: string): Promise<void> {
+    await this.handleRoomClose(sender, callId)
+  }
+
   async startCall(peerIdentityKeys: string | string[], media: CallMedia): Promise<void> {
     if (this.stopped) throw new Error('The realtime meeting session is closed')
     if (this.call) throw new Error('Another meeting is already in progress')
