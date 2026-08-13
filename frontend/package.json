@@ -58,8 +58,6 @@
     ]
   },
   "overrides": {
-    "curvepoint": {
-      "@bsv/sdk": "2.2.18"
-    }
+    "@bsv/sdk": "$@bsv/sdk"
   }
 }
