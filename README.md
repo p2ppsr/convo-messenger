@@ -12,6 +12,8 @@ Convo is a wallet-native, end-to-end encrypted messenger for direct and group co
 - Membership changes rotate the root key and commit the prior epoch event set. Removed members cannot locate new pages, decrypt the new epoch, or inject altered events into the accepted historical view.
 - Attachments are encrypted locally before NanoStore upload; names, MIME types, digests, and handles remain inside encrypted message events.
 - Encrypted durable outboxes make event writes and exact invitation/membership envelopes retryable. GlobalKVStore double-spend conflicts use bounded readback/retry recovery, and live MessageBox delivery falls back to durable polling.
+- Recipient-specific encrypted MessageBox rooms carry immediate messages, presence, typing, and call signaling while GlobalKVStore remains the durable source of truth.
+- Voice and video use direct WebRTC media with managed TURN fallback. A BRC-103 peer handshake over an ordered data channel binds the DTLS session to the expected Metanet identity and exact conversation before local media tracks are enabled.
 
 The exact wire format and security assumptions are documented in [docs/protocol-v2.md](docs/protocol-v2.md) and [docs/threat-model.md](docs/threat-model.md).
 
@@ -31,6 +33,8 @@ The frontend runs at `http://localhost:5173`. Unit and integration tests use in-
 ## Deployment
 
 `deployment-info.json` defines a frontend-only CARS project. Pushes to `master` run lint, all tests, a production build, CARS diagnostics, balance checks, and a release. The retired `tm_convo` and `ls_convo` services are not part of the artifact.
+
+The app-specific `rtc-broker` is deployed separately as a single-instance managed service. It requires BRC-103 AuthFetch, returns only short-lived managed ICE credentials, and never receives call media, SDP, conversation identifiers, or group membership. Twilio credentials and the broker wallet key must remain runtime secrets.
 
 ## License
 

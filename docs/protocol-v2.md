@@ -60,7 +60,15 @@ Before a global write, the event is purpose-encrypted in a local durable outbox.
 
 Writes are serialized per conversation/epoch/writer using the Web Locks API with an in-process fallback. On a wallet `WERR_REVIEW_ACTIONS` double-spend, Convo reads the current encrypted value. It accepts a matching winner or retries with bounded delay; logs contain only stable error/status names, never competing transactions.
 
-MessageBox live notifications contain only conversation/epoch/event references inside recipient-specific encrypted boxes. The overlay remains authoritative. If the socket is unavailable, Convo drains the box over HTTP every 30 seconds.
+MessageBox live notifications carry complete conversation events, presence, typing, reconciliation requests, and targeted call signaling inside recipient-specific encrypted boxes. The outer envelope is padded and exposes none of the conversation ID, epoch, event, call metadata, SDP, sender roster, or recipient roster. GlobalKVStore remains authoritative. If the socket is unavailable, Convo drains the box over HTTP every 30 seconds and reconciles durable state independently.
+
+## Realtime calls
+
+Call offer, answer, ICE candidate, ringing, decline, busy, and hang-up signals use the same encrypted recipient-specific live transport. Signal validation binds the exact recipient, active membership epoch, call ID, bounded expiry, and payload shape before WebRTC sees the data.
+
+Each call creates one ordered WebRTC data channel implementing the SDK `Transport` contract. A BRC-103 `Peer` handshake then proves the expected Metanet identity and exchanges signed control messages containing the exact call ID and conversation ID. Microphone and camera tracks are attached disabled and remain disabled until that handshake succeeds. DTLS-SRTP protects media end to end; TURN relays encrypted packets only.
+
+The frontend requests short-lived managed STUN/TURN configuration through BRC-103 AuthFetch. The credential broker rate-limits authenticated identities, permits only configured browser origins, returns no provider errors or long-term secret, and does not receive signaling or media. Direct Cloudflare and Google STUN remain a degraded fallback. One ICE restart is allowed after a ten-second disconnect grace, with fresh managed credentials fetched first.
 
 ## Attachments
 
