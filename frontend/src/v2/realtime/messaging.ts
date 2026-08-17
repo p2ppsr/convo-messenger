@@ -190,8 +190,8 @@ function validCommitment(value: unknown): value is EpochCommitment {
     && typeof commitment.historyDigest === 'string' && /^[0-9a-f]{64}$/.test(commitment.historyDigest)
 }
 
-const PRESENCE_INTERVAL_MS = 30_000
-const PRESENCE_TIMEOUT_MS = 95_000
+const PRESENCE_INTERVAL_MS = 60_000
+const PRESENCE_TIMEOUT_MS = 190_000
 const RECONCILE_INTERVAL_MS = 60_000
 const INBOX_DRAIN_INTERVAL_MS = 30_000
 const TYPING_REFRESH_MS = 2_000
@@ -365,9 +365,12 @@ export async function listWorkspaceRoomUpdates(
   client: MessageBoxClient,
   identityKey: string,
   conversations: ConversationSecret[],
+  excludedConversationId?: string,
 ): Promise<WorkspaceRoomUpdate[]> {
   const updates: WorkspaceRoomUpdate[] = []
-  const groups = conversations.filter((conversation) => conversation.kind === 'group')
+  const groups = conversations.filter((conversation) => (
+    conversation.kind === 'group' && conversation.conversationId !== excludedConversationId
+  ))
   for (const conversation of groups) {
     const epoch = conversation.epochs.find((candidate) => candidate.epoch === conversation.currentEpoch)
     if (!epoch || !epoch.members.includes(identityKey)) continue
@@ -460,7 +463,7 @@ export class ConversationTransport {
       void this.options.onSyncRequested()
     }, RECONCILE_INTERVAL_MS)
     this.presenceTimer = setInterval(() => {
-      void this.publishPresence('ping')
+      if (document.visibilityState !== 'hidden') void this.publishPresence('ping')
       this.prunePeers()
     }, PRESENCE_INTERVAL_MS)
     this.typingPruneTimer = setInterval(() => this.pruneTyping(), 1_000)
@@ -669,7 +672,14 @@ export class ConversationTransport {
       const client = this.client
       if (client === null || this.stopped) return
       try {
-        const send = async () => await client.sendLiveMessage({ recipient, messageBox: this.boxFor(recipient), body: envelope }, MESSAGEBOX_HOST)
+        // The realtime envelope is already padded and encrypted with the epoch
+        // root key. Avoid a second wallet encryption for every recipient.
+        const send = async () => await client.sendLiveMessage({
+          recipient,
+          messageBox: this.boxFor(recipient),
+          body: envelope,
+          skipEncryption: true,
+        }, MESSAGEBOX_HOST)
         if (retryRateLimit) await sendControlWithBackoff(async () => { await send() })
         else await pacedMessageBoxSend(send)
         delivered = true

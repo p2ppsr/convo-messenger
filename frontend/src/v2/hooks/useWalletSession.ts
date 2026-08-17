@@ -8,6 +8,17 @@ export type WalletSession =
 
 const CONNECT_TIMEOUT_MS = 15_000
 const PROBE_TIMEOUT_MS = 3_000
+const BRIDGE_PROBE_TIMEOUT_MS = 3_000
+const XDM_PROBE_TIMEOUT_MS = 750
+
+type WalletProbe<T> = {
+  create: () => T
+  timeoutMs: number
+}
+
+type LocalNetworkRequestInit = RequestInit & {
+  targetAddressSpace: 'local'
+}
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -23,35 +34,50 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
+export async function connectFirstAvailableWallet<T extends { getVersion: () => Promise<unknown> }>(candidates: Array<WalletProbe<T>>): Promise<T> {
+  for (const candidate of candidates) {
+    try {
+      const client = candidate.create()
+      await withTimeout(client.getVersion(), candidate.timeoutMs)
+      return client
+    } catch {
+      // Wallet substrates are fallbacks. Continue in priority order.
+    }
+  }
+  throw new Error('WALLET_UNAVAILABLE')
+}
+
+export function createLocalNetworkFetch(baseFetch: typeof fetch): typeof fetch {
+  return ((input: RequestInfo | URL, init?: RequestInit) => baseFetch(input, {
+    ...init,
+    targetAddressSpace: 'local',
+  } as LocalNetworkRequestInit)) as typeof fetch
+}
+
 async function connectAvailableWallet(): Promise<WalletClient> {
   const boundFetch = window.fetch.bind(window)
-  const candidates: Array<{ name: string; create: () => WalletClient }> = [
+  const localNetworkFetch = createLocalNetworkFetch(boundFetch)
+  // Convo targets the local Metanet Client first; stop discovery as soon as its
+  // binary Cicada substrate answers so lower-priority transports are untouched.
+  const candidates: Array<WalletProbe<WalletClient>> = [
+    {
+      create: () => new WalletClient(new WalletWireTransceiver(new HTTPWalletWire(undefined, undefined, localNetworkFetch))),
+      timeoutMs: PROBE_TIMEOUT_MS,
+    },
     ...(typeof (window as unknown as { CWI?: unknown }).CWI === 'object'
-      ? [{ name: 'window.CWI', create: () => new WalletClient('window.CWI') }]
+      ? [{ create: () => new WalletClient('window.CWI'), timeoutMs: BRIDGE_PROBE_TIMEOUT_MS }]
       : []),
     {
-      name: 'Cicada',
-      create: () => new WalletClient(new WalletWireTransceiver(new HTTPWalletWire(undefined, undefined, boundFetch))),
+      create: () => new WalletClient(new HTTPWalletJSON(undefined, 'https://localhost:2121', localNetworkFetch)),
+      timeoutMs: PROBE_TIMEOUT_MS,
     },
     {
-      name: 'secure-json-api',
-      create: () => new WalletClient(new HTTPWalletJSON(undefined, 'https://localhost:2121', boundFetch)),
+      create: () => new WalletClient(new HTTPWalletJSON(undefined, 'http://localhost:3321', localNetworkFetch)),
+      timeoutMs: PROBE_TIMEOUT_MS,
     },
-    {
-      name: 'json-api',
-      create: () => new WalletClient(new HTTPWalletJSON(undefined, 'http://localhost:3321', boundFetch)),
-    },
-    { name: 'XDM', create: () => new WalletClient('XDM') },
+    { create: () => new WalletClient('XDM'), timeoutMs: XDM_PROBE_TIMEOUT_MS },
   ]
-  try {
-    return await Promise.any(candidates.map(async (candidate) => {
-      const client = candidate.create()
-      await withTimeout(client.getVersion(), PROBE_TIMEOUT_MS)
-      return client
-    }))
-  } catch {
-    throw new Error('WALLET_UNAVAILABLE')
-  }
+  return await connectFirstAvailableWallet(candidates)
 }
 
 export function useWalletSession(): { session: WalletSession; retry: () => void } {

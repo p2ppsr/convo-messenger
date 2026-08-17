@@ -20,6 +20,8 @@ describe('conversation rail', () => {
     expect(screen.getByText('Private design circle')).toBeInTheDocument()
     expect(screen.getByTitle('Meeting room live')).toHaveTextContent('Live')
     expect(screen.getByText('2')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Search people and groups')).toHaveAttribute('id', 'conversation-search')
+    expect(screen.getByPlaceholderText('Search people and groups')).toHaveAttribute('name', 'conversation-search')
     fireEvent.click(screen.getByText('Private design circle'))
     expect(onSelect).toHaveBeenCalledWith(conversation.conversationId)
     fireEvent.change(screen.getByPlaceholderText('Search people and groups'), { target: { value: 'missing' } })

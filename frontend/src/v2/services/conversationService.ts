@@ -164,8 +164,8 @@ export class ConversationService {
     return await listControlMessages(this.messageBox)
   }
 
-  async discoverWorkspaceRooms(conversations: ConversationSecret[]): Promise<WorkspaceRoomUpdate[]> {
-    return await listWorkspaceRoomUpdates(this.messageBox, this.identityKey, conversations)
+  async discoverWorkspaceRooms(conversations: ConversationSecret[], excludedConversationId?: string): Promise<WorkspaceRoomUpdate[]> {
+    return await listWorkspaceRoomUpdates(this.messageBox, this.identityKey, conversations, excludedConversationId)
   }
 
   async create(title: string, participants: string[]): Promise<ConversationSecret> {

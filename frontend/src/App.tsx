@@ -23,6 +23,8 @@ const ConversationDetails = lazy(async () => {
   return { default: module.ConversationDetails }
 })
 
+const WORKSPACE_ROOM_SCAN_INTERVAL_MS = 30_000
+
 function sameMembers(left: string[], right: string[]): boolean {
   return left.length === right.length && [...left].sort().every((value, index) => value === [...right].sort()[index])
 }
@@ -198,11 +200,11 @@ function App() {
     const scan = async () => {
       if (scanning || document.visibilityState === 'hidden') return
       scanning = true
-      try { await applyUpdates(await service.discoverWorkspaceRooms(conversations)) } finally { scanning = false }
+      try { await applyUpdates(await service.discoverWorkspaceRooms(conversations, activeSecretRef.current?.conversationId)) } finally { scanning = false }
     }
     const visible = () => { if (document.visibilityState === 'visible') void scan() }
     void scan()
-    const timer = setInterval(() => { void scan() }, 10_000)
+    const timer = setInterval(() => { void scan() }, WORKSPACE_ROOM_SCAN_INTERVAL_MS)
     document.addEventListener('visibilitychange', visible)
     return () => { cancelled = true; clearInterval(timer); document.removeEventListener('visibilitychange', visible) }
   }, [conversations, service])

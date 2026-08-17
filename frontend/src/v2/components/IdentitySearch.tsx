@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { IdentityClient, type WalletInterface } from '@bsv/sdk'
 import { Search, ShieldCheck } from 'lucide-react'
 
@@ -15,6 +15,7 @@ interface Props {
 const IDENTITY_KEY = /^(02|03)[0-9a-f]{64}$/i
 
 export function IdentitySearch({ wallet, onSelect }: Props) {
+  const inputId = useId()
   const client = useMemo(() => new IdentityClient(wallet), [wallet])
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<IdentityChoice[]>([])
@@ -46,7 +47,7 @@ export function IdentitySearch({ wallet, onSelect }: Props) {
 
   return (
     <div className="identity-search">
-      <label><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name or identity public key" autoComplete="off" /></label>
+      <label htmlFor={inputId}><Search size={17} /><input id={inputId} name="identity-search" aria-label="Search identities" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name or identity public key" autoComplete="off" /></label>
       {loading && <div className="identity-search-state"><span className="mini-spinner" /> Searching certified identities…</div>}
       {error && <p className="identity-search-error">{error}</p>}
       {results.length > 0 && <div className="identity-results">
