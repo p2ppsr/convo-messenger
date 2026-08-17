@@ -87,9 +87,9 @@ export function ConversationRail(props: Props) {
         {pendingCount > 0 && <b>{pendingCount}</b>}
       </button>
 
-      <label className="rail-search">
+      <label className="rail-search" htmlFor="conversation-search">
         <Search size={17} />
-        <input type="search" value={query} placeholder={showArchived ? 'Search archived chats' : 'Search people and groups'} onChange={(event) => setQuery(event.target.value)} />
+        <input id="conversation-search" name="conversation-search" type="search" value={query} placeholder={showArchived ? 'Search archived chats' : 'Search people and groups'} onChange={(event) => setQuery(event.target.value)} />
         {query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={14} /></button>}
       </label>
 

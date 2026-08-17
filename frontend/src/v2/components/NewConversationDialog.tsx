@@ -40,8 +40,8 @@ export function NewConversationDialog({ open, busy, wallet, onClose, onCreate }:
           <button className="icon-button" onClick={onClose} aria-label="Close"><X size={20} /></button>
         </div>
         <div className="modal-content">
-          <label className="field-label">Conversation name <span>optional for direct messages</span></label>
-          <input className="text-field" value={title} maxLength={100} onChange={(event) => setTitle(event.target.value)} placeholder="Design circle" autoFocus />
+          <label className="field-label" htmlFor="new-conversation-name">Conversation name <span>optional for direct messages</span></label>
+          <input id="new-conversation-name" name="conversation-name" className="text-field" value={title} maxLength={100} onChange={(event) => setTitle(event.target.value)} placeholder="Design circle" autoFocus />
           <label className="field-label">Add people</label>
           <div className="identity-search-shell"><IdentitySearch wallet={wallet} onSelect={addMember} /></div>
           <div className="selected-members">

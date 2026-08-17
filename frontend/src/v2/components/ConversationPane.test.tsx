@@ -158,6 +158,8 @@ describe('ConversationPane realtime experience', () => {
     expect(screen.getByText('Alice Admin')).toBeInTheDocument()
     expect(screen.getByText('Mentioned you')).toBeInTheDocument()
     const composer = screen.getByPlaceholderText(/Message Bob Builder/)
+    expect(composer).toHaveAttribute('id', 'message-composer')
+    expect(composer).toHaveAttribute('name', 'message')
     fireEvent.change(composer, { target: { value: '@<bo', selectionStart: 4 } })
     expect(screen.getByRole('listbox', { name: 'Mention a conversation member' })).toBeInTheDocument()
     fireEvent.mouseDown(screen.getByRole('option', { name: /Bob Builder/ }))
@@ -166,7 +168,10 @@ describe('ConversationPane realtime experience', () => {
     expect(onSend).toHaveBeenCalledWith(`@<${bob}> `, [])
 
     fireEvent.click(screen.getByRole('button', { name: 'Search this conversation' }))
-    fireEvent.change(screen.getByPlaceholderText('Search decrypted messages'), { target: { value: 'Alice Admin' } })
+    const messageSearch = screen.getByPlaceholderText('Search decrypted messages')
+    expect(messageSearch).toHaveAttribute('id', 'message-search')
+    expect(messageSearch).toHaveAttribute('name', 'message-search')
+    fireEvent.change(messageSearch, { target: { value: 'Alice Admin' } })
     expect(screen.getByText('1 result')).toBeInTheDocument()
   })
 
