@@ -57,15 +57,16 @@ export function createLocalNetworkFetch(baseFetch: typeof fetch): typeof fetch {
 async function connectAvailableWallet(): Promise<WalletClient> {
   const boundFetch = window.fetch.bind(window)
   const localNetworkFetch = createLocalNetworkFetch(boundFetch)
+  // Convo targets the local Metanet Client first; stop discovery as soon as its
+  // binary Cicada substrate answers so lower-priority transports are untouched.
   const candidates: Array<WalletProbe<WalletClient>> = [
-    ...(typeof (window as unknown as { CWI?: unknown }).CWI === 'object'
-      ? [{ create: () => new WalletClient('window.CWI'), timeoutMs: BRIDGE_PROBE_TIMEOUT_MS }]
-      : []),
-    { create: () => new WalletClient('XDM'), timeoutMs: XDM_PROBE_TIMEOUT_MS },
     {
       create: () => new WalletClient(new WalletWireTransceiver(new HTTPWalletWire(undefined, undefined, localNetworkFetch))),
       timeoutMs: PROBE_TIMEOUT_MS,
     },
+    ...(typeof (window as unknown as { CWI?: unknown }).CWI === 'object'
+      ? [{ create: () => new WalletClient('window.CWI'), timeoutMs: BRIDGE_PROBE_TIMEOUT_MS }]
+      : []),
     {
       create: () => new WalletClient(new HTTPWalletJSON(undefined, 'https://localhost:2121', localNetworkFetch)),
       timeoutMs: PROBE_TIMEOUT_MS,
@@ -74,6 +75,7 @@ async function connectAvailableWallet(): Promise<WalletClient> {
       create: () => new WalletClient(new HTTPWalletJSON(undefined, 'http://localhost:3321', localNetworkFetch)),
       timeoutMs: PROBE_TIMEOUT_MS,
     },
+    { create: () => new WalletClient('XDM'), timeoutMs: XDM_PROBE_TIMEOUT_MS },
   ]
   return await connectFirstAvailableWallet(candidates)
 }

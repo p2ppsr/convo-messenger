@@ -11,6 +11,7 @@ interface LiveOptions {
 class FakeMessageBox {
   static rooms = new Map<string, LiveOptions['onMessage']>()
   static bodies: unknown[] = []
+  static sends: Array<{ body: unknown; skipEncryption?: boolean }> = []
   static inboxes = new Map<string, Array<{ messageId: string; sender: string; body: unknown }>>()
   static nextMessage = 0
   ownRoom: string | null = null
@@ -24,8 +25,9 @@ class FakeMessageBox {
     FakeMessageBox.rooms.set(options.messageBox, options.onMessage)
   }
 
-  async sendLiveMessage(request: { messageBox: string; body: unknown }) {
+  async sendLiveMessage(request: { messageBox: string; body: unknown; skipEncryption?: boolean }) {
     FakeMessageBox.bodies.push(request.body)
+    FakeMessageBox.sends.push({ body: request.body, skipEncryption: request.skipEncryption })
     FakeMessageBox.nextMessage += 1
     const message = {
       messageId: `message-${FakeMessageBox.nextMessage}`,
@@ -90,6 +92,7 @@ function createTransport(
 afterEach(() => {
   FakeMessageBox.rooms.clear()
   FakeMessageBox.bodies = []
+  FakeMessageBox.sends = []
   FakeMessageBox.inboxes.clear()
   FakeMessageBox.nextMessage = 0
   vi.useRealTimers()
@@ -124,6 +127,7 @@ describe('private realtime conversation transport', () => {
     expect(wire).not.toContain(conversationId)
     expect(wire).not.toContain(alice)
     expect(wire).not.toContain(bob)
+    expect(FakeMessageBox.sends.at(-1)?.skipEncryption).toBe(true)
 
     await aliceTransport.publishEvent(event)
     await Promise.resolve()
@@ -221,7 +225,8 @@ describe('private realtime conversation transport', () => {
       preferences: { archived: false, favorite: false, muted: false, lastReadAt: 0 },
     }
 
-    const updates = await listWorkspaceRoomUpdates(new FakeMessageBox(bob) as never, bob, [secret])
+    const roomClient = new FakeMessageBox(bob)
+    const updates = await listWorkspaceRoomUpdates(roomClient as never, bob, [secret])
 
     expect(updates).toEqual([expect.objectContaining({
       conversationId,
@@ -233,6 +238,10 @@ describe('private realtime conversation transport', () => {
     expect(wire).not.toContain(callId)
     expect(wire).not.toContain(alice)
     expect(wire).not.toContain(bob)
+
+    const listMessages = vi.spyOn(roomClient, 'listMessages')
+    expect(await listWorkspaceRoomUpdates(roomClient as never, bob, [secret], conversationId)).toEqual([])
+    expect(listMessages).not.toHaveBeenCalled()
     await aliceTransport.stop()
   })
 

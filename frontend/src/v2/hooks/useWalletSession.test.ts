@@ -2,30 +2,30 @@ import { describe, expect, it, vi } from 'vitest'
 import { connectFirstAvailableWallet, createLocalNetworkFetch } from './useWalletSession'
 
 describe('wallet substrate discovery', () => {
-  it('stops after the first working substrate instead of probing lower-priority localhost fallbacks', async () => {
-    const bridge = { getVersion: vi.fn(async () => ({ version: 'bridge' })) }
-    const localCreate = vi.fn(() => ({ getVersion: vi.fn(async () => ({ version: 'local' })) }))
+  it('stops after the preferred Cicada substrate responds', async () => {
+    const cicada = { getVersion: vi.fn(async () => ({ version: 'cicada' })) }
+    const fallbackCreate = vi.fn(() => ({ getVersion: vi.fn(async () => ({ version: 'fallback' })) }))
 
     const connected = await connectFirstAvailableWallet([
-      { create: () => bridge, timeoutMs: 50 },
-      { create: localCreate, timeoutMs: 50 },
+      { create: () => cicada, timeoutMs: 50 },
+      { create: fallbackCreate, timeoutMs: 50 },
     ])
 
-    expect(connected).toBe(bridge)
-    expect(bridge.getVersion).toHaveBeenCalledTimes(1)
-    expect(localCreate).not.toHaveBeenCalled()
+    expect(connected).toBe(cicada)
+    expect(cicada.getVersion).toHaveBeenCalledTimes(1)
+    expect(fallbackCreate).not.toHaveBeenCalled()
   })
 
   it('tries substrates in priority order until one responds', async () => {
     const attempts: string[] = []
     const connected = await connectFirstAvailableWallet([
-      { create: () => ({ getVersion: async () => { attempts.push('window.CWI'); throw new Error('missing') } }), timeoutMs: 50 },
-      { create: () => ({ getVersion: async () => { attempts.push('XDM'); return { version: 'xdm' } } }), timeoutMs: 50 },
-      { create: () => ({ getVersion: async () => { attempts.push('localhost'); return { version: 'local' } } }), timeoutMs: 50 },
+      { create: () => ({ getVersion: async () => { attempts.push('Cicada'); throw new Error('missing') } }), timeoutMs: 50 },
+      { create: () => ({ getVersion: async () => { attempts.push('window.CWI'); return { version: 'cwi' } } }), timeoutMs: 50 },
+      { create: () => ({ getVersion: async () => { attempts.push('secure-json-api'); return { version: 'json' } } }), timeoutMs: 50 },
     ])
 
-    expect(attempts).toEqual(['window.CWI', 'XDM'])
-    expect(await connected.getVersion()).toEqual({ version: 'xdm' })
+    expect(attempts).toEqual(['Cicada', 'window.CWI'])
+    expect(await connected.getVersion()).toEqual({ version: 'cwi' })
   })
 
   it('marks intentional loopback fetches as local-network requests', async () => {
