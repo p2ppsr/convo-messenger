@@ -1,43 +1,28 @@
 import { describe, expect, it, vi } from 'vitest'
-import { connectFirstAvailableWallet, createLocalNetworkFetch } from './useWalletSession'
+import { connectWithSdkAuto, createAutoWalletClient } from './useWalletSession'
 
 describe('wallet substrate discovery', () => {
-  it('stops after the preferred Cicada substrate responds', async () => {
-    const cicada = { getVersion: vi.fn(async () => ({ version: 'cicada' })) }
-    const fallbackCreate = vi.fn(() => ({ getVersion: vi.fn(async () => ({ version: 'fallback' })) }))
+  it('delegates substrate discovery to the SDK auto mode', () => {
+    const client = createAutoWalletClient()
 
-    const connected = await connectFirstAvailableWallet([
-      { create: () => cicada, timeoutMs: 50 },
-      { create: fallbackCreate, timeoutMs: 50 },
-    ])
-
-    expect(connected).toBe(cicada)
-    expect(cicada.getVersion).toHaveBeenCalledTimes(1)
-    expect(fallbackCreate).not.toHaveBeenCalled()
+    expect(client.substrate).toBe('auto')
   })
 
-  it('tries substrates in priority order until one responds', async () => {
-    const attempts: string[] = []
-    const connected = await connectFirstAvailableWallet([
-      { create: () => ({ getVersion: async () => { attempts.push('Cicada'); throw new Error('missing') } }), timeoutMs: 50 },
-      { create: () => ({ getVersion: async () => { attempts.push('window.CWI'); return { version: 'cwi' } } }), timeoutMs: 50 },
-      { create: () => ({ getVersion: async () => { attempts.push('secure-json-api'); return { version: 'json' } } }), timeoutMs: 50 },
-    ])
+  it('returns the client selected by SDK discovery', async () => {
+    const client = { getVersion: vi.fn(async () => ({ version: 'auto' })) }
+    const createClient = vi.fn(() => client)
 
-    expect(attempts).toEqual(['Cicada', 'window.CWI'])
-    expect(await connected.getVersion()).toEqual({ version: 'cwi' })
+    const connected = await connectWithSdkAuto(createClient, 50)
+
+    expect(connected).toBe(client)
+    expect(createClient).toHaveBeenCalledTimes(1)
+    expect(client.getVersion).toHaveBeenCalledTimes(1)
   })
 
-  it('marks intentional loopback fetches as local-network requests', async () => {
-    const response = new Response(null, { status: 204 })
-    const baseFetch = vi.fn(async () => response) as unknown as typeof fetch
-    const localFetch = createLocalNetworkFetch(baseFetch)
+  it('reports unavailable when SDK discovery cannot connect', async () => {
+    const client = { getVersion: vi.fn(async () => { throw new Error('no wallet') }) }
 
-    await localFetch('http://localhost:3301/getVersion', { method: 'POST' })
-
-    expect(baseFetch).toHaveBeenCalledWith('http://localhost:3301/getVersion', {
-      method: 'POST',
-      targetAddressSpace: 'local',
-    })
+    await expect(connectWithSdkAuto(() => client, 50)).rejects.toThrow('WALLET_UNAVAILABLE')
+    expect(client.getVersion).toHaveBeenCalledTimes(1)
   })
 })

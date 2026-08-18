@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { HTTPWalletJSON, HTTPWalletWire, WalletClient, WalletWireTransceiver } from '@bsv/sdk'
+import { WalletClient } from '@bsv/sdk'
 
 export type WalletSession =
   | { status: 'connecting'; client: null; identityKey: null; message: string }
@@ -8,17 +8,6 @@ export type WalletSession =
 
 const CONNECT_TIMEOUT_MS = 15_000
 const PROBE_TIMEOUT_MS = 3_000
-const BRIDGE_PROBE_TIMEOUT_MS = 3_000
-const XDM_PROBE_TIMEOUT_MS = 750
-
-type WalletProbe<T> = {
-  create: () => T
-  timeoutMs: number
-}
-
-type LocalNetworkRequestInit = RequestInit & {
-  targetAddressSpace: 'local'
-}
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -34,50 +23,27 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
-export async function connectFirstAvailableWallet<T extends { getVersion: () => Promise<unknown> }>(candidates: Array<WalletProbe<T>>): Promise<T> {
-  for (const candidate of candidates) {
-    try {
-      const client = candidate.create()
-      await withTimeout(client.getVersion(), candidate.timeoutMs)
-      return client
-    } catch {
-      // Wallet substrates are fallbacks. Continue in priority order.
-    }
+export async function connectWithSdkAuto<T extends { getVersion: () => Promise<unknown> }>(
+  createClient: () => T,
+  timeoutMs = CONNECT_TIMEOUT_MS,
+): Promise<T> {
+  const client = createClient()
+  try {
+    await withTimeout(client.getVersion(), timeoutMs)
+    return client
+  } catch {
+    throw new Error('WALLET_UNAVAILABLE')
   }
-  throw new Error('WALLET_UNAVAILABLE')
 }
 
-export function createLocalNetworkFetch(baseFetch: typeof fetch): typeof fetch {
-  return ((input: RequestInfo | URL, init?: RequestInit) => baseFetch(input, {
-    ...init,
-    targetAddressSpace: 'local',
-  } as LocalNetworkRequestInit)) as typeof fetch
+export function createAutoWalletClient(): WalletClient {
+  return new WalletClient('auto')
 }
 
 async function connectAvailableWallet(): Promise<WalletClient> {
-  const boundFetch = window.fetch.bind(window)
-  const localNetworkFetch = createLocalNetworkFetch(boundFetch)
-  // Convo targets the local Metanet Client first; stop discovery as soon as its
-  // binary Cicada substrate answers so lower-priority transports are untouched.
-  const candidates: Array<WalletProbe<WalletClient>> = [
-    {
-      create: () => new WalletClient(new WalletWireTransceiver(new HTTPWalletWire(undefined, undefined, localNetworkFetch))),
-      timeoutMs: PROBE_TIMEOUT_MS,
-    },
-    ...(typeof (window as unknown as { CWI?: unknown }).CWI === 'object'
-      ? [{ create: () => new WalletClient('window.CWI'), timeoutMs: BRIDGE_PROBE_TIMEOUT_MS }]
-      : []),
-    {
-      create: () => new WalletClient(new HTTPWalletJSON(undefined, 'https://localhost:2121', localNetworkFetch)),
-      timeoutMs: PROBE_TIMEOUT_MS,
-    },
-    {
-      create: () => new WalletClient(new HTTPWalletJSON(undefined, 'http://localhost:3321', localNetworkFetch)),
-      timeoutMs: PROBE_TIMEOUT_MS,
-    },
-    { create: () => new WalletClient('XDM'), timeoutMs: XDM_PROBE_TIMEOUT_MS },
-  ]
-  return await connectFirstAvailableWallet(candidates)
+  // The SDK owns substrate priority and fallback semantics. This preserves
+  // binary Cicada while allowing embedded wallets to answer over CWI or XDM.
+  return await connectWithSdkAuto(createAutoWalletClient)
 }
 
 export function useWalletSession(): { session: WalletSession; retry: () => void } {
