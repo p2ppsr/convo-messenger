@@ -2,7 +2,7 @@ import { MessageBoxClient } from '@bsv/message-box-client'
 import { CurvePoint } from 'curvepoint'
 import { Utils, type WalletInterface, type WalletProtocol } from '@bsv/sdk'
 import { validAttachmentSet } from '../domain/attachmentValidation'
-import { decryptJson, encryptJson, liveBoxName, randomId } from '../domain/crypto'
+import { decryptJson, deriveLocator, encryptJson, liveBoxName, randomId } from '../domain/crypto'
 import type {
   ConversationEvent,
   ConversationEpoch,
@@ -119,18 +119,26 @@ export async function sendMembershipUpdate(
   await sendControlWithBackoff(async () => { await client.sendMessage({ recipient, messageBox: INVITES_BOX, body: update }, MESSAGEBOX_HOST) })
 }
 
-export async function listControlMessages(client: MessageBoxClient): Promise<{
+export async function listControlMessages(client: MessageBoxClient, persist?: (invites: PendingInvite[], updates: PendingMembershipUpdate[]) => Promise<void>): Promise<{
   invites: PendingInvite[]
   updates: PendingMembershipUpdate[]
 }> {
-  const messages = await client.listMessages({ messageBox: INVITES_BOX, host: MESSAGEBOX_HOST })
+  const messages = await client.listMessages({ messageBox: INVITES_BOX, host: MESSAGEBOX_HOST, limit: MESSAGE_BATCH_SIZE, pageSize: MESSAGE_BATCH_SIZE, maxPages: 2, acceptPayments: false })
   const invites: PendingInvite[] = []
   const updates: PendingMembershipUpdate[] = []
+  const invalid: string[] = []
   for (const message of messages) {
+    if (message.body === '[Error: Failed to decrypt or parse message]') continue
     const body = typeof message.body === 'string' ? safeJson(message.body) : message.body
     if (isInvite(body)) invites.push({ messageId: message.messageId, sender: message.sender, invite: body })
     if (isMembershipUpdate(body)) updates.push({ messageId: message.messageId, sender: message.sender, update: body })
+    if (!isInvite(body) && !isMembershipUpdate(body)) invalid.push(message.messageId)
   }
+  if (persist && (invites.length || updates.length)) {
+    await persist(invites, updates)
+    invalid.push(...invites.map((item) => item.messageId), ...updates.map((item) => item.messageId))
+  }
+  if (invalid.length) await client.acknowledgeMessage({ messageIds: invalid, host: MESSAGEBOX_HOST })
   return { invites, updates }
 }
 
@@ -189,6 +197,9 @@ function validCommitment(value: unknown): value is EpochCommitment {
     && typeof commitment.eventCount === 'number' && Number.isSafeInteger(commitment.eventCount) && commitment.eventCount >= 0
     && typeof commitment.historyDigest === 'string' && /^[0-9a-f]{64}$/.test(commitment.historyDigest)
 }
+
+export const MESSAGE_BATCH_SIZE = 100
+const MAX_DRAIN_BATCHES = 10
 
 const PRESENCE_INTERVAL_MS = 60_000
 const PRESENCE_TIMEOUT_MS = 190_000
@@ -355,67 +366,85 @@ function isLivePayload(value: unknown, conversationId: string, epoch: Conversati
   return payload.kind === 'reconcile'
 }
 
-/**
- * Discovers private meeting announcements outside the currently open chat.
- * Every lookup uses that group's secret-derived recipient box; only validated
- * room control messages are acknowledged, so ordinary realtime traffic remains
- * queued for the conversation transport that owns it.
+/** Drain every known recipient box, including direct chats and retired epochs.
+ * Events must be durably accepted before the corresponding batch is acknowledged.
+ * A failing event stays queued while other valid/expired traffic can drain.
  */
 export async function listWorkspaceRoomUpdates(
   client: MessageBoxClient,
   identityKey: string,
   conversations: ConversationSecret[],
   excludedConversationId?: string,
+  onEvent?: (secret: ConversationSecret, event: ConversationEvent) => Promise<void>,
 ): Promise<WorkspaceRoomUpdate[]> {
   const updates: WorkspaceRoomUpdate[] = []
-  const groups = conversations.filter((conversation) => (
-    conversation.kind === 'group' && conversation.conversationId !== excludedConversationId
-  ))
-  for (const conversation of groups) {
-    const epoch = conversation.epochs.find((candidate) => candidate.epoch === conversation.currentEpoch)
-    if (!epoch || !epoch.members.includes(identityKey)) continue
-    let messages: Awaited<ReturnType<MessageBoxClient['listMessages']>>
-    try {
-      messages = await client.listMessages({ messageBox: liveBoxName(epoch.rootKey, identityKey), host: MESSAGEBOX_HOST })
-    } catch {
-      continue
-    }
-    for (const message of messages) {
-      const body = typeof message.body === 'string' ? safeJson(message.body) : message.body
-      if (!isLiveEnvelope(body) || !epoch.members.includes(message.sender)) continue
-      let payload: LivePayload
-      try {
-        payload = decryptJson<LivePayload>(epoch.rootKey, `live:${body.envelopeId}`, body.ciphertext)
-      } catch {
-        continue
-      }
-      if (!isLivePayload(payload, conversation.conversationId, epoch, message.sender, identityKey)
-        || payload.kind !== 'call'
-        || !payload.call
-        || (payload.call.type !== 'room-open' && payload.call.type !== 'room-close')) continue
-      const age = Date.now() - payload.sentAt
-      if (age >= -300_000 && age < CALL_SIGNAL_MAX_AGE_MS) {
-        if (payload.call.type === 'room-open' && payload.call.expiresAt > Date.now()) {
-          updates.push({
-            conversationId: conversation.conversationId,
-            sender: message.sender,
-            sentAt: payload.sentAt,
-            room: {
-              callId: payload.call.callId,
-              hostIdentityKey: message.sender,
-              media: payload.call.media,
-              memberIdentityKeys: payload.call.participants,
-              expiresAt: payload.call.expiresAt,
-            },
-          })
-        } else if (payload.call.type === 'room-close') {
-          updates.push({ conversationId: conversation.conversationId, sender: message.sender, sentAt: payload.sentAt, closedCallId: payload.call.callId })
+  let failed = false
+  for (const conversation of conversations) {
+    for (const epoch of conversation.epochs) {
+      if (!epoch.members.includes(identityKey)
+        || (conversation.conversationId === excludedConversationId && epoch.epoch === conversation.currentEpoch)) continue
+      for (let batch = 0; batch < MAX_DRAIN_BATCHES; batch += 1) {
+        let messages: Awaited<ReturnType<MessageBoxClient['listMessages']>>
+        try {
+          messages = await client.listMessages({ messageBox: liveBoxName(epoch.rootKey, identityKey), host: MESSAGEBOX_HOST,
+            limit: MESSAGE_BATCH_SIZE, pageSize: MESSAGE_BATCH_SIZE, maxPages: 2, acceptPayments: false })
+        } catch { failed = true; break }
+        const acknowledged: string[] = []
+        for (const message of messages) {
+          if (message.body === '[Error: Failed to decrypt or parse message]') continue
+          const body = typeof message.body === 'string' ? safeJson(message.body) : message.body
+          let payload: LivePayload | undefined
+          if (isLiveEnvelope(body) && epoch.members.includes(message.sender)) {
+            try {
+              const decoded = decryptJson<LivePayload>(epoch.rootKey, `live:${body.envelopeId}`, body.ciphertext)
+              if (isLivePayload(decoded, conversation.conversationId, epoch, message.sender, identityKey)) payload = decoded
+            } catch { /* Invalid ciphertext in our private box can be discarded. */ }
+          }
+          if (payload?.kind === 'event' && payload.event) {
+            // No consumer means no durable handoff: retain the event.
+            if (!onEvent) continue
+            try { await onEvent(conversation, payload.event) } catch { failed = true; continue }
+          }
+          if (payload?.kind === 'call' && payload.call && epoch.epoch === conversation.currentEpoch) {
+            const age = Date.now() - payload.sentAt
+            if (age >= -300_000 && age < CALL_SIGNAL_MAX_AGE_MS) {
+              if (payload.call.type === 'room-open' && payload.call.expiresAt > Date.now()) {
+                updates.push({ conversationId: conversation.conversationId, sender: message.sender, sentAt: payload.sentAt,
+                  room: { callId: payload.call.callId, hostIdentityKey: message.sender, media: payload.call.media,
+                    memberIdentityKeys: payload.call.participants, expiresAt: payload.call.expiresAt } })
+              } else if (payload.call.type === 'room-close') {
+                updates.push({ conversationId: conversation.conversationId, sender: message.sender,
+                  sentAt: payload.sentAt, closedCallId: payload.call.callId })
+              }
+            }
+          }
+          acknowledged.push(message.messageId)
         }
+        if (acknowledged.length) {
+          try { await client.acknowledgeMessage({ messageIds: acknowledged, host: MESSAGEBOX_HOST }) }
+          catch { failed = true; break }
+        }
+        if (messages.length < MESSAGE_BATCH_SIZE || acknowledged.length !== messages.length) break
       }
-      await client.acknowledgeMessage({ messageIds: [message.messageId], host: MESSAGEBOX_HOST }).catch(() => undefined)
     }
   }
+  if (failed) throw new Error('Some inbox deliveries remain queued for retry')
   return updates.sort((left, right) => left.sentAt - right.sentAt)
+}
+
+export async function forwardStoredEvent(client: MessageBoxClient, secret: ConversationSecret, event: ConversationEvent,
+  recipients: string[], onAccepted: (recipient: string) => void): Promise<void> {
+  const epoch = secret.epochs.find((candidate) => candidate.epoch === event.epoch)
+  if (!epoch || !isEvent(event, secret.conversationId, epoch, event.sender)) throw new Error('Invalid outgoing event')
+  const envelopeId = randomId()
+  const body: LiveEnvelope = { type: 'convo-v2-live', v: 2, envelopeId,
+    ciphertext: encryptJson(epoch.rootKey, `live:${envelopeId}`, { conversationId: secret.conversationId,
+      epoch: epoch.epoch, kind: 'event', event, sentAt: Date.now() }, 1_024) }
+  for (const recipient of recipients) {
+    await pacedMessageBoxSend(() => client.sendMessage({ recipient, messageBox: liveBoxName(epoch.rootKey, recipient), body,
+      messageId: deriveLocator(epoch.rootKey, `forward:${event.sender}:${recipient}:${event.id}`), skipEncryption: true }, MESSAGEBOX_HOST))
+    onAccepted(recipient)
+  }
 }
 
 export class ConversationTransport {
@@ -429,6 +458,11 @@ export class ConversationTransport {
   private reconnectAttempt = 0
   private outboundTail: Promise<void> = Promise.resolve()
   private stopped = false
+  private drainPromise: Promise<void> | null = null
+  private readonly handling = new Map<string, Promise<void>>()
+  private readonly pendingAcks = new Set<string>()
+  private ackPromise: Promise<void> | null = null
+  private ackTimer: ReturnType<typeof setTimeout> | null = null
   private readonly processed = new Set<string>()
   private readonly processedEvents = new Set<string>()
   private readonly peers = new Map<string, RealtimePeer>()
@@ -455,7 +489,9 @@ export class ConversationTransport {
   async start(): Promise<void> {
     this.stopped = false
     await this.connectLiveSocket()
+    if (this.stopped) return
     await this.drain()
+    if (this.stopped) return
     document.addEventListener('visibilitychange', this.visibilityHandler)
     window.addEventListener('pagehide', this.pageHideHandler)
     this.drainTimer = setInterval(() => { void this.drain() }, INBOX_DRAIN_INTERVAL_MS)
@@ -480,7 +516,7 @@ export class ConversationTransport {
       await client.listenForLiveMessages({
         messageBox: this.boxFor(this.options.identityKey),
         overrideHost: MESSAGEBOX_HOST,
-        onMessage: (message) => { void this.handle(message.messageId, message.sender, message.body) },
+        onMessage: (message) => { void this.handle(message.messageId, message.sender, message.body).catch(() => this.options.onState('fallback')) },
       })
       if (this.stopped || this.client !== client) return
       this.reconnectAttempt = 0
@@ -510,31 +546,50 @@ export class ConversationTransport {
   }
 
   private async handle(messageId: string, sender: string, rawBody: unknown): Promise<void> {
-    if (this.stopped || this.processed.has(messageId)) return
-    const body = typeof rawBody === 'string' ? safeJson(rawBody) : rawBody
-    if (!isLiveEnvelope(body)) {
-      await this.acknowledge(messageId)
-      return
-    }
-    let payload: LivePayload
-    try {
-      payload = decryptJson<LivePayload>(this.options.epoch.rootKey, `live:${body.envelopeId}`, body.ciphertext)
-    } catch {
-      await this.acknowledge(messageId)
-      return
-    }
-    if (!isLivePayload(payload, this.options.conversationId, this.options.epoch, sender, this.options.identityKey)) {
-      await this.acknowledge(messageId)
-      return
-    }
-    this.processed.add(messageId)
-    this.trimSet(this.processed)
-    if (this.options.epoch.members.includes(sender)) await this.applyPayload(sender, payload)
-    await this.acknowledge(messageId)
+    if (this.stopped) return
+    const inflight = this.handling.get(messageId)
+    if (inflight) return await inflight
+    const operation = this.accept(messageId, sender, rawBody)
+    this.handling.set(messageId, operation)
+    try { await operation } finally { this.handling.delete(messageId) }
   }
 
-  private async acknowledge(messageId: string): Promise<void> {
-    await this.client?.acknowledgeMessage({ messageIds: [messageId], host: MESSAGEBOX_HOST }).catch(() => undefined)
+  private async accept(messageId: string, sender: string, rawBody: unknown): Promise<void> {
+    if (rawBody === '[Error: Failed to decrypt or parse message]') throw new Error('Wallet decryption needs a retry')
+    if (!this.processed.has(messageId)) {
+      const body = typeof rawBody === 'string' ? safeJson(rawBody) : rawBody
+      let payload: LivePayload | undefined
+      if (isLiveEnvelope(body) && this.options.epoch.members.includes(sender)) {
+        try {
+          const decoded = decryptJson<LivePayload>(this.options.epoch.rootKey, `live:${body.envelopeId}`, body.ciphertext)
+          if (isLivePayload(decoded, this.options.conversationId, this.options.epoch, sender, this.options.identityKey)) payload = decoded
+        } catch { /* Invalid private-room traffic must not poison the queue. */ }
+      }
+      if (payload) await this.applyPayload(sender, payload)
+      // A failed consumer is never marked processed or acknowledged.
+      this.processed.add(messageId)
+      this.trimSet(this.processed)
+    }
+    // Duplicate delivery also retries a previously failed acknowledgment.
+    this.pendingAcks.add(messageId)
+    if (this.ackTimer === null) this.ackTimer = setTimeout(() => {
+      this.ackTimer = null
+      void this.flushAcknowledgments().catch(() => this.options.onState('fallback'))
+    }, 100)
+  }
+
+  private async flushAcknowledgments(): Promise<void> {
+    if (this.ackPromise) return await this.ackPromise
+    const client = this.client
+    if (!client) return
+    this.ackPromise = (async () => {
+      while (this.pendingAcks.size) {
+        const messageIds = [...this.pendingAcks].slice(0, MESSAGE_BATCH_SIZE)
+        await client.acknowledgeMessage({ messageIds, host: MESSAGEBOX_HOST })
+        for (const id of messageIds) this.pendingAcks.delete(id)
+      }
+    })()
+    try { await this.ackPromise } finally { this.ackPromise = null }
   }
 
   private isFresh(sentAt: number): boolean {
@@ -545,10 +600,10 @@ export class ConversationTransport {
   private async applyPayload(sender: string, payload: LivePayload): Promise<void> {
     if (payload.kind === 'event' && payload.event) {
       if (this.processedEvents.has(payload.event.id)) return
-      this.processedEvents.add(payload.event.id)
-      this.trimSet(this.processedEvents)
       if (this.isFresh(payload.sentAt)) this.notePeer(sender)
       await this.options.onEvent(payload.event)
+      this.processedEvents.add(payload.event.id)
+      this.trimSet(this.processedEvents)
       return
     }
     if (payload.kind === 'presence') {
@@ -583,22 +638,38 @@ export class ConversationTransport {
   }
 
   async drain(): Promise<void> {
+    if (this.drainPromise) return await this.drainPromise
+    this.drainPromise = this.drainBatches()
+    try { await this.drainPromise } finally { this.drainPromise = null }
+  }
+
+  private async drainBatches(): Promise<void> {
     const client = this.client
     if (this.stopped || client === null) return
     try {
-      const messages = await client.listMessages({ messageBox: this.boxFor(this.options.identityKey), host: MESSAGEBOX_HOST })
-      for (const message of messages) await this.handle(message.messageId, message.sender, message.body)
+      await this.flushAcknowledgments()
+      for (let batch = 0; batch < MAX_DRAIN_BATCHES && !this.stopped; batch += 1) {
+        const messages = await client.listMessages({ messageBox: this.boxFor(this.options.identityKey), host: MESSAGEBOX_HOST,
+          limit: MESSAGE_BATCH_SIZE, pageSize: MESSAGE_BATCH_SIZE, maxPages: 2, acceptPayments: false })
+        let failed = false
+        for (const message of messages) {
+          try { await this.handle(message.messageId, message.sender, message.body) } catch { failed = true }
+        }
+        await this.flushAcknowledgments()
+        if (failed) { this.options.onState('fallback'); break }
+        if (messages.length < MESSAGE_BATCH_SIZE) break
+      }
     } catch {
       this.options.onState('fallback')
       this.scheduleReconnect()
     }
   }
 
-  async publishEvent(event: ConversationEvent): Promise<number> {
+  async publishEvent(event: ConversationEvent, recipients?: string[], onAccepted?: (recipient: string) => void): Promise<number> {
     if (!isEvent(event, this.options.conversationId, this.options.epoch, this.options.identityKey)) {
       throw new Error('Cannot publish an invalid realtime conversation event')
     }
-    return await this.publishPayload({ kind: 'event', event })
+    return await this.publishPayload({ kind: 'event', event }, recipients, onAccepted)
   }
 
   async publishCallSignal(recipient: string, signal: CallSignal): Promise<boolean> {
@@ -645,7 +716,7 @@ export class ConversationTransport {
     return await this.publishPayload({ kind: 'presence', presence })
   }
 
-  private async publishPayload(partial: Omit<LivePayload, 'conversationId' | 'epoch' | 'sentAt'>): Promise<number> {
+  private async publishPayload(partial: Omit<LivePayload, 'conversationId' | 'epoch' | 'sentAt'>, recipients?: string[], onAccepted?: (recipient: string) => void): Promise<number> {
     const envelopeId = randomId()
     const payload: LivePayload = {
       ...partial,
@@ -660,13 +731,17 @@ export class ConversationTransport {
       ciphertext: encryptJson(this.options.epoch.rootKey, `live:${envelopeId}`, payload, 1_024),
     }
     let delivered = 0
-    for (const recipient of this.options.epoch.members.filter((member) => member !== this.options.identityKey)) {
-      if (await this.sendPrepared(recipient, envelope)) delivered += 1
+    const ephemeral = partial.kind === 'typing' || (partial.kind === 'presence' && partial.presence !== 'join')
+    for (const recipient of this.options.epoch.members.filter((member) => member !== this.options.identityKey
+      && (!recipients || recipients.includes(member))
+      && (!ephemeral || (this.peers.has(member) && this.isFresh(this.peers.get(member)!.lastSeen))))) {
+      const messageId = partial.event ? deriveLocator(this.options.epoch.rootKey, `forward:${this.options.identityKey}:${recipient}:${partial.event.id}`) : undefined
+      if (await this.sendPrepared(recipient, envelope, false, messageId)) { delivered += 1; onAccepted?.(recipient) }
     }
     return delivered
   }
 
-  private async sendPrepared(recipient: string, envelope: LiveEnvelope, retryRateLimit = false): Promise<boolean> {
+  private async sendPrepared(recipient: string, envelope: LiveEnvelope, retryRateLimit = false, messageId?: string): Promise<boolean> {
     let delivered = false
     const queued = this.outboundTail.then(async () => {
       const client = this.client
@@ -678,6 +753,7 @@ export class ConversationTransport {
           recipient,
           messageBox: this.boxFor(recipient),
           body: envelope,
+          messageId,
           skipEncryption: true,
         }, MESSAGEBOX_HOST)
         if (retryRateLimit) await sendControlWithBackoff(async () => { await send() })
@@ -736,11 +812,11 @@ export class ConversationTransport {
   }
 
   async stop(): Promise<void> {
-    await this.publishPresence('leave').catch(() => undefined)
-    this.publishTyping(false)
     this.stopped = true
+    await this.flushAcknowledgments().catch(() => undefined)
     document.removeEventListener('visibilitychange', this.visibilityHandler)
     window.removeEventListener('pagehide', this.pageHideHandler)
+    if (this.ackTimer) clearTimeout(this.ackTimer)
     if (this.drainTimer) clearInterval(this.drainTimer)
     if (this.reconcileTimer) clearInterval(this.reconcileTimer)
     if (this.presenceTimer) clearInterval(this.presenceTimer)

@@ -154,6 +154,8 @@ export interface ConversationView {
   admins: string[]
   messages: MaterializedMessage[]
   partial: boolean
+  hasMoreHistory?: boolean
+  historyLoadFailed?: boolean
   loadedPages: number
 }
 
@@ -166,6 +168,7 @@ export interface OutboxItem {
   conversationId: string
   epoch: number
   encryptedEvent: string
+  encryptedReceipts?: string
   state: DeliveryState
   attempts: number
   updatedAt: number

@@ -105,7 +105,7 @@ describe('conversation control delivery', () => {
     conflict = false
     await service.flushOutbox()
     await service.flushControlOutbox()
-    expect(sent).toHaveLength(1)
+    expect(sent).toHaveLength(2)
     expect((await repository.list())[0].pendingControl).toEqual([])
   })
 
@@ -177,13 +177,13 @@ describe('conversation control delivery', () => {
       secrets: repository,
       store: store as never,
       outbox,
-      messageBox: {} as ReturnType<typeof messageBoxFor>,
+      messageBox: { sendMessage: async () => ({ status: 'success', messageId: 'forwarded' }) } as unknown as ReturnType<typeof messageBoxFor>,
     })
 
     await Promise.all([service.flushOutbox(), service.flushOutbox(), service.flushOutbox()])
     expect(writes).toBe(2)
     expect(maxInFlight).toBe(1)
-    expect(backing.items.every((item) => item.state === 'confirmed')).toBe(true)
+    expect(backing.items).toHaveLength(0)
   })
 
   it('persists the exact private envelope and retries it after MessageBox failure', async () => {
@@ -358,12 +358,47 @@ describe('conversation control delivery', () => {
     expect(duplicateRemove.currentEpoch).toBe(3)
     expect(removed.epochs[2].members).toEqual([alice, bob])
     expect((await repository.get(created.conversationId))?.currentEpoch).toBe(3)
-    expect(controlBodies.map((body) => `${body.type}:${body.epoch}`)).toEqual([
+    expect(controlBodies.filter((body) => body.type !== ('convo-v2-live' as string)).map((body) => `${body.type}:${body.epoch}`)).toEqual([
       'convo-v2-invite:1',
       'convo-v2-membership:2',
       'convo-v2-invite:2',
       'convo-v2-invite:2',
       'convo-v2-membership:3',
     ])
+  })
+})
+
+describe('recipient-aware outbox retries', () => {
+  it('only retries unaccepted recipients after restart, without repeating chain writes or storing a plaintext roster', async () => {
+    const alice = `02${'aa'.repeat(32)}`
+    const bob = `03${'bb'.repeat(32)}`
+    const carol = `02${'cc'.repeat(32)}`
+    const secret: ConversationSecret = { v: 2, conversationId: randomId(), kind: 'group', title: 'Retry group', currentEpoch: 1,
+      epochs: [{ epoch: 1, rootKey: generateRootKey(), members: [alice, bob, carol], admins: [alice], activatedAt: 1 }],
+      createdAt: 1, updatedAt: 1, preferences: { archived: false, favorite: false, muted: false, lastReadAt: 0 } }
+    const repository = new ConversationSecretRepository(new MemoryPrivateStore())
+    await repository.save(secret)
+    const backing = new MemoryOutbox()
+    const outbox = new EncryptedOutbox(alice, backing)
+    outbox.enqueue(secret, { v: 2, id: randomId(), type: 'message', body: 'Private retry', sender: alice,
+      conversationId: secret.conversationId, epoch: 1, createdAt: Date.now() })
+    let writes = 0
+    let fail = true
+    const requests: Array<{ recipient: string; messageId: string }> = []
+    const dependencies = { secrets: repository, outbox, store: { append: async () => { writes += 1 } } as never,
+      messageBox: { sendMessage: async (request: { recipient: string; messageId: string }) => {
+        requests.push(request)
+        if (request.recipient === carol && fail) throw new Error('Temporary transport outage')
+      } } as never }
+    await expect(new ConversationService({} as WalletInterface, alice, dependencies).flushOutbox()).rejects.toThrow()
+    expect(backing.items[0].state).toBe('confirmed')
+    expect(JSON.stringify(backing.items)).not.toContain(bob)
+    expect(JSON.stringify(backing.items)).not.toContain(carol)
+    fail = false
+    await new ConversationService({} as WalletInterface, alice, dependencies).flushOutbox()
+    expect(requests.map((request) => request.recipient)).toEqual([bob, carol, carol])
+    expect(requests[1].messageId).toBe(requests[2].messageId)
+    expect(writes).toBe(1)
+    expect(outbox.list()).toHaveLength(0)
   })
 })

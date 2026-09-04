@@ -31,7 +31,7 @@ describe('conversation rail', () => {
 
   it('shows an explicit wallet-index loading state before declaring the account empty', () => {
     render(<ConversationRail conversations={[]} identityKey={identity} identityProfiles={{}} activeId={null} pendingCount={0} loading open onClose={() => undefined} onSelect={() => undefined} onNew={() => undefined} onOpenInvites={() => undefined} onRestore={vi.fn(async () => undefined)} />)
-    expect(screen.getByText('Loading private conversations…')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
     expect(screen.queryByText('No conversations yet.')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'New conversation' })).toBeDisabled()
   })

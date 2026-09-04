@@ -1,4 +1,5 @@
 import { LocalKVStore, Utils, type WalletInterface } from '@bsv/sdk'
+import type { PendingInvite, PendingMembershipUpdate } from '../realtime/messaging'
 import { epochHistoryDigest } from '../domain/crypto'
 import type { ConversationEpoch, ConversationSecret, PendingControlDelivery } from '../domain/types'
 
@@ -37,6 +38,28 @@ const storesByWallet = new WeakMap<object, ConversationSecretRepository>()
 
 export class ConversationSecretRepository {
   constructor(private readonly store: PrivateKeyValueStore) {}
+
+  private controlTail: Promise<void> = Promise.resolve()
+
+  async pendingControls(): Promise<{ invites: PendingInvite[]; updates: PendingMembershipUpdate[] }> {
+    const raw = await this.store.get('pending-received-controls')
+    return raw ? JSON.parse(raw) : { invites: [], updates: [] }
+  }
+
+  async updateControls(invites: PendingInvite[] = [], updates: PendingMembershipUpdate[] = [], removeId?: string): Promise<void> {
+    const mutate = async () => {
+      const pending = await this.pendingControls()
+      const merge = <T extends { messageId: string }>(old: T[], added: T[]) => [...new Map([...old, ...added]
+        .filter((item) => item.messageId !== removeId).map((item) => [item.messageId, item])).values()]
+      await this.store.set('pending-received-controls', JSON.stringify({ invites: merge(pending.invites, invites), updates: merge(pending.updates, updates) }))
+    }
+    const operation = this.controlTail.catch(() => undefined).then(async () => {
+      if (typeof navigator !== 'undefined' && navigator.locks) await navigator.locks.request('convo-v2:received-controls', mutate)
+      else await mutate()
+    })
+    this.controlTail = operation
+    await operation
+  }
 
   private secretKey(conversationId: string): string {
     return `${SECRET_PREFIX}${conversationId}`

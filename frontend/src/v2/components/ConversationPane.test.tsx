@@ -121,7 +121,7 @@ describe('ConversationPane realtime experience', () => {
 
     expect(screen.getByText('Online · Realtime private sync')).toBeInTheDocument()
     expect(screen.getByText('Bob Builder is typing')).toBeInTheDocument()
-    expect(screen.getByText('Delivered live · saving')).toBeInTheDocument()
+    expect(screen.getByText('Forwarded · saving history')).toBeInTheDocument()
     fireEvent.change(screen.getByPlaceholderText(/Message Bob Builder/), { target: { value: 'hello' } })
     expect(onTyping).toHaveBeenCalledWith(true)
   })
@@ -155,7 +155,7 @@ describe('ConversationPane realtime experience', () => {
       onOpenAttachment={vi.fn(async () => new Blob())}
     />)
 
-    expect(screen.getByText('Alice Admin')).toBeInTheDocument()
+    expect(screen.getByText('@Alice Admin')).toBeInTheDocument()
     expect(screen.getByText('Mentioned you')).toBeInTheDocument()
     const composer = screen.getByPlaceholderText(/Message Bob Builder/)
     expect(composer).toHaveAttribute('id', 'message-composer')
@@ -277,5 +277,93 @@ describe('ConversationPane realtime experience', () => {
     expect(screen.getByText('Bob Builder opened a video room')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Join room' }))
     expect(onJoinMeetingRoom).toHaveBeenCalled()
+  })
+})
+
+function paneProps() {
+  return { identityKey: alice, secret, view, loading: false, busy: false, liveState: 'live' as const,
+    onlinePeers: [], typingPeers: [], deliveryStates: {}, identityProfiles: {}, callActive: false, meetingRoom: null,
+    onOpenRail: vi.fn(), onOpenDetails: vi.fn(), onLoadHistory: vi.fn(async (): Promise<void> => undefined), onTyping: vi.fn(),
+    onCall: vi.fn(async () => undefined), onJoinMeetingRoom: vi.fn(async () => undefined),
+    onSend: vi.fn(async (_body: string, _files: File[], _replyTo?: string) => { void _body; void _files; void _replyTo }),
+    onEdit: vi.fn(async () => undefined), onDelete: vi.fn(async () => undefined), onReact: vi.fn(async () => undefined),
+    onOpenAttachment: vi.fn(async () => new Blob()), onDownload: vi.fn(async () => undefined) }
+}
+describe('everyday messaging interactions', () => {
+  it('loads earlier messages once when scrolling up, preserving the visible position', async () => {
+    const props = paneProps()
+    let finish!: () => void
+    props.onLoadHistory = vi.fn(() => new Promise<void>((resolve) => { finish = resolve }))
+    const { rerender } = render(<ConversationPane {...props} />)
+    const timeline = screen.getByRole('log')
+    Object.defineProperties(timeline, { scrollHeight: { configurable: true, value: 2000 }, clientHeight: { configurable: true, value: 500 } })
+    rerender(<ConversationPane {...props} view={{ ...view, hasMoreHistory: true, partial: true }} />)
+    timeline.scrollTop = 40
+    fireEvent.scroll(timeline); fireEvent.scroll(timeline)
+    expect(props.onLoadHistory).toHaveBeenCalledTimes(1)
+    Object.defineProperty(timeline, 'scrollHeight', { configurable: true, value: 2400 })
+    rerender(<ConversationPane {...props} view={{ ...view, messages: [{ ...view.messages[0], id: 'older', createdAt: 0 }, ...view.messages] }} />)
+    expect(timeline.scrollTop).toBe(440)
+    finish()
+    await waitFor(() => expect(screen.queryByText('Loading earlier messages…')).not.toBeInTheDocument())
+  })
+  it('offers retry for failed history without claiming the conversation is empty', async () => {
+    const props = paneProps()
+    render(<ConversationPane {...props} view={{ ...view, messages: [], partial: true, historyLoadFailed: true }} />)
+    expect(screen.queryByText('This conversation is ready')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(props.onLoadHistory).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument())
+  })
+  it('preserves drafts and reply context when moving between conversations', () => {
+    const props = paneProps()
+    const { rerender } = render(<ConversationPane {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Reply to message' }))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep my reply' } })
+    rerender(<ConversationPane {...props} secret={{ ...secret, conversationId: 'cd'.repeat(32) }} />)
+    expect(screen.getByRole('textbox')).toHaveValue('')
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'A separate draft' } })
+    rerender(<ConversationPane {...props} />)
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my reply')
+    expect(screen.getByRole('button', { name: 'Cancel reply' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(props.onSend).toHaveBeenCalledWith('Keep my reply', [], messageId)
+  })
+  it('does not send during IME composition and does not overwrite new typing after a slow send', async () => {
+    const props = paneProps()
+    let finish!: () => void
+    props.onSend = vi.fn(() => new Promise<void>((resolve) => { finish = resolve })) as typeof props.onSend
+    render(<ConversationPane {...props} />)
+    const composer = screen.getByRole('textbox')
+    fireEvent.change(composer, { target: { value: 'First message' } })
+    fireEvent.keyDown(composer, { key: 'Enter', isComposing: true })
+    expect(props.onSend).not.toHaveBeenCalled()
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    expect(props.onSend).toHaveBeenCalledTimes(1)
+    fireEvent.change(composer, { target: { value: 'Next message' } })
+    finish()
+    await waitFor(() => expect(composer).toHaveValue('Next message'))
+  })
+  it('retains failed drafts with an actionable error', async () => {
+    const props = paneProps()
+    props.onSend.mockRejectedValue(new Error('No storage'))
+    render(<ConversationPane {...props} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Do not lose this' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByRole('alert')
+    expect(screen.getByRole('textbox')).toHaveValue('Do not lose this')
+  })
+  it('keeps the reader in history until they choose to jump to new messages', () => {
+    const props = paneProps()
+    const { rerender } = render(<ConversationPane {...props} />)
+    const timeline = screen.getByRole('log')
+    Object.defineProperties(timeline, { scrollHeight: { configurable: true, value: 2000 }, clientHeight: { configurable: true, value: 500 } })
+    timeline.scrollTop = 300
+    fireEvent.scroll(timeline)
+    rerender(<ConversationPane {...props} view={{ ...view, messages: [...view.messages, { ...view.messages[0], id: 'ee'.repeat(32), body: 'New arrival' }] }} />)
+    expect(timeline.scrollTop).toBe(300)
+    fireEvent.click(screen.getByRole('button', { name: /jump to latest/ }))
+    expect(timeline.scrollTop).toBe(2000)
   })
 })

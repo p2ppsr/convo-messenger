@@ -25,7 +25,7 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "@p2ppsr/cars-cli": "^1.2.31",
+    "@p2ppsr/cars-cli": "1.2.33",
     "@p2ppsr/lars": "^1.5.12"
   }
 }

@@ -69,7 +69,20 @@ export class EncryptedOutbox {
     return decryptJson<ConversationEvent>(epoch.rootKey, `outbox:${item.id}`, item.encryptedEvent)
   }
 
-  update(id: string, patch: Partial<Pick<OutboxItem, 'state' | 'attempts' | 'lastError'>>): void {
+  acceptedRecipients(secret: ConversationSecret, item: OutboxItem): string[] {
+    if (!item.encryptedReceipts) return []
+    const epoch = secret.epochs.find((candidate) => candidate.epoch === item.epoch)
+    if (!epoch) throw new Error('Outbox epoch is unavailable')
+    return decryptJson<string[]>(epoch.rootKey, `receipts:${item.id}`, item.encryptedReceipts)
+  }
+
+  recordAccepted(secret: ConversationSecret, item: OutboxItem, recipients: string[]): void {
+    const epoch = secret.epochs.find((candidate) => candidate.epoch === item.epoch)
+    if (!epoch) throw new Error('Outbox epoch is unavailable')
+    this.update(item.id, { encryptedReceipts: encryptJson(epoch.rootKey, `receipts:${item.id}`, recipients, 512) })
+  }
+
+  update(id: string, patch: Partial<Pick<OutboxItem, 'state' | 'attempts' | 'lastError' | 'encryptedReceipts'>>): void {
     const items = this.list().map((item) => item.id === id ? { ...item, ...patch, updatedAt: Date.now() } : item)
     this.backing.save(this.identityKey, items)
   }

@@ -25,10 +25,12 @@ import type {
 import { GlobalConversationStore, overlayFor } from '../storage/globalConversationStore'
 import { ConversationSecretRepository, secretRepositoryFor } from '../storage/privateConversationStore'
 import { EncryptedOutbox } from '../storage/outbox'
+import { EncryptedInbox } from '../storage/inbox'
 import {
   ConversationTransport,
   acknowledgeControl,
   listControlMessages,
+  forwardStoredEvent,
   listWorkspaceRoomUpdates,
   messageBoxFor,
   openEpochKey,
@@ -124,11 +126,16 @@ function matchesCommitment(closure: EpochClosure, update: MembershipUpdate): boo
 export class ConversationService {
   readonly secrets: ConversationSecretRepository
   readonly store: GlobalConversationStore
+  readonly inbox: EncryptedInbox
   readonly outbox: EncryptedOutbox
   readonly messageBox
+  private liveRequest = 0
+  private scanPromise: Promise<WorkspaceRoomUpdate[]> | null = null
+  private reconciliationCursor = 0
   private transport: ConversationTransport | null = null
   private callManager: AuthenticatedCallManager | null = null
   private transportConversationId: string | null = null
+  private readonly forwarding = new Map<string, Promise<number>>()
   private outboxFlushPromise: Promise<void> | null = null
   private readonly relayAuthFetch: AuthFetch
   private liveCallbacks: {
@@ -146,6 +153,7 @@ export class ConversationService {
       messageBox?: ReturnType<typeof messageBoxFor>
     } = {},
   ) {
+    this.inbox = new EncryptedInbox(identityKey)
     this.secrets = dependencies.secrets ?? secretRepositoryFor(wallet)
     this.store = dependencies.store ?? new GlobalConversationStore(overlayFor(wallet))
     this.outbox = dependencies.outbox ?? new EncryptedOutbox(identityKey)
@@ -161,11 +169,36 @@ export class ConversationService {
     invites: PendingInvite[]
     updates: PendingMembershipUpdate[]
   }> {
-    return await listControlMessages(this.messageBox)
+    try {
+      for (let batch = 0; batch < 10; batch += 1) {
+        const received = await listControlMessages(this.messageBox, async (invites, updates) => await this.secrets.updateControls(invites, updates))
+        if (received.invites.length + received.updates.length < 100) break
+      }
+    } catch {
+      const saved = await this.secrets.pendingControls()
+      if (!saved.invites.length && !saved.updates.length) throw new Error('Private invitation sync needs a retry')
+    }
+    return await this.secrets.pendingControls()
   }
 
   async discoverWorkspaceRooms(conversations: ConversationSecret[], excludedConversationId?: string): Promise<WorkspaceRoomUpdate[]> {
-    return await listWorkspaceRoomUpdates(this.messageBox, this.identityKey, conversations, excludedConversationId)
+    if (this.scanPromise) return await this.scanPromise
+    this.scanPromise = (async () => {
+      const updates = await listWorkspaceRoomUpdates(this.messageBox, this.identityKey, conversations, excludedConversationId,
+        async (secret, event) => await this.inbox.receive(secret, event))
+      const pending = conversations.filter((secret) => secret.conversationId !== excludedConversationId && this.inbox.events(secret).length > 0)
+      // Reclaim confirmed recipient journals without an unbounded overlay fanout.
+      for (let i = 0; i < Math.min(3, pending.length); i += 1) {
+        const secret = pending[(this.reconciliationCursor + i) % pending.length]
+        try {
+          const confirmed = await this.store.read(secret, { tailPages: 3 })
+          await this.inbox.reconcile(secret, confirmed.events)
+        } catch { /* A journal remains encrypted and recoverable during overlay failure. */ }
+      }
+      if (pending.length) this.reconciliationCursor = (this.reconciliationCursor + 3) % pending.length
+      return updates
+    })()
+    try { return await this.scanPromise } finally { this.scanPromise = null }
   }
 
   async create(title: string, participants: string[]): Promise<ConversationSecret> {
@@ -219,6 +252,14 @@ export class ConversationService {
     if (!invite.members.includes(this.identityKey)
       || !invite.members.includes(pending.sender)
       || !invite.admins.includes(pending.sender)) throw new Error('Invite membership is invalid')
+    const existing = await this.secrets.get(invite.conversationId)
+    if (existing) {
+      const known = existing.epochs.find((epoch) => epoch.epoch === invite.epoch)
+      if (!known || !known.admins.includes(pending.sender)) throw new Error('This invitation conflicts with an existing conversation')
+      await acknowledgeControl(this.messageBox, pending.messageId)
+      await this.secrets.updateControls([], [], pending.messageId)
+      return existing
+    }
     const rootKey = await openEpochKey(this.wallet, invite.conversationId, invite.epoch, invite.envelope)
     const epoch: ConversationEpoch = {
       epoch: invite.epoch,
@@ -241,11 +282,13 @@ export class ConversationService {
     await this.secrets.save(secret)
     await this.store.read(secret, { tailPages: 1 })
     await acknowledgeControl(this.messageBox, pending.messageId)
+    await this.secrets.updateControls([], [], pending.messageId)
     return secret
   }
 
   async declineInvite(pending: PendingInvite): Promise<void> {
     await acknowledgeControl(this.messageBox, pending.messageId)
+    await this.secrets.updateControls([], [], pending.messageId)
   }
 
   async acceptMembershipUpdate(pending: PendingMembershipUpdate): Promise<ConversationSecret> {
@@ -253,6 +296,13 @@ export class ConversationService {
     if (!existing) throw new Error('Membership update does not match a known conversation')
     const previous = currentEpoch(existing)
     const { update } = pending
+    const alreadyAccepted = existing.epochs.find((epoch) => epoch.epoch === update.epoch)
+    if (alreadyAccepted && existing.epochs.find((epoch) => epoch.epoch === update.epoch - 1)?.admins.includes(pending.sender)
+      && sameIdentities(alreadyAccepted.members, update.members) && sameIdentities(alreadyAccepted.admins, update.admins)) {
+      await acknowledgeControl(this.messageBox, pending.messageId)
+      await this.secrets.updateControls([], [], pending.messageId)
+      return existing
+    }
     if (!previous.admins.includes(pending.sender)
       || update.epoch !== existing.currentEpoch + 1
       || !update.members.includes(this.identityKey)
@@ -283,12 +333,23 @@ export class ConversationService {
     await this.secrets.save(secret)
     await this.store.read(secret, { tailPages: 1 })
     await acknowledgeControl(this.messageBox, pending.messageId)
+    await this.secrets.updateControls([], [], pending.messageId)
     return secret
   }
 
   async load(secret: ConversationSecret, tailPages = 3): Promise<ConversationView> {
-    const result = await this.store.read(secret, { tailPages })
-    return materializeConversation(secret, result.events, result.partial, result.loadedPages)
+    const received = this.inbox.events(secret)
+    const pending = this.outbox.list().filter((item) => item.conversationId === secret.conversationId)
+      .map((item) => this.outbox.decrypt(secret, item))
+    let result: Awaited<ReturnType<GlobalConversationStore['read']>>
+    try { result = await this.store.read(secret, { tailPages }) }
+    catch (error) {
+      if (!received.length && !pending.length) throw error
+      return { ...materializeConversation(secret, [...received, ...pending], true, 0), historyLoadFailed: true }
+    }
+    await this.inbox.reconcile(secret, result.events)
+    return { ...materializeConversation(secret, [...result.events, ...received, ...pending], result.partial, result.loadedPages),
+      hasMoreHistory: result.hasMoreHistory, historyLoadFailed: result.historyLoadFailed }
   }
 
   async sendMessage(
@@ -451,13 +512,15 @@ export class ConversationService {
   }
 
   async setPreferences(secret: ConversationSecret, patch: Partial<ConversationSecret['preferences']>): Promise<ConversationSecret> {
-    const updated = { ...secret, preferences: { ...secret.preferences, ...patch }, updatedAt: Date.now() }
+    const latest = await this.secrets.get(secret.conversationId) ?? secret
+    const updated = { ...latest, preferences: { ...latest.preferences, ...patch } }
     await this.secrets.save(updated)
     return updated
   }
 
   async openLive(secret: ConversationSecret, callbacks: {
     onSync: () => Promise<void>
+    onError?: (message: string) => void
     onState: (state: 'connecting' | 'live' | 'fallback') => void
     onEvent: (event: ConversationEvent) => void
     onDelivery: (eventId: string, state: MessageDeliveryState) => void
@@ -466,14 +529,20 @@ export class ConversationService {
     onCallChange?: (call: CallSnapshot) => void
     onRoomChange?: (room: MeetingRoomSnapshot | null) => void
   }): Promise<void> {
-    await this.closeLive()
+    const request = ++this.liveRequest
+    await this.closeLive(false)
+    if (request !== this.liveRequest) return
     this.liveCallbacks = { onEvent: callbacks.onEvent, onDelivery: callbacks.onDelivery }
     this.transport = new ConversationTransport({
       clientFactory: () => messageBoxFor(this.wallet),
       identityKey: this.identityKey,
       conversationId: secret.conversationId,
       epoch: currentEpoch(secret),
-      onEvent: callbacks.onEvent,
+      onEvent: async (event) => {
+        try { await this.inbox.receive(secret, event) }
+        catch (error) { callbacks.onError?.('Incoming messages could not be saved on this device. Check browser storage; messages remain queued for retry.'); throw error }
+        callbacks.onEvent(event)
+      },
       onSyncRequested: callbacks.onSync,
       onState: callbacks.onState,
       onPeersChange: callbacks.onPeersChange,
@@ -496,14 +565,15 @@ export class ConversationService {
     void this.flushOutbox().catch(() => undefined)
   }
 
-  async closeLive(): Promise<void> {
+  async closeLive(invalidate = true): Promise<void> {
+    if (invalidate) this.liveRequest += 1
     const active = this.transport
     const activeCall = this.callManager
     this.callManager = null
-    if (activeCall) await activeCall.stop()
     this.transport = null
     this.transportConversationId = null
     this.liveCallbacks = null
+    if (activeCall) await activeCall.stop()
     if (active) await active.stop()
   }
 
@@ -603,23 +673,44 @@ export class ConversationService {
           this.outbox.update(item.id, { state: 'confirmed' })
           if (this.transportConversationId === secret.conversationId) this.liveCallbacks?.onDelivery(event.id, 'saved')
         }
-        const epoch = currentEpoch(secret)
-        const transport = this.transport && this.transportConversationId === secret.conversationId
-          ? this.transport
-          : null
-        const delivered = transport ? await transport.publishEvent(event) : 0
-        const expected = Math.max(0, epoch.members.length - 1)
-        if (delivered === expected) {
+        const accepted = await this.forwardQueuedEvent(secret, event)
+        const expected = Math.max(0, secret.epochs.find((epoch) => epoch.epoch === event.epoch)!.members.length - 1)
+        if (accepted === expected) {
           this.outbox.update(item.id, { state: 'notified' })
           this.outbox.remove(item.id)
           if (this.transportConversationId === secret.conversationId) this.liveCallbacks?.onDelivery(event.id, 'saved')
         }
       } catch (error) {
-        this.outbox.update(item.id, { state: 'failed', lastError: safeWriteError(error) })
+        const durable = this.outbox.list().find((candidate) => candidate.id === item.id)?.state === 'confirmed'
+        this.outbox.update(item.id, { state: durable ? 'confirmed' : 'failed', lastError: safeWriteError(error) })
         if (this.transportConversationId === item.conversationId) this.liveCallbacks?.onDelivery(item.id, 'retrying')
         throw new EncryptedOutboxRetryError(error)
       }
     }
+  }
+
+  private async forwardQueuedEvent(secret: ConversationSecret, event: ConversationEvent): Promise<number> {
+    const existing = this.forwarding.get(event.id)
+    if (existing) return await existing
+    const operation = withConversationMutationLock(`forward:${this.identityKey}:${event.id}`, async () => {
+      const item = this.outbox.list().find((candidate) => candidate.id === event.id)
+      const epoch = secret.epochs.find((candidate) => candidate.epoch === event.epoch)!
+      if (!item) return Math.max(0, epoch.members.length - 1)
+      const accepted = new Set(this.outbox.acceptedRecipients(secret, item))
+      const remaining = epoch.members.filter((member) => member !== this.identityKey && !accepted.has(member))
+      const onAccepted = (recipient: string) => {
+        accepted.add(recipient)
+        if (item) this.outbox.recordAccepted(secret, item, [...accepted])
+      }
+      if (remaining.length) {
+        if (this.transport && this.transportConversationId === secret.conversationId && event.epoch === secret.currentEpoch) {
+          await this.transport.publishEvent(event, remaining, onAccepted)
+        } else await forwardStoredEvent(this.messageBox, secret, event, remaining, onAccepted)
+      }
+      return accepted.size
+    })
+    this.forwarding.set(event.id, operation)
+    try { return await operation } finally { this.forwarding.delete(event.id) }
   }
 
   async flushControlOutbox(): Promise<void> {
@@ -669,14 +760,14 @@ export class ConversationService {
       this.liveCallbacks?.onEvent(event)
       this.liveCallbacks?.onDelivery(event.id, 'sending')
       const expected = Math.max(0, currentEpoch(secret).members.length - 1)
-      void activeTransport.publishEvent(event).then((delivered) => {
+      void this.forwardQueuedEvent(secret, event).then((delivered) => {
         if (delivered === expected && this.transportConversationId === secret.conversationId) {
           this.liveCallbacks?.onDelivery(event.id, 'live')
         }
       }).catch(() => undefined)
     }
     const updated = { ...secret, updatedAt: event.createdAt }
-    await this.secrets.save(updated)
+    await this.secrets.save(updated).catch(() => undefined)
     if (awaitDurable) await this.flushOutbox()
     else void this.flushOutbox().catch(() => undefined)
   }
