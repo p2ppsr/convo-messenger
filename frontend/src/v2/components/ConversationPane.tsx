@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowDown, Reply, AtSign, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, Mic, MoreHorizontal, Paperclip, Phone, Search, Send, ShieldCheck, SmilePlus, Square, Trash2, Video, X } from 'lucide-react'
 import type { ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from '../domain/types'
 import { identityInitials, identityName, type IdentityProfileMap } from '../hooks/useIdentityProfiles'
@@ -78,6 +78,10 @@ export function ConversationPane(props: Props) {
   const [reactionPicker, setReactionPicker] = useState<string | null>(null)
   const [newMessages, setNewMessages] = useState(false)
   const [sendError, setSendError] = useState('')
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState(false)
+  const historyRequest = useRef<string | null>(null)
+  const historyAnchor = useRef<{ id: string; height: number; top: number } | null>(null)
   const submitting = useRef(false)
   const atBottom = useRef(true)
   const drafts = useRef(new Map<string, { body: string; files: File[]; reply: MaterializedMessage | null }>())
@@ -154,6 +158,7 @@ export function ConversationPane(props: Props) {
     draftConversationId.current = secret?.conversationId
     const saved = secret ? drafts.current.get(secret.conversationId) : undefined
     setDraft(saved?.body ?? ''); setFiles(saved?.files ?? []); setReplying(saved?.reply ?? null)
+    setHistoryLoading(false); setHistoryError(false); historyRequest.current = null; historyAnchor.current = null
     setNewMessages(false); setSendError(''); setReactionPicker(null); atBottom.current = true
      setEditing(null); setCallMenu(null); setSelectedCallMembers([]); setSearchOpen(false); setSearchQuery(''); setMentionDraft(null); setRecordingError('')
     return () => {
@@ -188,6 +193,35 @@ export function ConversationPane(props: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view?.messages.at(-1)?.id, secret?.conversationId])
 
+  const loadEarlier = async () => {
+    if (!secret || loading || historyRequest.current === secret.conversationId) return
+    const id = secret.conversationId
+    historyRequest.current = id
+    setHistoryLoading(true); setHistoryError(false)
+    const element = timeline.current
+    if (element) historyAnchor.current = { id, height: element.scrollHeight, top: element.scrollTop }
+    try { await props.onLoadHistory() }
+    catch { if (historyRequest.current === id) { historyAnchor.current = null; setHistoryError(true) } }
+    finally {
+      if (historyRequest.current === id) { historyRequest.current = null; setHistoryLoading(false) }
+    }
+  }
+  useLayoutEffect(() => {
+    const anchor = historyAnchor.current
+    const element = timeline.current
+    if (anchor && element && anchor.id === secret?.conversationId) {
+      element.scrollTop = anchor.top + element.scrollHeight - anchor.height
+      historyAnchor.current = null
+    }
+  }, [view, secret?.conversationId])
+  useEffect(() => {
+    const element = timeline.current
+    if (!loading && !historyLoading && !historyError && !view?.historyLoadFailed && view?.hasMoreHistory
+      && element && element.scrollHeight <= element.clientHeight) void loadEarlier()
+  // The view controls pagination; callback identity must not start another request.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, loading, historyLoading, historyError])
+
   useEffect(() => {
     const input = composerInput.current
     if (input) { input.style.height = 'auto'; input.style.height = `${Math.min(180, Math.max(44, input.scrollHeight))}px` }
@@ -198,7 +232,7 @@ export function ConversationPane(props: Props) {
       <main className="conversation-pane empty-pane">
         <button className="icon-button mobile-menu" onClick={props.onOpenRail} aria-label="Open conversations"><Menu size={21} /></button>
         {loading
-          ? <div className="empty-hero" role="status"><span className="wallet-spinner" /><span className="eyebrow">Wallet-private index</span><h1>Loading your conversations…</h1><p>Decrypting group titles and membership locally. Nothing in the public overlay reveals your roster.</p></div>
+          ? <div className="empty-hero" role="status"><span className="wallet-spinner" /><h1>Loading your conversations…</h1><p>Getting your workspace ready.</p></div>
           : <div className="empty-hero"><div className="hero-lock"><LockKeyhole size={34} /></div><span className="eyebrow">Your team. Your conversations.</span><h1>A little closer.<br />A lot more private.</h1><p>A focused home for the conversations that move your day forward. Start with a teammate or bring your group together.</p><div className="security-pills"><span><ShieldCheck size={15} /> End-to-end encrypted</span><span><FileLock2 size={15} /> Wallet-private keys</span></div></div>}
       </main>
     )
@@ -308,19 +342,22 @@ export function ConversationPane(props: Props) {
         <button className="header-details" onClick={props.onOpenDetails}><Info size={18} /><span>Details</span></button>
       </header>
 
-      {(props.meetingRoom || searchOpen || view?.partial) && <div className="conversation-tools">
+      {(props.meetingRoom || searchOpen) && <div className="conversation-tools">
         {props.meetingRoom && <div className="meeting-room-banner" role="status"><span className="meeting-room-pulse"><Video size={17} /></span><span><strong>{identityName(props.identityProfiles, props.meetingRoom.hostIdentityKey)} opened a {props.meetingRoom.media} room</strong><small>Join now · media starts only after you approve access</small></span><button onClick={() => void props.onJoinMeetingRoom()}>{props.meetingRoom.media === 'video' ? <Video size={16} /> : <Phone size={16} />} Join room</button></div>}
         {searchOpen && <label className="message-search" htmlFor="message-search"><Search size={16} /><input id="message-search" name="message-search" autoFocus type="search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search decrypted messages" /><span>{cleanSearch ? `${visibleMessages.length} result${visibleMessages.length === 1 ? '' : 's'}` : 'On this device'}</span><button onClick={() => { setSearchOpen(false); setSearchQuery('') }} aria-label="Close message search"><X size={15} /></button></label>}
-        {view?.partial && <button className="history-banner" onClick={() => void props.onLoadHistory()}><ArrowDown size={16} /> Older encrypted events are available. Load full history.</button>}
       </div>}
       <div className="message-timeline" ref={timeline} role="log" aria-label="Messages" onScroll={() => {
         const element = timeline.current
         if (!element) return
+        if (element.scrollTop < 80 && view?.hasMoreHistory && !view.historyLoadFailed && !historyError && !cleanSearch) void loadEarlier()
         atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80
         if (atBottom.current) { setNewMessages(false); if (document.visibilityState === 'visible') props.onRead?.(view?.messages.at(-1)?.createdAt ?? 0) }
       }}>
-        {loading && <div className="timeline-state"><span className="spinner" /> Opening encrypted history…</div>}
-        {!loading && view?.messages.length === 0 && <div className="timeline-empty"><ShieldCheck size={27} /><h2>This conversation is ready</h2><p>Send the first end-to-end encrypted message.</p></div>}
+        {loading && <div className="timeline-state" role="status"><span className="spinner" /> Loading messages…</div>}
+        {!loading && historyLoading && <div className="history-status" role="status">Loading earlier messages…</div>}
+        {!loading && !historyLoading && (historyError || view?.historyLoadFailed) && <div className="history-status">Some messages couldn’t load. <button onClick={() => void loadEarlier()}>Try again</button></div>}
+        {!loading && !historyLoading && !historyError && !view?.historyLoadFailed && view?.hasMoreHistory && <button className="history-more" onClick={() => void loadEarlier()}>Earlier messages</button>}
+        {!loading && !historyLoading && !historyError && !view?.historyLoadFailed && !view?.hasMoreHistory && view?.messages.length === 0 && <div className="timeline-empty"><ShieldCheck size={27} /><h2>This conversation is ready</h2><p>Send the first end-to-end encrypted message.</p></div>}
         {!loading && cleanSearch && visibleMessages.length === 0 && <div className="timeline-empty search-empty"><Search size={27} /><h2>No matching messages</h2><p>Search checks decrypted text, people, and attachment names locally.</p></div>}
         {visibleMessages.map((message, index) => {
           const previous = visibleMessages[index - 1]
@@ -339,7 +376,7 @@ export function ConversationPane(props: Props) {
               <div className="message-stack">
                 <div className="message-meta"><span>{mine ? 'You' : identityName(props.identityProfiles, message.sender)}</span><time dateTime={new Date(message.createdAt).toISOString()} title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</time>{message.edited && <em>edited</em>}{mentionsMe && <em className="mentioned-you"><AtSign size={10} /> Mentioned you</em>}</div>
                 <div className="message-bubble">
-                  {message.replyTo && <button className="quoted-message" onClick={() => { setSearchQuery(''); requestAnimationFrame(() => document.getElementById(`message-${message.replyTo}`)?.scrollIntoView({ block: 'center' })) }}><Reply size={14} /><span><strong>{parent ? identityName(props.identityProfiles, parent.sender) : 'Earlier message'}</strong><small>{parent ? displayMessageText(parent.body || 'Attachment', props.identityProfiles) : 'Load older history to see this reply'}</small></span></button>}
+                  {message.replyTo && <button className="quoted-message" onClick={() => { setSearchQuery(''); if (!parent && view?.hasMoreHistory) void loadEarlier(); else requestAnimationFrame(() => document.getElementById(`message-${message.replyTo}`)?.scrollIntoView({ block: 'center' })) }}><Reply size={14} /><span><strong>{parent ? identityName(props.identityProfiles, parent.sender) : 'Earlier message'}</strong><small>{parent ? displayMessageText(parent.body || 'Attachment', props.identityProfiles) : 'View earlier message'}</small></span></button>}
                   {isEditing ? <div className="edit-form"><textarea id={`edit-message-${message.id}`} name="edited-message" aria-label="Edit message" value={editBody} onChange={(event) => setEditBody(event.target.value)} autoFocus /><div><button className="text-button" onClick={() => setEditing(null)}>Cancel</button><button className="compact-button is-active" onClick={() => void props.onEdit(message.id, editBody).then(() => setEditing(null))}>Save</button></div></div> : <MessageText body={message.body} profiles={props.identityProfiles} />}
                   {message.attachments.map((attachment, index) => isInlineImage(attachment) || isInlineAudio(attachment)
                     ? <EncryptedMediaAttachment attachment={attachment} message={message} index={index} media={isInlineImage(attachment) ? 'image' : 'audio'} onOpen={props.onOpenAttachment} key={attachment.id} />

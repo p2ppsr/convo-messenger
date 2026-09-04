@@ -658,3 +658,14 @@ body { background: var(--canvas); }
 .message-text .inline-code { background: #35303f; color: #e5d7f3; border: 1px solid #4a4057; border-radius: 4px; padding: 1px 4px; font-size: .9em; }
 .message-text pre { max-width: 100%; margin: 8px 0; padding: 14px; border: 1px solid #484050; border-radius: 8px; background: #15151d; color: #d7cfe5; overflow-x: auto; white-space: pre; font-size: 12px; }
 .message-stack { min-width: 0; }
+
+/* One startup indicator; the rail quietly reserves space for conversations. */
+.rail-skeleton { padding: 18px 8px; opacity: .5; }
+.rail-skeleton > div { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+.rail-skeleton i { width: 38px; height: 38px; border-radius: 12px; background: var(--line-strong); }
+.rail-skeleton span { flex: 1; }
+.rail-skeleton b, .rail-skeleton small { display: block; height: 8px; width: 70%; background: var(--line-strong); border-radius: 4px; }
+.rail-skeleton small { width: 90%; height: 6px; margin-top: 10px; }
+.history-status, .history-more { text-align: center; color: var(--muted); font-size: 12px; padding: 12px; }
+.history-status button, .history-more { background: none; border: 0; color: var(--accent); cursor: pointer; }
+.history-more { display: block; margin: 0 auto; }

@@ -345,10 +345,11 @@ export class ConversationService {
     try { result = await this.store.read(secret, { tailPages }) }
     catch (error) {
       if (!received.length && !pending.length) throw error
-      return materializeConversation(secret, [...received, ...pending], true, 0)
+      return { ...materializeConversation(secret, [...received, ...pending], true, 0), historyLoadFailed: true }
     }
     await this.inbox.reconcile(secret, result.events)
-    return materializeConversation(secret, [...result.events, ...received, ...pending], result.partial, result.loadedPages)
+    return { ...materializeConversation(secret, [...result.events, ...received, ...pending], result.partial, result.loadedPages),
+      hasMoreHistory: result.hasMoreHistory, historyLoadFailed: result.historyLoadFailed }
   }
 
   async sendMessage(

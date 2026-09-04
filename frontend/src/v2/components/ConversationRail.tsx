@@ -111,7 +111,7 @@ export function ConversationRail(props: Props) {
         {section('Groups', <Hash size={14} />, groups)}
         {section('Direct messages', <AtSign size={14} />, directMessages)}
         {loading && conversations.length === 0 && (
-          <div className="rail-empty rail-loading" role="status"><span className="spinner" /><p>Loading private conversations…</p><span>Opening your wallet-encrypted index.</span></div>
+          <div className="rail-skeleton" aria-hidden="true">{[0, 1, 2, 3].map((row) => <div key={row}><i /><span><b /><small /></span></div>)}</div>
         )}
         {!loading && filtered.length === 0 && (
           <div className="rail-empty"><ShieldCheck size={24} /><p>{cleanQuery ? 'No matching conversations.' : showArchived ? 'No archived conversations.' : filter === 'unread' ? 'You’re all caught up.' : 'No conversations yet.'}</p><span>{cleanQuery ? 'Try a person, group, or identity key.' : showArchived ? 'Archived chats will appear here.' : 'Start a direct message or private group.'}</span></div>

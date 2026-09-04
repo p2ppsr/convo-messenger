@@ -41,7 +41,7 @@ export function validAttachmentSet(
   conversationId: string,
   epoch: number,
 ): boolean {
-  if (attachments === undefined) return attachmentKey === undefined
+  if (attachments === undefined || (Array.isArray(attachments) && attachments.length === 0)) return attachmentKey === undefined
   return Array.isArray(attachments)
     && attachments.length > 0 && attachments.length <= MAX_ATTACHMENTS_PER_MESSAGE
     && attachments.every(validAttachmentReference)

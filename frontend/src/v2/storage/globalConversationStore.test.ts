@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ConversationEvent, ConversationSecret } from '../domain/types'
+import type { MessageEvent, ConversationSecret } from '../domain/types'
 import { epochHistoryDigest, eventDigest, eventLocator, eventTag, generateRootKey, pageLocator } from '../domain/crypto'
 import { GlobalConversationStore, type ConversationOverlay, type OverlayEntry, type OverlayQuery } from './globalConversationStore'
 
@@ -39,11 +39,22 @@ function baseSecret(rootKey: string): ConversationSecret {
   }
 }
 
-function message(secret: ConversationSecret, sender: string, id: string, body: string, epoch = secret.currentEpoch): ConversationEvent {
+function message(secret: ConversationSecret, sender: string, id: string, body: string, epoch = secret.currentEpoch): MessageEvent {
   return { v: 2, type: 'message', id, conversationId: secret.conversationId, epoch, sender, createdAt: Number(id.replace(/\D/g, '')) || 1, body }
 }
 
 describe('GlobalKVStore private page model', () => {
+  it('distinguishes older messages from a failed history request', async () => {
+    const state = new SharedOverlayState()
+    const secret = baseSecret(generateRootKey())
+    const store = new GlobalConversationStore(new MemoryOverlay(state, alice))
+    for (let index = 1; index <= 33; index++) await store.append(secret, alice, message(secret, alice, `event-${index}`, 'A message'))
+    expect(await store.read(secret, { tailPages: 1 })).toMatchObject({ partial: true, hasMoreHistory: true, historyLoadFailed: false })
+    expect(await store.read(secret, { tailPages: 2 })).toMatchObject({ partial: false, hasMoreHistory: false, historyLoadFailed: false })
+    const failed = new GlobalConversationStore({ get: async () => { throw new Error('Offline') }, set: async () => '' })
+    expect(await failed.read(secret)).toMatchObject({ partial: true, hasMoreHistory: false, historyLoadFailed: true })
+  })
+
   it('publishes only secret-derived locators and padded ciphertext', async () => {
     const state = new SharedOverlayState()
     const secret = baseSecret(generateRootKey())
@@ -59,7 +70,9 @@ describe('GlobalKVStore private page model', () => {
       key: eventLocator(secret.epochs[0].rootKey, alice, 'event-1'),
       tags: [eventTag(secret.epochs[0].rootKey, alice)],
     })
-    expect((await store.read(secret)).events).toHaveLength(1)
+    await store.append(secret, alice, { ...message(secret, alice, 'event-2', 'Text without files'), attachments: [] })
+    expect(await store.read(secret)).toMatchObject({ partial: false, historyLoadFailed: false })
+    expect((await store.read(secret)).events).toHaveLength(2)
   })
 
   it('combines member-owned pages while keeping their locators unlinkable without the root key', async () => {

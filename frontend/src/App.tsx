@@ -110,8 +110,10 @@ function App() {
     setUpdates(pending.updates)
   }, [service])
 
-  const reloadActive = useCallback(async (secret: ConversationSecret, tailPages = 3) => {
+  const historyDepth = useRef(new Map<string, number>())
+  const reloadActive = useCallback(async (secret: ConversationSecret, tailPages = historyDepth.current.get(secret.conversationId) ?? 3) => {
     if (!service) return
+    historyDepth.current.set(secret.conversationId, tailPages)
     let nextView = await service.load(secret, tailPages)
     for (const event of [...liveEventsRef.current.values()]
       .filter((candidate) => candidate.conversationId === secret.conversationId)
@@ -326,7 +328,7 @@ function App() {
           meetingRoom={meetingRoom}
           onOpenRail={() => setRailOpen(true)}
           onOpenDetails={() => setDetailsOpen(true)}
-          onLoadHistory={() => activeSecret ? runBusy(() => reloadActive(activeSecret, Number.MAX_SAFE_INTEGER)) : Promise.resolve()}
+          onLoadHistory={() => activeSecret ? reloadActive(activeSecret, Math.min(10_000, (historyDepth.current.get(activeSecret.conversationId) ?? 3) + (view?.hasMoreHistory ? 3 : 0))) : Promise.resolve()}
           onTyping={publishTyping}
           onRead={markRead}
           onCall={async (peers, media) => {

@@ -154,6 +154,8 @@ export interface ConversationView {
   admins: string[]
   messages: MaterializedMessage[]
   partial: boolean
+  hasMoreHistory?: boolean
+  historyLoadFailed?: boolean
   loadedPages: number
 }
 

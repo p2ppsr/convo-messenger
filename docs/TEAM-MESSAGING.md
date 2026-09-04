@@ -8,7 +8,7 @@ not uploaded; refreshing or closing the app discards unsent drafts. Enter sends,
 Shift+Enter inserts a line, and IME composition never sends a message. Files can
 be selected, pasted, or dropped on the composer (20 files, 25 MB each).
 
-Reading earlier messages preserves the scroll position. A new-message button
+Earlier messages load as you scroll up, preserving the visible position. Pagination is distinct from a failed fetch; only failed fetches show a retry action. Text messages with an empty attachment list are valid. Startup uses one central loading indicator and static rail placeholders. A new-message button
 returns to the latest messages. Reading state is private to this device; it is
 not a network read receipt. `Forwarded` means MessageBox accepted the event,
 while `History saved` means durable storage completed. Neither means a human has

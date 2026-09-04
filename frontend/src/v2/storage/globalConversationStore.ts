@@ -224,6 +224,8 @@ export class GlobalConversationStore {
   private async readImmutableEvents(epoch: ConversationEpoch, member: string, eventLimit: number): Promise<{
     events: ConversationEvent[]
     partial: boolean
+    hasMore: boolean
+    failed: boolean
     loaded: number
   }> {
     const events: ConversationEvent[] = []
@@ -247,18 +249,22 @@ export class GlobalConversationStore {
         events.push(event)
       }
       skip += entries.length
-      if (entries.length < limit) return { events, partial: rejected, loaded: entries.length === 0 ? 0 : Math.ceil(skip / EVENT_QUERY_PAGE_SIZE) }
+      if (entries.length < limit) return { events, partial: rejected, hasMore: false, failed: rejected, loaded: entries.length === 0 ? 0 : Math.ceil(skip / EVENT_QUERY_PAGE_SIZE) }
     }
-    return { events, partial: true, loaded: Math.ceil(skip / EVENT_QUERY_PAGE_SIZE) }
+    return { events, partial: true, hasMore: eventLimit < MAX_EVENTS_PER_MEMBER, failed: rejected || eventLimit >= MAX_EVENTS_PER_MEMBER, loaded: Math.ceil(skip / EVENT_QUERY_PAGE_SIZE) }
   }
 
   async read(secret: ConversationSecret, options: { tailPages?: number } = {}): Promise<{
     events: ConversationEvent[]
     partial: boolean
+    hasMoreHistory: boolean
+    historyLoadFailed: boolean
     loadedPages: number
   }> {
     const events: ConversationEvent[] = []
     let partial = false
+    let hasMoreHistory = false
+    let historyLoadFailed = false
     let loadedPages = 0
     const tailPages = Math.max(1, Math.min(MAX_PAGES_PER_MEMBER, Math.floor(options.tailPages ?? 3)))
     const eventLimit = Math.min(MAX_EVENTS_PER_MEMBER, tailPages * MAX_PAGE_EVENTS)
@@ -269,13 +275,15 @@ export class GlobalConversationStore {
         events.push(...immutable.events)
         loadedPages += immutable.loaded
         if (immutable.partial) partial = true
+        if (immutable.hasMore) hasMoreHistory = true
+        if (immutable.failed) historyLoadFailed = true
 
         // Read the original paged layout as a migration bridge. All new writes
         // use immutable entries, so this path never participates in contention.
         const manifest = await this.readManifest(epoch, member)
         if (!manifest) return
         const start = Math.max(0, manifest.currentPage - tailPages + 1)
-        if (start > 0) partial = true
+        if (start > 0) { partial = true; hasMoreHistory = true }
         const pages = await Promise.all(
           Array.from({ length: manifest.currentPage - start + 1 }, (_, offset) => this.readPage(epoch, member, start + offset)),
         )
@@ -283,22 +291,26 @@ export class GlobalConversationStore {
           if (page) {
             loadedPages += 1
             for (const event of page.events) {
-              if (event.conversationId !== secret.conversationId) { partial = true; continue }
+              if (event.conversationId !== secret.conversationId) { partial = true; historyLoadFailed = true; continue }
               const expectedDigest = epoch.closure?.eventDigests[event.id]
-              if (epoch.closure && (!expectedDigest || expectedDigest !== eventDigest(event))) { partial = true; continue }
+              if (epoch.closure && (!expectedDigest || expectedDigest !== eventDigest(event))) { partial = true; historyLoadFailed = true; continue }
               events.push(event)
             }
           }
         }
       } catch {
+        historyLoadFailed = true
         partial = true
       }
     })))
     for (const epoch of secret.epochs) {
       if (!epoch.closure) continue
       const observed = new Set(events.filter((event) => event.epoch === epoch.epoch).map((event) => event.id))
-      if (Object.keys(epoch.closure.eventDigests).some((id) => !observed.has(id))) partial = true
+      if (Object.keys(epoch.closure.eventDigests).some((id) => !observed.has(id))) {
+        partial = true
+        if (!hasMoreHistory) historyLoadFailed = true
+      }
     }
-    return { events, partial, loadedPages }
+    return { events, partial, hasMoreHistory, historyLoadFailed, loadedPages }
   }
 }
