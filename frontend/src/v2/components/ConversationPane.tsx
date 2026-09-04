@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
-import { ArrowDown, AtSign, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, Mic, MoreHorizontal, Paperclip, Phone, Search, Send, ShieldCheck, SmilePlus, Square, Trash2, Video, X } from 'lucide-react'
+import { Fragment, useEffect, useRef, useState } from 'react'
+import { ArrowDown, Reply, AtSign, CheckCheck, Download, FileLock2, Info, LockKeyhole, Menu, Mic, MoreHorizontal, Paperclip, Phone, Search, Send, ShieldCheck, SmilePlus, Square, Trash2, Video, X } from 'lucide-react'
 import type { ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from '../domain/types'
 import { identityInitials, identityName, type IdentityProfileMap } from '../hooks/useIdentityProfiles'
 import { conversationName } from '../domain/presentation'
-import { activeMentionDraft, displayMessageText, insertMention, mentionedIdentities, MENTION_PATTERN, type MentionDraft } from '../domain/mentions'
+import { activeMentionDraft, displayMessageText, insertMention, mentionedIdentities, type MentionDraft } from '../domain/mentions'
 import { isInlineAudio, isInlineImage, MAX_ATTACHMENT_BYTES } from '../domain/attachmentValidation'
 import { MAX_MEETING_PARTICIPANTS, type MeetingRoomSnapshot } from '../realtime/meetingCalling'
 import type { CallMedia, RealtimePeer, TypingPeer } from '../realtime/messaging'
+import { MessageText } from './MessageText'
 import { IdentityAvatar } from './IdentityAvatar'
 import { EncryptedMediaAttachment } from './EncryptedImageAttachment'
 
@@ -55,7 +55,8 @@ interface Props {
   onTyping: (active: boolean) => void
   onCall: (identityKeys: string[], media: CallMedia) => Promise<void>
   onJoinMeetingRoom: () => Promise<void>
-  onSend: (body: string, files: File[]) => Promise<void>
+  onRead?: (through: number) => void
+  onSend: (body: string, files: File[], replyTo?: string) => Promise<void>
   onEdit: (messageId: string, body: string) => Promise<void>
   onDelete: (messageId: string) => Promise<void>
   onReact: (messageId: string, emoji: string) => Promise<void>
@@ -67,26 +68,22 @@ function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(timestamp)
 }
 
-function messageBody(body: string, profiles: IdentityProfileMap): ReactNode[] {
-  const output: ReactNode[] = []
-  let cursor = 0
-  for (const match of body.matchAll(new RegExp(MENTION_PATTERN.source, MENTION_PATTERN.flags))) {
-    const start = match.index
-    if (start > cursor) output.push(body.slice(cursor, start))
-    const identityKey = match[1]
-    output.push(<span className="message-mention" title={identityKey} key={`${start}:${identityKey}`}><AtSign size={13} />{identityName(profiles, identityKey)}</span>)
-    cursor = start + match[0].length
-  }
-  if (cursor < body.length) output.push(body.slice(cursor))
-  return output
-}
-
 export function ConversationPane(props: Props) {
   const { identityKey, secret, view, loading, busy, liveState, onlinePeers, typingPeers, deliveryStates, onTyping } = props
   const [draft, setDraft] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [editing, setEditing] = useState<string | null>(null)
   const [editBody, setEditBody] = useState('')
+  const [replying, setReplying] = useState<MaterializedMessage | null>(null)
+  const [reactionPicker, setReactionPicker] = useState<string | null>(null)
+  const [newMessages, setNewMessages] = useState(false)
+  const [sendError, setSendError] = useState('')
+  const submitting = useRef(false)
+  const atBottom = useRef(true)
+  const drafts = useRef(new Map<string, { body: string; files: File[]; reply: MaterializedMessage | null }>())
+  const draftConversationId = useRef(secret?.conversationId)
+  const currentDraft = useRef({ id: secret?.conversationId, body: draft, files, reply: replying })
+  currentDraft.current = { id: secret?.conversationId, body: draft, files, reply: replying }
   const [callMenu, setCallMenu] = useState<CallMedia | null>(null)
   const [selectedCallMembers, setSelectedCallMembers] = useState<string[]>([])
   const [searchOpen, setSearchOpen] = useState(false)
@@ -153,14 +150,21 @@ export function ConversationPane(props: Props) {
   }
 
   useEffect(() => {
-    setDraft(''); setFiles([]); setEditing(null); setCallMenu(null); setSelectedCallMembers([]); setSearchOpen(false); setSearchQuery(''); setMentionDraft(null); setRecordingError('')
+    if (draftConversationId.current) drafts.current.set(draftConversationId.current, { body: currentDraft.current.body, files: currentDraft.current.files, reply: currentDraft.current.reply })
+    draftConversationId.current = secret?.conversationId
+    const saved = secret ? drafts.current.get(secret.conversationId) : undefined
+    setDraft(saved?.body ?? ''); setFiles(saved?.files ?? []); setReplying(saved?.reply ?? null)
+    setNewMessages(false); setSendError(''); setReactionPicker(null); atBottom.current = true
+     setEditing(null); setCallMenu(null); setSelectedCallMembers([]); setSearchOpen(false); setSearchQuery(''); setMentionDraft(null); setRecordingError('')
     return () => {
       onTyping(false)
       discardRecording.current = true
       if (recorder.current?.state !== 'inactive') recorder.current?.stop()
       recordingStream.current?.getTracks().forEach((track) => track.stop())
     }
-  }, [secret?.conversationId, onTyping])
+  // The draft belongs to the conversation, independently of callback identity.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [secret?.conversationId])
   useEffect(() => {
     if (!isRecording) return
     const timer = window.setInterval(() => setRecordingSeconds((seconds) => {
@@ -176,9 +180,18 @@ export function ConversationPane(props: Props) {
   useEffect(() => {
     const element = timeline.current
     if (!element) return
-    if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight })
-    else element.scrollTop = element.scrollHeight
-  }, [view?.messages.length, secret?.conversationId])
+    if (atBottom.current) {
+      element.scrollTop = element.scrollHeight
+      setNewMessages(false)
+      if (document.visibilityState === 'visible') props.onRead?.(view?.messages.at(-1)?.createdAt ?? 0)
+    } else setNewMessages(true)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view?.messages.at(-1)?.id, secret?.conversationId])
+
+  useEffect(() => {
+    const input = composerInput.current
+    if (input) { input.style.height = 'auto'; input.style.height = `${Math.min(180, Math.max(44, input.scrollHeight))}px` }
+  }, [draft])
 
   if (!secret) {
     return (
@@ -186,7 +199,7 @@ export function ConversationPane(props: Props) {
         <button className="icon-button mobile-menu" onClick={props.onOpenRail} aria-label="Open conversations"><Menu size={21} /></button>
         {loading
           ? <div className="empty-hero" role="status"><span className="wallet-spinner" /><span className="eyebrow">Wallet-private index</span><h1>Loading your conversations…</h1><p>Decrypting group titles and membership locally. Nothing in the public overlay reveals your roster.</p></div>
-          : <div className="empty-hero"><div className="hero-lock"><LockKeyhole size={34} /></div><span className="eyebrow">Convo protocol v2</span><h1>Group chat without a public group.</h1><p>Conversation locators, member lists, titles, and messages stay secret. Pick a conversation or create a new one.</p><div className="security-pills"><span><ShieldCheck size={15} /> End-to-end encrypted</span><span><FileLock2 size={15} /> Wallet-private keys</span></div></div>}
+          : <div className="empty-hero"><div className="hero-lock"><LockKeyhole size={34} /></div><span className="eyebrow">Your team. Your conversations.</span><h1>A little closer.<br />A lot more private.</h1><p>A focused home for the conversations that move your day forward. Start with a teammate or bring your group together.</p><div className="security-pills"><span><ShieldCheck size={15} /> End-to-end encrypted</span><span><FileLock2 size={15} /> Wallet-private keys</span></div></div>}
       </main>
     )
   }
@@ -195,7 +208,7 @@ export function ConversationPane(props: Props) {
   const otherMembers = members.filter((member) => member !== identityKey)
   const onlineSet = new Set(onlinePeers.map((peer) => peer.identityKey))
   const directPeer = secret.kind === 'direct' && otherMembers.length === 1 ? otherMembers[0] : null
-  const displayTitle = conversationName(secret, identityKey, props.identityProfiles)
+  const displayTitle = secret.kind === 'group' ? (view?.title ?? secret.title) : conversationName(secret, identityKey, props.identityProfiles)
   const beginCall = (media: CallMedia) => {
     if (directPeer) void props.onCall([directPeer], media)
     else {
@@ -231,18 +244,46 @@ export function ConversationPane(props: Props) {
     })
   }
 
+  const addFiles = (incoming: File[]) => {
+    if (files.length + incoming.length > 20 || incoming.some((file) => file.size > MAX_ATTACHMENT_BYTES)) {
+      setSendError('Choose up to 20 attachments, each smaller than 25 MB.')
+      return
+    }
+    setFiles((current) => [...current, ...incoming])
+    setSendError('')
+  }
   const submit = async () => {
-    if ((!draft.trim() && files.length === 0) || busy || isRecording) return
-    const currentDraft = draft
-    const currentFiles = files
-    setDraft('')
-    setFiles([])
+    if ((!draft.trim() && files.length === 0) || busy || isRecording || submitting.current) return
+    submitting.current = true
+    setSendError('')
+    const sent = { id: secret.conversationId, body: draft, files, reply: replying }
     onTyping(false)
-    try { await props.onSend(currentDraft, currentFiles) } catch { setDraft(currentDraft); setFiles(currentFiles) }
+    try {
+      if (replying) await props.onSend(draft, files, replying.id)
+      else await props.onSend(draft, files)
+      if (currentDraft.current.id === sent.id && currentDraft.current.body === sent.body && currentDraft.current.files === sent.files) {
+        setDraft(''); setFiles([]); setReplying(null)
+        drafts.current.delete(sent.id)
+        atBottom.current = true
+        requestAnimationFrame(() => composerInput.current?.focus())
+      } else if (currentDraft.current.id !== sent.id) {
+        const saved = drafts.current.get(sent.id)
+        if (saved?.body === sent.body && saved.files === sent.files) drafts.current.delete(sent.id)
+      }
+    } catch {
+      if (currentDraft.current.id === sent.id) setSendError('Message was not queued. Your draft is here; try sending again.')
+    } finally { submitting.current = false }
+  }
+  const jumpToLatest = () => {
+    if (timeline.current) timeline.current.scrollTop = timeline.current.scrollHeight
+    atBottom.current = true
+    setNewMessages(false)
+    props.onRead?.(view?.messages.at(-1)?.createdAt ?? 0)
   }
 
+
   return (
-    <main className="conversation-pane">
+    <main className={`conversation-pane ${secret.kind}-conversation`}>
       <header className="conversation-header">
         <button className="icon-button mobile-menu" onClick={props.onOpenRail} aria-label="Open conversations"><Menu size={21} /></button>
         {directPeer
@@ -272,39 +313,58 @@ export function ConversationPane(props: Props) {
         {searchOpen && <label className="message-search" htmlFor="message-search"><Search size={16} /><input id="message-search" name="message-search" autoFocus type="search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search decrypted messages" /><span>{cleanSearch ? `${visibleMessages.length} result${visibleMessages.length === 1 ? '' : 's'}` : 'On this device'}</span><button onClick={() => { setSearchOpen(false); setSearchQuery('') }} aria-label="Close message search"><X size={15} /></button></label>}
         {view?.partial && <button className="history-banner" onClick={() => void props.onLoadHistory()}><ArrowDown size={16} /> Older encrypted events are available. Load full history.</button>}
       </div>}
-      <div className="message-timeline" ref={timeline} aria-live="polite">
+      <div className="message-timeline" ref={timeline} role="log" aria-label="Messages" onScroll={() => {
+        const element = timeline.current
+        if (!element) return
+        atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80
+        if (atBottom.current) { setNewMessages(false); if (document.visibilityState === 'visible') props.onRead?.(view?.messages.at(-1)?.createdAt ?? 0) }
+      }}>
         {loading && <div className="timeline-state"><span className="spinner" /> Opening encrypted history…</div>}
         {!loading && view?.messages.length === 0 && <div className="timeline-empty"><ShieldCheck size={27} /><h2>This conversation is ready</h2><p>Send the first end-to-end encrypted message.</p></div>}
         {!loading && cleanSearch && visibleMessages.length === 0 && <div className="timeline-empty search-empty"><Search size={27} /><h2>No matching messages</h2><p>Search checks decrypted text, people, and attachment names locally.</p></div>}
-        {visibleMessages.map((message) => {
+        {visibleMessages.map((message, index) => {
+          const previous = visibleMessages[index - 1]
+          const day = new Date(message.createdAt).toDateString()
+          const newDay = !previous || new Date(previous.createdAt).toDateString() !== day
+          const grouped = !newDay && previous?.sender === message.sender && message.createdAt - previous.createdAt < 300_000
+          const parent = message.replyTo ? view?.messages.find((candidate) => candidate.id === message.replyTo) : undefined
           const mine = message.sender === identityKey
           const isEditing = editing === message.id
           const mentionsMe = mentionedIdentities(message.body).includes(identityKey)
           return (
-            <article className={`message-row ${mine ? 'mine' : ''} ${mentionsMe ? 'mentions-me' : ''}`} key={message.id}>
-              {!mine && <IdentityAvatar className="message-sender-avatar" identityKey={message.sender} profiles={props.identityProfiles} />}
+            <Fragment key={message.id}>
+            {newDay && <div className="day-divider"><span>{day === new Date().toDateString() ? 'Today' : new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' }).format(message.createdAt)}</span></div>}
+            <article id={`message-${message.id}`} className={`message-row ${mine ? 'mine' : ''} ${grouped ? 'grouped' : ''} ${mentionsMe ? 'mentions-me' : ''}`}>
+              {(!mine || secret.kind === 'group') && <IdentityAvatar className="message-sender-avatar" identityKey={message.sender} profiles={props.identityProfiles} />}
               <div className="message-stack">
-                <div className="message-meta"><span>{mine ? 'You' : identityName(props.identityProfiles, message.sender)}</span><time>{formatTime(message.createdAt)}</time>{message.edited && <em>edited</em>}{mentionsMe && <em className="mentioned-you"><AtSign size={10} /> Mentioned you</em>}</div>
+                <div className="message-meta"><span>{mine ? 'You' : identityName(props.identityProfiles, message.sender)}</span><time dateTime={new Date(message.createdAt).toISOString()} title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</time>{message.edited && <em>edited</em>}{mentionsMe && <em className="mentioned-you"><AtSign size={10} /> Mentioned you</em>}</div>
                 <div className="message-bubble">
-                  {isEditing ? <div className="edit-form"><textarea id={`edit-message-${message.id}`} name="edited-message" aria-label="Edit message" value={editBody} onChange={(event) => setEditBody(event.target.value)} autoFocus /><div><button className="text-button" onClick={() => setEditing(null)}>Cancel</button><button className="compact-button is-active" onClick={() => void props.onEdit(message.id, editBody).then(() => setEditing(null))}>Save</button></div></div> : <p>{messageBody(message.body, props.identityProfiles)}</p>}
+                  {message.replyTo && <button className="quoted-message" onClick={() => { setSearchQuery(''); requestAnimationFrame(() => document.getElementById(`message-${message.replyTo}`)?.scrollIntoView({ block: 'center' })) }}><Reply size={14} /><span><strong>{parent ? identityName(props.identityProfiles, parent.sender) : 'Earlier message'}</strong><small>{parent ? displayMessageText(parent.body || 'Attachment', props.identityProfiles) : 'Load older history to see this reply'}</small></span></button>}
+                  {isEditing ? <div className="edit-form"><textarea id={`edit-message-${message.id}`} name="edited-message" aria-label="Edit message" value={editBody} onChange={(event) => setEditBody(event.target.value)} autoFocus /><div><button className="text-button" onClick={() => setEditing(null)}>Cancel</button><button className="compact-button is-active" onClick={() => void props.onEdit(message.id, editBody).then(() => setEditing(null))}>Save</button></div></div> : <MessageText body={message.body} profiles={props.identityProfiles} />}
                   {message.attachments.map((attachment, index) => isInlineImage(attachment) || isInlineAudio(attachment)
                     ? <EncryptedMediaAttachment attachment={attachment} message={message} index={index} media={isInlineImage(attachment) ? 'image' : 'audio'} onOpen={props.onOpenAttachment} key={attachment.id} />
                     : <button className="attachment-card" key={attachment.id} onClick={() => void props.onDownload(message, index)}><FileLock2 size={19} /><span><strong>{attachment.name}</strong><small>{Math.max(1, Math.round(attachment.size / 1024))} KB · CurvePoint encrypted</small></span><Download size={16} /></button>)}
                 </div>
-                {message.reactions.length > 0 && <div className="reaction-list">{[...new Set(message.reactions.map((reaction) => reaction.emoji))].map((emoji) => <button key={emoji} onClick={() => void props.onReact(message.id, emoji)}>{emoji} {message.reactions.filter((reaction) => reaction.emoji === emoji).length}</button>)}</div>}
+                {message.reactions.length > 0 && <div className="reaction-list">{[...new Set(message.reactions.map((reaction) => reaction.emoji))].map((emoji) => <button key={emoji} aria-pressed={message.reactions.some((reaction) => reaction.sender === identityKey && reaction.emoji === emoji)} onClick={() => void props.onReact(message.id, emoji)}>{emoji} {message.reactions.filter((reaction) => reaction.emoji === emoji).length}</button>)}</div>}
                 <div className="message-actions">
-                  <button onClick={() => void props.onReact(message.id, '👍')} aria-label="React"><SmilePlus size={14} /> React</button>
+                  <button onClick={() => { setReplying(message); composerInput.current?.focus() }} aria-label="Reply to message"><Reply size={14} /> Reply</button>
+                  <button onClick={() => setReactionPicker(reactionPicker === message.id ? null : message.id)} aria-label="React" aria-expanded={reactionPicker === message.id}><SmilePlus size={14} /> React</button>
+                  {reactionPicker === message.id && <div className="reaction-picker" role="group" aria-label="Choose a reaction">{['👍', '❤️', '😂', '🎉', '👀', '✅'].map((emoji) => <button key={emoji} aria-label={`React ${emoji}`} onClick={() => { setReactionPicker(null); void props.onReact(message.id, emoji) }}>{emoji}</button>)}</div>}
                   {mine && !isEditing && <button onClick={() => { setEditing(message.id); setEditBody(message.body) }}><MoreHorizontal size={14} /> Edit</button>}
                   {mine && <button className="danger-text" onClick={() => window.confirm('Delete this message for everyone in the current conversation history?') && void props.onDelete(message.id)}><Trash2 size={14} /> Delete</button>}
                 </div>
-                {mine && deliveryStates[message.id] && <div className={`delivery-state ${deliveryStates[message.id]}`}><CheckCheck size={12} />{deliveryStates[message.id] === 'sending' ? 'Sending live…' : deliveryStates[message.id] === 'live' ? 'Delivered live · saving' : deliveryStates[message.id] === 'retrying' ? 'Saved locally · retrying' : 'Saved on-chain'}</div>}
+                {mine && deliveryStates[message.id] && <div className={`delivery-state ${deliveryStates[message.id]}`}><CheckCheck size={12} />{deliveryStates[message.id] === 'sending' ? 'Sending…' : deliveryStates[message.id] === 'live' ? 'Forwarded · saving history' : deliveryStates[message.id] === 'retrying' ? 'Saved locally · retrying' : 'History saved'}</div>}
               </div>
             </article>
+            </Fragment>
           )
         })}
       </div>
 
-      <footer className="composer-shell">
+      <footer className="composer-shell" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault() }} onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)) }}>
+        {newMessages && <button className="jump-latest" onClick={jumpToLatest}><ArrowDown size={15} /> New messages · jump to latest</button>}
+        {replying && <div className="reply-draft"><Reply size={17} /><span><strong>Replying to {identityName(props.identityProfiles, replying.sender)}</strong><small>{displayMessageText(replying.body || 'Attachment', props.identityProfiles)}</small></span><button className="icon-button" onClick={() => setReplying(null)} aria-label="Cancel reply"><X size={16} /></button></div>}
+        {sendError && <div className="composer-error" role="alert">{sendError}</div>}
         <div className={`typing-indicator ${typingPeers.length > 0 ? 'visible' : ''}`} aria-live="polite">
           <span className="typing-avatars">{typingPeers.slice(0, 3).map((peer) => <i key={peer.identityKey}>{identityInitials(props.identityProfiles, peer.identityKey)}</i>)}</span>
           <span>{typingPeers.length === 1 ? `${identityName(props.identityProfiles, typingPeers[0].identityKey)} is typing` : typingPeers.length === 2 ? 'Two people are typing' : typingPeers.length > 2 ? `${typingPeers.length} people are typing` : ''}</span>
@@ -321,10 +381,12 @@ export function ConversationPane(props: Props) {
             {mentionCandidates.length === 0 && <p>No current member matches “{mentionDraft.query}”.</p>}
           </div>}
           <div className="composer">
-          <input id="message-attachments" name="message-attachments" ref={fileInput} type="file" multiple hidden onChange={(event) => { setFiles((current) => [...current, ...Array.from(event.target.files ?? [])]); event.currentTarget.value = '' }} />
+          <input id="message-attachments" name="message-attachments" ref={fileInput} type="file" multiple hidden onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = '' }} />
           <button className="icon-button attach-button" onClick={() => fileInput.current?.click()} aria-label="Attach encrypted files"><Paperclip size={20} /></button>
           <button className={`icon-button record-button ${isRecording ? 'recording' : ''}`} disabled={isRecording || busy} onClick={() => void startRecording()} aria-label="Record a private voice message" title="Record a private voice message"><Mic size={19} /></button>
-          <textarea id="message-composer" name="message" ref={composerInput} value={draft} maxLength={20_000} onChange={(event) => { setDraft(event.target.value); setMentionDraft(activeMentionDraft(event.target.value, event.target.selectionStart)); setMentionSelection(0); onTyping(event.target.value.trim().length > 0) }} onClick={(event) => setMentionDraft(activeMentionDraft(event.currentTarget.value, event.currentTarget.selectionStart))} onBlur={() => { onTyping(false); setTimeout(() => setMentionDraft(null), 100) }} onKeyDown={(event) => {
+          <textarea id="message-composer" name="message" aria-label={`Message ${displayTitle}`} ref={composerInput} onPaste={(event) => { const pasted = Array.from(event.clipboardData.files); if (pasted.length) { event.preventDefault(); addFiles(pasted) } }} value={draft} maxLength={20_000} onChange={(event) => { setDraft(event.target.value); setMentionDraft(activeMentionDraft(event.target.value, event.target.selectionStart)); setMentionSelection(0); onTyping(event.target.value.trim().length > 0) }} onClick={(event) => setMentionDraft(activeMentionDraft(event.currentTarget.value, event.currentTarget.selectionStart))} onBlur={() => { onTyping(false); setTimeout(() => setMentionDraft(null), 100) }} onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return
+            if (event.key === 'Escape') { setReplying(null); setMentionDraft(null); return }
             if (mentionDraft && mentionCandidates.length > 0) {
               if (event.key === 'ArrowDown') { event.preventDefault(); setMentionSelection((current) => (current + 1) % mentionCandidates.length); return }
               if (event.key === 'ArrowUp') { event.preventDefault(); setMentionSelection((current) => (current - 1 + mentionCandidates.length) % mentionCandidates.length); return }
@@ -332,11 +394,11 @@ export function ConversationPane(props: Props) {
               if (event.key === 'Tab' || event.key === 'Enter') { event.preventDefault(); chooseMention(mentionCandidates[mentionSelection] ?? mentionCandidates[0]); return }
             }
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit() }
-          }} placeholder={`Message ${displayTitle} · type @< to mention`} rows={1} />
+          }} placeholder={`Message ${displayTitle} · @ to mention`} rows={1} />
           <button className="send-button" disabled={busy || isRecording || (!draft.trim() && files.length === 0)} onClick={() => void submit()} aria-label="Send message"><Send size={19} /></button>
           </div>
         </div>
-        <div className="composer-note"><LockKeyhole size={12} /> Encrypted before leaving this device <span><CheckCheck size={12} /> Durable outbox</span></div>
+        <div className="composer-note"><LockKeyhole size={12} /> Encrypted before leaving this device <span>Enter to send · Shift + Enter for a new line</span></div>
       </footer>
     </main>
   )

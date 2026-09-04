@@ -6,6 +6,7 @@ import { ControlInbox } from './v2/components/ControlInbox'
 import { CallOverlay } from './v2/components/CallOverlay'
 import { applyConversationEvent } from './v2/domain/materialize'
 import { conversationName } from './v2/domain/presentation'
+import type { ConversationActivity } from './v2/storage/inbox'
 import type { ConversationEvent, ConversationSecret, ConversationView, MaterializedMessage, MessageDeliveryState } from './v2/domain/types'
 import type { PendingInvite, PendingMembershipUpdate, RealtimePeer, TypingPeer, WorkspaceRoomUpdate } from './v2/realtime/messaging'
 import { idleCallSnapshot, type CallSnapshot, type MeetingRoomSnapshot } from './v2/realtime/meetingCalling'
@@ -37,8 +38,10 @@ function currentEpoch(secret: ConversationSecret) {
 
 function App() {
   const { session, retry } = useWalletSession()
+  const [activity, setActivity] = useState<Record<string, ConversationActivity>>({})
   const [conversations, setConversations] = useState<ConversationSecret[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [viewConversationId, setViewConversationId] = useState<string | null>(null)
   const [view, setView] = useState<ConversationView | null>(null)
   const [invites, setInvites] = useState<PendingInvite[]>([])
   const [updates, setUpdates] = useState<PendingMembershipUpdate[]>([])
@@ -93,6 +96,7 @@ function App() {
     if (!service) return []
     const latest = await service.list()
     setConversations(latest)
+    setActivity(Object.fromEntries(latest.map((secret) => [secret.conversationId, service.inbox.activity(secret)])))
     setActiveId((current) => current && latest.some((item) => item.conversationId === current)
       ? current
       : (latest.find((item) => !item.preferences.archived)?.conversationId ?? null))
@@ -114,7 +118,16 @@ function App() {
       .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))) {
       nextView = applyConversationEvent(nextView, secret, event)
     }
-    setView(nextView)
+    if (activeSecretRef.current?.conversationId === secret.conversationId) { setView(nextView); setViewConversationId(secret.conversationId) }
+  }, [service])
+  const lastRead = useRef<Record<string, number>>({})
+  const markRead = useCallback((through: number) => {
+    const secret = activeSecretRef.current
+    if (!service || !secret || through <= (lastRead.current[secret.conversationId] ?? 0)) return
+    lastRead.current[secret.conversationId] = through
+    void service.inbox.markRead(secret, through).then(() => {
+      setActivity((current) => ({ ...current, [secret.conversationId]: service.inbox.activity(secret) }))
+    }).catch(() => { delete lastRead.current[secret.conversationId]; setError('Read state could not be saved on this device.') })
   }, [service])
   const publishTyping = useCallback((active: boolean) => service?.publishTyping(active), [service])
 
@@ -200,7 +213,11 @@ function App() {
     const scan = async () => {
       if (scanning || document.visibilityState === 'hidden') return
       scanning = true
-      try { await applyUpdates(await service.discoverWorkspaceRooms(conversations, activeSecretRef.current?.conversationId)) } finally { scanning = false }
+      try {
+        await applyUpdates(await service.discoverWorkspaceRooms(conversations, activeSecretRef.current?.conversationId))
+        if (!cancelled) setActivity(Object.fromEntries(conversations.map((secret) => [secret.conversationId, service.inbox.activity(secret)])))
+      } catch { if (!cancelled) setError('Background inbox sync needs a retry. Undelivered messages remain on the server.') }
+      finally { scanning = false }
     }
     const visible = () => { if (document.visibilityState === 'visible') void scan() }
     void scan()
@@ -219,6 +236,7 @@ function App() {
     let cancelled = false
     liveEventsRef.current.clear()
     setLoading(true)
+    setView(null)
     setLiveState('connecting')
     setOnlinePeers([])
     setTypingPeers([])
@@ -230,9 +248,11 @@ function App() {
       setLoading(false)
       await service.openLive(sessionSecret, {
         onSync: async () => { if (!cancelled) await reloadActive(sessionSecret) },
+        onError: (message) => { if (!cancelled) setError(message) },
         onState: (state) => { if (!cancelled) setLiveState(state) },
         onEvent: (event) => {
           if (cancelled) return
+          setActivity((current) => ({ ...current, [sessionSecret.conversationId]: service.inbox.activity(sessionSecret) }))
           liveEventsRef.current.set(event.id, event)
           if (liveEventsRef.current.size > 1_000) liveEventsRef.current.delete(liveEventsRef.current.keys().next().value!)
           setView((current) => current ? applyConversationEvent(current, sessionSecret, event) : current)
@@ -256,6 +276,9 @@ function App() {
     })
     return () => { cancelled = true; void service.closeLive() }
   }, [activeEpoch, activeId, reloadActive, service])
+
+  const unreadTotal = conversations.reduce((count, secret) => count + (secret.preferences.muted || secret.preferences.archived ? 0 : activity[secret.conversationId]?.unread ?? 0), 0)
+  useEffect(() => { document.title = `${unreadTotal ? `(${unreadTotal}) ` : ''}Convo · Private Messenger` }, [unreadTotal])
 
   if (session.status !== 'ready') {
     return (
@@ -286,12 +309,12 @@ function App() {
       {error && <div className="error-banner" role="alert"><AlertTriangle size={16} /><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss"><X size={16} /></button></div>}
       {workspaceRoomEntry && workspaceRoomConversation && <button className="workspace-room-alert" onClick={() => setActiveId(workspaceRoomEntry[0])}><span className="meeting-room-pulse"><Video size={16} /></span><span><strong>{conversationName(workspaceRoomConversation, session.identityKey, identityProfiles)}</strong><small>{workspaceRoomEntry[1].media === 'video' ? 'Video' : 'Audio'} room is live</small></span><b>View room</b></button>}
       <div className="app-grid">
-        <ConversationRail conversations={conversations} identityKey={session.identityKey} identityProfiles={identityProfiles} activeId={activeId} pendingCount={invites.length + updates.length} meetingRooms={workspaceRooms} loading={loading && conversations.length === 0} open={railOpen} onClose={() => setRailOpen(false)} onSelect={setActiveId} onNew={() => setNewOpen(true)} onOpenInvites={() => setInboxOpen(true)} onRestore={(conversation) => runBusy(async () => { if (service) { await service.setPreferences(conversation, { archived: false }); await refreshIndex() } })} />
+        <ConversationRail conversations={conversations} activity={activity} identityKey={session.identityKey} identityProfiles={identityProfiles} activeId={activeId} pendingCount={invites.length + updates.length} meetingRooms={workspaceRooms} loading={loading && conversations.length === 0} open={railOpen} onClose={() => setRailOpen(false)} onSelect={setActiveId} onNew={() => setNewOpen(true)} onOpenInvites={() => setInboxOpen(true)} onRestore={(conversation) => runBusy(async () => { if (service) { await service.setPreferences(conversation, { archived: false }); await refreshIndex() } })} />
         {railOpen && <button className="rail-scrim" aria-label="Close conversations" onClick={() => setRailOpen(false)} />}
         <ConversationPane
           identityKey={session.identityKey}
           secret={activeSecret}
-          view={view}
+          view={viewConversationId === activeId ? view : null}
           loading={loading}
           busy={busy}
           liveState={liveState}
@@ -305,6 +328,7 @@ function App() {
           onOpenDetails={() => setDetailsOpen(true)}
           onLoadHistory={() => activeSecret ? runBusy(() => reloadActive(activeSecret, Number.MAX_SAFE_INTEGER)) : Promise.resolve()}
           onTyping={publishTyping}
+          onRead={markRead}
           onCall={async (peers, media) => {
             if (!service) return
             setError('')
@@ -317,12 +341,17 @@ function App() {
             try { await service.joinMeetingRoom() }
             catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not join the meeting room'); throw reason }
           }}
-          onSend={(body, files) => runBusy(async () => {
+          onSend={(body, files, replyTo) => runBusy(async () => {
             if (!service || !activeSecret || !attachments) return
             const epoch = currentEpoch(activeSecret)
             const uploaded = files.length ? await attachments.upload(files, activeSecret.conversationId, epoch) : undefined
-            await service.sendMessage(activeSecret, body, uploaded)
-            await afterMutation(activeSecret)
+            const event = await service.sendMessage(activeSecret, body, { ...uploaded, replyTo })
+            if (activeSecretRef.current?.conversationId === activeSecret.conversationId) {
+              setView((current) => current ? applyConversationEvent(current, activeSecret, event) : current)
+            }
+            // Once queued, a later history/index error must not restore the draft
+            // and encourage the user to send a second copy of the same message.
+            void refreshIndex().catch(() => setError('Message queued. The conversation list will refresh when sync recovers.'))
           })}
           onEdit={(messageId, body) => runBusy(async () => { if (service && activeSecret) { await service.editMessage(activeSecret, messageId, body); await afterMutation(activeSecret) } })}
           onDelete={(messageId) => runBusy(async () => { if (service && activeSecret) { await service.deleteMessage(activeSecret, messageId); await afterMutation(activeSecret) } })}

@@ -15,7 +15,7 @@ export function IdentityAvatar({ identityKey, profiles, className, fallback }: P
   useEffect(() => setFailed(false), [avatarURL])
 
   return (
-    <span className={`${className} identity-avatar ${avatarURL && !failed ? 'has-image' : ''}`}>
+    <span style={identityKey ? { backgroundColor: `hsl(${parseInt(identityKey.slice(-6), 16) % 360} 20% 23%)`, color: `hsl(${parseInt(identityKey.slice(-6), 16) % 360} 45% 84%)` } : undefined} className={`${className} identity-avatar ${avatarURL && !failed ? 'has-image' : ''}`}>
       {avatarURL && !failed
         ? <img src={avatarURL} alt="" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
         : (fallback ?? identityInitials(profiles, identityKey))}

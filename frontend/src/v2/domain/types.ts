@@ -166,6 +166,7 @@ export interface OutboxItem {
   conversationId: string
   epoch: number
   encryptedEvent: string
+  encryptedReceipts?: string
   state: DeliveryState
   attempts: number
   updatedAt: number

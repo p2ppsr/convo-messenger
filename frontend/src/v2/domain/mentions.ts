@@ -11,9 +11,9 @@ export interface MentionDraft {
 
 export function activeMentionDraft(value: string, cursor: number): MentionDraft | null {
   const before = value.slice(0, cursor)
-  const match = /(?:^|\s)@<([^>\n]{0,100})$/.exec(before)
+  const match = /(?:^|\s)@<?([^>\n@]{0,100})$/.exec(before)
   if (!match) return null
-  const markerOffset = match[0].lastIndexOf('@<')
+  const markerOffset = match[0].lastIndexOf('@')
   return { start: match.index + markerOffset, end: cursor, query: match[1].trim().toLocaleLowerCase() }
 }
 
