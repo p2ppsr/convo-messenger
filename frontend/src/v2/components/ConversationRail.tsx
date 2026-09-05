@@ -1,11 +1,10 @@
 import { useMemo, useState } from 'react'
-import type { ReactNode } from 'react'
-import { Archive, ArchiveRestore, AtSign, BellOff, ChevronDown, Hash, Heart, Inbox, MessageCircle, Plus, Search, ShieldCheck, Video, X } from 'lucide-react'
+import { Archive, ArchiveRestore, BellOff, Hash, Heart, Inbox, SquarePen, Search, ShieldCheck, Video, X } from 'lucide-react'
 import type { ConversationActivity } from '../storage/inbox'
 import { displayMessageText } from '../domain/mentions'
 import { identityName } from '../hooks/useIdentityProfiles'
 import type { ConversationSecret } from '../domain/types'
-import { conversationName, conversationSearchText, currentMembers, directPeer } from '../domain/presentation'
+import { conversationName, conversationSearchText, directPeer } from '../domain/presentation'
 import type { IdentityProfileMap } from '../hooks/useIdentityProfiles'
 import { IdentityAvatar } from './IdentityAvatar'
 import type { MeetingRoomSnapshot } from '../realtime/meetingCalling'
@@ -48,13 +47,12 @@ export function ConversationRail(props: Props) {
   const groups = filtered.filter((conversation) => conversation.kind === 'group')
   const archivedCount = conversations.filter((conversation) => conversation.preferences.archived).length
 
-  const section = (title: string, icon: ReactNode, items: ConversationSecret[]) => items.length > 0 && (
+  const section = (title: string, items: ConversationSecret[]) => items.length > 0 && (
     <section className="rail-section" aria-label={title}>
-      <div className="rail-section-heading"><span>{icon}{title}</span><b>{items.length}</b><ChevronDown size={14} /></div>
+      <h2 className="rail-section-heading">{title}</h2>
       {items.map((conversation) => {
         const summary = activity?.[conversation.conversationId]
         const unread = summary?.unread ?? 0
-        const members = currentMembers(conversation)
         const peer = directPeer(conversation, identityKey)
         const displayName = conversationName(conversation, identityKey, identityProfiles)
         return (
@@ -69,7 +67,7 @@ export function ConversationRail(props: Props) {
                 : <span className="conversation-avatar group-avatar"><Hash size={18} /></span>}
               <span className="conversation-copy">
                 <span className="conversation-title">{displayName}</span>
-                <span className="conversation-meta">{summary?.body ? displayMessageText(summary.body, identityProfiles) : conversation.kind === 'direct' ? <><AtSign size={12} /> Direct message</> : <><ShieldCheck size={12} /> {members.length} private members</>}</span>
+                <span className="conversation-meta">{summary?.body ? displayMessageText(summary.body, identityProfiles) : null}</span>
               </span>
               <span className="conversation-flags">
                 {unread > 0 && <b className="unread-badge" aria-label={`${unread} unread messages`}>{unread > 99 ? '99+' : unread}</b>}
@@ -88,17 +86,15 @@ export function ConversationRail(props: Props) {
   return (
     <aside className={`conversation-rail ${open ? 'is-open' : ''}`} aria-label="Conversations">
       <div className="rail-brand">
-        <div className="brand-mark"><MessageCircle size={22} strokeWidth={2.4} /></div>
-        <div><strong>convo<span className="brand-dot">.</span></strong><span>Good conversations start here</span></div>
-        <button className="icon-button rail-close" onClick={onClose} aria-label="Close conversations"><X size={20} /></button>
+        <strong>convo<span className="brand-dot">.</span></strong>
+        <div className="rail-header-actions">
+          <button className="rail-action" onClick={onOpenInvites} aria-label={`Invitations${pendingCount > 0 ? `, ${pendingCount} pending` : ''}`} title="Invitations">
+            <Inbox size={18} />{pendingCount > 0 && <b className="rail-action-badge" aria-hidden="true">{pendingCount > 99 ? '99+' : pendingCount}</b>}
+          </button>
+          <button className="rail-action rail-compose" disabled={loading} onClick={onNew} aria-label="New conversation" title="New conversation"><SquarePen size={18} /></button>
+          <button className="rail-action rail-close" onClick={onClose} aria-label="Close conversations"><X size={20} /></button>
+        </div>
       </div>
-
-      <div className="workspace-label"><span className="workspace-monogram"><MessageCircle size={17} /></span><span><strong>Your workspace</strong><small>Private by default</small></span><ShieldCheck size={17} /></div>
-      <button className="new-conversation" disabled={loading} onClick={onNew}><Plus size={18} /> New conversation</button>
-      <button className="inbox-button" onClick={onOpenInvites}>
-        <span><Inbox size={18} /> Private invitations</span>
-        {pendingCount > 0 && <b>{pendingCount}</b>}
-      </button>
 
       <label className="rail-search" htmlFor="conversation-search">
         <Search size={17} />
@@ -106,10 +102,10 @@ export function ConversationRail(props: Props) {
         {query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={14} /></button>}
       </label>
 
-      <div className="rail-tabs" role="group" aria-label="Conversation filter"><button aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>All conversations</button><button aria-pressed={filter === 'unread'} onClick={() => setFilter('unread')}>Unread {unreadTotal > 0 && <b>{unreadTotal}</b>}</button></div>
+      <div className="rail-tabs" role="group" aria-label="Conversation filter"><button aria-pressed={filter === 'all'} onClick={() => setFilter('all')} aria-label="All conversations">All</button><button aria-pressed={filter === 'unread'} onClick={() => setFilter('unread')}>Unread {unreadTotal > 0 && <b>{unreadTotal}</b>}</button></div>
       <div className="conversation-list">
-        {section('Groups', <Hash size={14} />, groups)}
-        {section('Direct messages', <AtSign size={14} />, directMessages)}
+        {section('Groups', groups)}
+        {section('Direct messages', directMessages)}
         {loading && conversations.length === 0 && (
           <div className="rail-skeleton" aria-hidden="true">{[0, 1, 2, 3].map((row) => <div key={row}><i /><span><b /><small /></span></div>)}</div>
         )}
@@ -117,10 +113,12 @@ export function ConversationRail(props: Props) {
           <div className="rail-empty"><ShieldCheck size={24} /><p>{cleanQuery ? 'No matching conversations.' : showArchived ? 'No archived conversations.' : filter === 'unread' ? 'You’re all caught up.' : 'No conversations yet.'}</p><span>{cleanQuery ? 'Try a person, group, or identity key.' : showArchived ? 'Archived chats will appear here.' : 'Start a direct message or private group.'}</span></div>
         )}
       </div>
-      <button className={`archive-toggle ${showArchived ? 'is-active' : ''}`} onClick={() => { setShowArchived((current) => !current); setQuery('') }}>
-        <Archive size={15} /><span>{showArchived ? 'Back to conversations' : 'Archived'}</span>{archivedCount > 0 && <b>{archivedCount}</b>}
-      </button>
-      <div className="rail-account"><IdentityAvatar className="account-avatar" identityKey={identityKey} profiles={identityProfiles} /><span><strong>{identityName(identityProfiles, identityKey)}</strong><small><i /> Wallet connected</small></span><ShieldCheck size={17} /></div>
+      <div className="rail-footer">
+        <div className="rail-account"><IdentityAvatar className="account-avatar" identityKey={identityKey} profiles={identityProfiles} /><strong>{identityName(identityProfiles, identityKey)}</strong><i className="account-connected" aria-label="Wallet connected" title="Wallet connected" /></div>
+        <button className={`rail-action archive-toggle ${showArchived ? 'is-active' : ''}`} onClick={() => { setShowArchived((current) => !current); setQuery('') }} aria-label={showArchived ? 'Back to conversations' : `Archived conversations${archivedCount ? `, ${archivedCount}` : ''}`} title={showArchived ? 'Back to conversations' : 'Archived conversations'} aria-pressed={showArchived}>
+          <Archive size={17} />
+        </button>
+      </div>
     </aside>
   )
 }
