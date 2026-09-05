@@ -669,3 +669,45 @@ body { background: var(--canvas); }
 .history-status, .history-more { text-align: center; color: var(--muted); font-size: 12px; padding: 12px; }
 .history-status button, .history-more { background: none; border: 0; color: var(--accent); cursor: pointer; }
 .history-more { display: block; margin: 0 auto; }
+
+/* Conversation navigation: a compact header and a quiet, readable list. */
+.conversation-rail { padding: 16px 16px 10px; }
+.rail-brand { min-height: 44px; padding: 0 2px; margin-bottom: 16px; justify-content: space-between; }
+.rail-brand strong { font-size: 28px; }
+.rail-header-actions { display: flex; align-items: center; gap: 4px; }
+.rail-action { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 1px solid transparent; border-radius: 8px; color: var(--muted); background: transparent; cursor: pointer; flex: 0 0 auto; }
+.rail-action:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.rail-action:disabled { opacity: .4; cursor: not-allowed; }
+.rail-compose { color: var(--accent); background: var(--accent-soft); }
+.rail-compose:hover { background: rgba(155,128,255,.2); }
+.rail-action-badge { position: absolute; top: -2px; right: -2px; min-width: 16px; height: 16px; display: grid; place-items: center; padding: 0 3px; border-radius: 8px; background: var(--accent); color: #191127; font-size: 9px; line-height: 1; }
+.rail-action.rail-close { display: none; margin: 0; }
+.rail-search { min-height: 38px; background: rgba(255,255,255,.025); border-color: var(--line); border-radius: 8px; }
+.rail-search:focus-within { border-color: #80709f; box-shadow: 0 0 0 2px var(--accent-soft); }
+.rail-tabs { margin-top: 10px; gap: 4px; padding-bottom: 0; border: 0; }
+.rail-tabs button { min-height: 32px; padding: 6px 12px; font-size: 12px; }
+.rail-tabs button[aria-pressed=true] { background: rgba(255,255,255,.055); }
+.conversation-list { margin-top: 18px; }
+.rail-section { margin-bottom: 22px; }
+.rail-section-heading { min-height: 24px; margin: 0 0 6px; padding: 0 10px; color: #8f8e9f; font-size: 11px; font-weight: 550; letter-spacing: 0; text-transform: none; }
+.conversation-item { min-height: 44px; grid-template-columns: 28px minmax(0,1fr) auto; gap: 10px; padding: 8px 10px; border-color: transparent; border-radius: 7px; }
+.conversation-item.is-active { background: rgba(155,128,255,.12); border-color: transparent; box-shadow: none; }
+.conversation-item.is-active .conversation-title { color: #e4d9ff; }
+.conversation-avatar { width: 28px; height: 28px; border-radius: 9px; font-size: 10px; }
+.conversation-avatar.group-avatar { border: 0; background: transparent; color: #9593a7; }
+.conversation-item.is-active .group-avatar { color: var(--accent); }
+.conversation-title { font-size: 13px; font-weight: 500; }
+.conversation-meta { margin-top: 3px; font-size: 11px; }
+.conversation-meta:empty { display: none; }
+.rail-footer { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; margin-top: 4px; }
+.rail-account { flex: 1; min-width: 0; margin: 0; padding: 0 2px; gap: 9px; border: 0; }
+.rail-account .account-avatar { flex: 0 0 auto; width: 28px; height: 28px; border-radius: 9px; font-size: 10px; }
+.rail-account > strong { flex: 0 1 auto; min-width: 0; font-size: 11px; font-weight: 500; white-space: nowrap; }
+.rail-account .account-connected { width: 5px; height: 5px; flex: 0 0 auto; margin: 0; }
+.rail-footer .archive-toggle { margin: 0; min-height: 36px; color: var(--muted); }
+.rail-footer .archive-toggle.is-active { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+@media (max-width: 820px) {
+  .rail-action { width: 40px; height: 44px; }
+  .rail-action.rail-close { display: inline-flex; }
+  .rail-tabs button { min-height: 40px; }
+}
